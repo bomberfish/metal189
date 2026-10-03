@@ -3,6 +3,7 @@
 #import "engine.h"
 #import "resources.h"
 #import "advanced.h"
+#import "raytrace.h"
 
 namespace m189 {
 void texGetImage(int id, int level, int format, int type, void* dst, size_t size);
@@ -124,6 +125,7 @@ static void JNICALL n_advSetFeatures(JNIEnv*, jclass, jint f) { advancedSetFeatu
 static void JNICALL n_advSetTables(JNIEnv*, jclass, jlong mat, jlong emi) {
     @autoreleasepool { advancedSetTables((const uint8_t*)ptr(mat), (const uint8_t*)ptr(emi)); }
 }
+static jboolean JNICALL n_rtSupported(JNIEnv*, jclass) { return rtAvailable(); }
 static void JNICALL n_renderbufferStorage(JNIEnv*, jclass, jint id, jint fmt, jint w, jint h) { @autoreleasepool { renderbufferStorage(id, fmt, w, h); } }
 
 static JNINativeMethod kMethods[] = {
@@ -164,6 +166,7 @@ static JNINativeMethod kMethods[] = {
     {(char*)"advSetEnabled", (char*)"(Z)V", (void*)n_advSetEnabled},
     {(char*)"advSetFeatures", (char*)"(I)V", (void*)n_advSetFeatures},
     {(char*)"advSetTables", (char*)"(JJ)V", (void*)n_advSetTables},
+    {(char*)"rtSupported", (char*)"()Z", (void*)n_rtSupported},
 };
 
 // The Java side calls System.load on this library and then Native.register(),

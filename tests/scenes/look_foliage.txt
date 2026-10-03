@@ -1,0 +1,25 @@
+sleep 3
+world flat2 42 flat
+waitWorld
+fly
+toggle
+cmd /gamerule doDaylightCycle false
+cmd /time set 4500
+cmd /weather clear
+cmd /tp @p -199.5 7 -189.5 180 30
+sleep 4
+cmd /kill @e[type=!Player]
+cmd /fill -212 4 -206 -188 12 -186 air
+cmd /fill -212 3 -206 -188 3 -186 grass
+cmd /fill -206 4 -200 -193 4 -193 tallgrass 1
+cmd /fill -206 4 -197 -193 4 -197 red_flower 0
+cmd /fill -206 4 -195 -193 4 -195 double_plant 2
+cmd /fill -206 5 -195 -193 5 -195 double_plant 10
+cmd /fill -204 4 -203 -201 7 -203 leaves 0
+cmd /fill -198 4 -203 -195 4 -203 wheat 7
+cmd /fill -198 4 -204 -195 6 -204 log 0
+sleep 3
+capture CAPTURE_A
+sleep 0.4
+capture CAPTURE_B
+quit

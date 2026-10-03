@@ -23,6 +23,8 @@ struct RtScene {
 bool rtAvailable();
 void rtSectionChanged(int sid);
 void rtSectionDeleted(int sid);
+// Frees every acceleration structure; sections are rebuilt on demand afterwards.
+void rtRelease();
 
 // Builds pending section BLASes (budgeted) and, when needed, the TLAS over sections
 // within `radius` blocks of the camera. Returns false when ray tracing is unavailable

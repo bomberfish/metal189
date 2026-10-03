@@ -49,6 +49,9 @@ bool advancedEnabled();
 void advancedSetEnabled(bool on);
 void advancedSetFeatures(uint32_t flags);
 void advancedSetTables(const uint8_t* materials, const uint8_t* emissions);
+// Runtime parameters (Pipeline.java OPT_*): 10 shadow resolution, 11 shadow distance,
+// 12 exposure %, 13 bloom strength %, 14 release ray tracing resources, 15 waving foliage.
+void advancedSetParam(int key, int value);
 
 // Renders the collected world into `color`/`depth` (GL row order).
 void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> color, id<MTLTexture> depth);

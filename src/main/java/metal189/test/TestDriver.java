@@ -194,6 +194,8 @@ public final class TestDriver {
                 else if ("inventory".equals(a[1]) && mc.thePlayer != null) mc.displayGuiScreen(new net.minecraft.client.gui.inventory.GuiContainerCreative(mc.thePlayer));
                 else if ("survival".equals(a[1]) && mc.thePlayer != null) mc.displayGuiScreen(new net.minecraft.client.gui.inventory.GuiInventory(mc.thePlayer));
                 else if ("options".equals(a[1])) mc.displayGuiScreen(new net.minecraft.client.gui.GuiOptions(null, mc.gameSettings));
+                else if ("video".equals(a[1])) mc.displayGuiScreen(new net.minecraft.client.gui.GuiVideoSettings(null, mc.gameSettings));
+                else if ("metal189".equals(a[1])) mc.displayGuiScreen(new metal189.gui.GuiMetal189(null));
                 return true;
             case "f3":
                 mc.gameSettings.showDebugInfo = !mc.gameSettings.showDebugInfo;
@@ -203,6 +205,10 @@ public final class TestDriver {
                 return true;
             case "slot":
                 if (mc.thePlayer != null) mc.thePlayer.inventory.currentItem = Integer.parseInt(a[1]);
+                return true;
+            case "toggle":
+                // same path as the toggle keybind (saves config/metal189.properties)
+                metal189.world.Pipeline.toggle();
                 return true;
             case "info":
                 if (mc.thePlayer != null) {

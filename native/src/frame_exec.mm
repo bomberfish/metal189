@@ -31,7 +31,7 @@ void setOption(int key, int value) {
         case 2: g_optPresent = value != 0; break;
         case 3: g_optGpuStats = value != 0; break;
         case 4: g_optAdvDebug = value; break;
-        default: break;
+        default: if (key >= 10) advancedSetParam(key, value); break;
     }
 }
 

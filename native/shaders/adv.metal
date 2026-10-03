@@ -46,7 +46,9 @@ static inline float hash12(float2 p) {
     return fract((p3.x + p3.y) * p3.z);
 }
 
-// Material ids (see Materials.java): 0 default, 1 foliage, 2 water, 3 emissive, 4 metal, 5 glass, 6 lava, 7 entity
+// Material ids (see Materials.java): 0 default, 1 leaves/vines, 2 water, 3 emissive, 4 metal, 5 glass, 6 lava,
+// 7 entity, 8 plant, 9 double plant (lower half), 10 double plant (upper half)
+static inline bool isFoliage(uint m) { return m == 1 || m >= 8; }
 struct GBufferOut {
     float4 albedo [[color(0)]];   // rgb: albedo (gamma), a: baked AO
     float4 normal [[color(1)]];   // xyz: eye-space normal, w: emission
@@ -77,12 +79,25 @@ static float3 quadNormal(device const BlockVertex* verts, uint vid) {
     return l > 1e-12 ? n / l : float3(0, 1, 0);
 }
 
-// Waving foliage, applied identically in G-buffer and shadow passes.
-static float3 wave(float3 local, float3 sectionWorld, float time, uint material, bool top) {
-    if (!ac_waving || material != 1) return local;
-    float3 w = local + sectionWorld;
-    float s = sin(time * 1.6 + w.x * 0.7 + w.z * 0.9) * 0.04 + sin(time * 2.7 + w.x * 1.3 - w.z * 0.6) * 0.025;
-    return local + float3(s, 0, s * 0.7) * (top ? 1.0 : 0.35);
+// Waving foliage, applied identically in G-buffer and shadow passes. The phase comes
+// from the absolute world position (camera position mod 1024 + camera-relative offset)
+// so it does not drift as the camera moves. Plants bend from the base: only the top
+// vertices of a quad move (top = smallest v in the quad's sprite); double plants move
+// half as much at the seam so both halves stay joined. Leaves sway as a whole.
+static float3 wave(device const BlockVertex* verts, uint vid, float3 local, float3 sectionOffset,
+                   constant AdvFrame& fr, uint material) {
+    if (!ac_waving || !isFoliage(material)) return local;
+    float3 w = local + sectionOffset + fr.camera.xyz;
+    float t = fr.params.x * (1.0 + fr.params.y * 0.8);
+    float s1 = sin(t * 1.7 + w.x * 0.55 + w.z * 0.35);
+    float s2 = sin(t * 2.3 + w.x * 0.27 - w.z * 0.61 + w.y * 0.4);
+    float3 d = float3(s1 * 0.6 + s2 * 0.4, 0.0, s2 * 0.5 - s1 * 0.3) * (1.0 + fr.params.y);
+    if (material == 1) return local + d * 0.03;
+    uint b = vid & ~3u;
+    float minV = min(min(float(verts[b].uv[1]), float(verts[b + 1].uv[1])), min(float(verts[b + 2].uv[1]), float(verts[b + 3].uv[1])));
+    bool top = float(verts[vid].uv[1]) <= minV + 1e-6;
+    float amp = material == 8 ? (top ? 0.1 : 0.0) : material == 9 ? (top ? 0.05 : 0.0) : (top ? 0.1 : 0.05);
+    return local + d * amp;
 }
 
 vertex GTerrainOut gbuf_terrain_vertex(uint vid [[vertex_id]],
@@ -96,7 +111,7 @@ vertex GTerrainOut gbuf_terrain_vertex(uint vid [[vertex_id]],
     ushort2 lmRaw = ushort2(v.lm);
     uint state = uint(lmRaw.x >> 8) | (uint(lmRaw.y >> 8) << 8);
     uint mat = materials[state];
-    float3 local = wave(float3(v.pos), sectionWorld.xyz, fr.params.x, mat, fract(float3(v.pos).y) < 0.01 && v.uv.y < 0.5);
+    float3 local = wave(verts, vid, float3(v.pos), sectionWorld.xyz, fr, mat);
     float4 eye = sectionMV * float4(local, 1.0);
     GTerrainOut o;
     o.position = metalClip(fr.proj * eye);
@@ -223,7 +238,7 @@ vertex ShadowOut shadow_terrain_vertex(uint vid [[vertex_id]],
     ushort2 lmRaw = ushort2(v.lm);
     uint state = uint(lmRaw.x >> 8) | (uint(lmRaw.y >> 8) << 8);
     uint mat = materials[state];
-    float3 local = wave(float3(v.pos), sectionWorld.xyz, fr.params.x, mat, fract(float3(v.pos).y) < 0.01 && v.uv.y < 0.5);
+    float3 local = wave(verts, vid, float3(v.pos), sectionWorld.xyz, fr, mat);
     // sectionWorld.xyz: section origin relative to the camera; w unused
     float3 world = local + sectionWorld.xyz;
     ShadowOut o;
@@ -590,7 +605,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     float3 lightDir = fr.sunDirView.w > 0.0 ? fr.sunDirView.xyz : fr.moonDirView.xyz;
     float3 lightCol = fr.sunDirView.w > 0.0 ? fr.sunColor.rgb : fr.moonColor.rgb;
     float ndl = dot(n, lightDir);
-    float wrap = material == 1 ? 0.35 : 0.0; // foliage transmits some light
+    float wrap = isFoliage(material) ? 0.35 : 0.0; // foliage transmits some light
     float diffuse = saturate((ndl + wrap) / (1.0 + wrap));
     float rtShadow = 1.0;
     if (diffuse > 0.0 && fr.flags.y == 0) {
@@ -854,7 +869,7 @@ fragment float4 tonemap_fragment(FullscreenOut in [[stage_in]], constant AdvFram
                                  sampler s [[sampler(0)]]) {
     uint2 px = uint2(in.position.xy);
     float3 c = hdr.read(px).rgb;
-    if (fr.flags.x & ADV_BLOOM) c += bloom.sample(s, in.uv).rgb * 0.06;
+    if (fr.flags.x & ADV_BLOOM) c += bloom.sample(s, in.uv).rgb * (0.06 * fr.post.x);
     c *= fr.params.z;
     c = aces(c);
     // subtle vignette

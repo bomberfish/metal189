@@ -22,6 +22,24 @@ static uint32_t g_features = ADV_SHADOWS | ADV_BLOOM | ADV_SKY | ADV_WATER;
 static id<MTLBuffer> g_materials, g_emissions;
 
 bool advancedEnabled() { return g_enabled; }
+static int g_shadowRes = 4096;
+static float g_shadowDistance = 112.0f;
+static float g_exposure = 1.0f;
+static float g_bloomStrength = 1.0f;
+static bool g_waving = true;
+
+void advancedSetParam(int key, int value) {
+    switch (key) {
+        case 10: g_shadowRes = std::clamp(value, 1024, 8192); break;
+        case 11: g_shadowDistance = (float)std::clamp(value, 32, 256); break;
+        case 12: g_exposure = std::clamp(value, 10, 1000) / 100.0f; break;
+        case 13: g_bloomStrength = std::clamp(value, 0, 1000) / 100.0f; break;
+        case 14: rtRelease(); break;
+        case 15: g_waving = value != 0; break;
+        default: break;
+    }
+}
+
 void advancedSetEnabled(bool on) { g_enabled = on; }
 void advancedSetFeatures(uint32_t f) { g_features = f; }
 
@@ -40,7 +58,7 @@ struct Targets {
 
 struct State {
     bool init = false;
-    id<MTLRenderPipelineState> gTerrain[4], gGeneric[2], shadowTerrain[2], shadowGeneric[2];
+    id<MTLRenderPipelineState> gTerrain[4], gGeneric[2], shadowTerrain[4], shadowGeneric[2];
     id<MTLRenderPipelineState> lightPso[2], waterPso[2], tonemapPso, bloomDown, bloomUp, skyLutPso;
     id<MTLTexture> skyLut;
     id<MTLDepthStencilState> depthWrite, depthTestNoWrite, depthAlways;
@@ -90,14 +108,20 @@ bool initState() {
         bool alpha = i & 1, waving = (i >> 1) & 1;
         S.gTerrain[i] = pso(gbufDesc(fn(@"gbuf_terrain_vertex", alpha, waving), fn(@"gbuf_terrain_fragment", alpha, waving)));
     }
+    for (int i = 0; i < 4; i++) {
+        bool alpha = i & 1, waving = (i >> 1) & 1;
+        MTLRenderPipelineDescriptor* sd = [MTLRenderPipelineDescriptor new];
+        sd.vertexFunction = fn(@"shadow_terrain_vertex", alpha, waving);
+        sd.fragmentFunction = fn(@"shadow_fragment", alpha);
+        sd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+        S.shadowTerrain[i] = pso(sd);
+    }
     for (int i = 0; i < 2; i++) {
         S.gGeneric[i] = pso(gbufDesc(fn(@"gbuf_generic_vertex", i), fn(@"gbuf_generic_fragment", i)));
         MTLRenderPipelineDescriptor* sd = [MTLRenderPipelineDescriptor new];
-        sd.vertexFunction = fn(@"shadow_terrain_vertex", i, true);
+        sd.vertexFunction = fn(@"shadow_generic_vertex", i);
         sd.fragmentFunction = fn(@"shadow_fragment", i);
         sd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
-        S.shadowTerrain[i] = pso(sd);
-        sd.vertexFunction = fn(@"shadow_generic_vertex", i);
         S.shadowGeneric[i] = pso(sd);
     }
     MTLRenderPipelineDescriptor* ld = [MTLRenderPipelineDescriptor new];
@@ -341,11 +365,12 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
     fr.blockLight = simd_make_float4(1.0f * 1.7f, 0.60f * 1.7f, 0.30f * 1.7f, 2.2f);
     fr.fog = simd_make_float4(w.fogStart, w.fogEnd, rain, (float)env.inFluid);
     fr.fogColor = simd_make_float4(w.fogColor[0], w.fogColor[1], w.fogColor[2], 1);
-    float shadowRadius = 112.0f;
-    fr.params = simd_make_float4(env.timeSeconds, rain, 1.0f, shadowRadius);
+    float shadowRadius = g_shadowDistance;
+    fr.params = simd_make_float4(env.timeSeconds, rain, g_exposure, shadowRadius);
+    fr.post = simd_make_float4(g_bloomStrength, 0, 0, 0);
     fr.screen = simd_make_float4(W, H, 1.0f / W, 1.0f / H);
-    fr.camera = simd_make_float4(env.camFracX + (float)(env.camBlockX & 1023), env.camFracY, env.camFracZ + (float)(env.camBlockZ & 1023),
-                                 env.starBrightness);
+    fr.camera = simd_make_float4(env.camFracX + (float)(env.camBlockX & 1023), env.camFracY + (float)(env.camBlockY & 1023),
+                                 env.camFracZ + (float)(env.camBlockZ & 1023), env.starBrightness);
     uint32_t features = g_features;
     if (env.dimension != 0) features &= ~(ADV_SHADOWS | ADV_RT_SHADOW); // no sun in the Nether / End
     double camX = env.camBlockX + (double)env.camFracX, camY = env.camBlockY + (double)env.camFracY,
@@ -356,7 +381,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
     if (!rtOn) features &= ~(ADV_RT_SHADOW | ADV_RT_REFL);
     fr.rtCam = simd_make_float4(rts.camera, 0);
     fr.flags = simd_make_uint4(features, (uint32_t)env.dimension, (uint32_t)S.frame, (uint32_t)g_optAdvDebug);
-    int shadowRes = 4096;
+    int shadowRes = g_shadowRes;
     if (features & ADV_SHADOWS) {
         ensureShadowMap(shadowRes);
         simd_float3 lightDir = day > 0.001f ? sun : -sun;
@@ -385,7 +410,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         float reach = shadowRadius + 24.0f;
         for (int layer = 0; layer < ((features & ADV_RT_SHADOW) ? 0 : 3); layer++) {
             bool alpha = layer > 0;
-            [e setRenderPipelineState:S.shadowTerrain[alpha ? 1 : 0]];
+            [e setRenderPipelineState:S.shadowTerrain[(alpha ? 1 : 0) | (g_waving ? 2 : 0)]];
             const uint32_t* sp = w.layerSampler[layer];
             [e setFragmentSamplerState:samplerFor((int)sp[0], (int)sp[1], (int)sp[2], (int)sp[3], (int)sp[4],
                                                   *(const float*)&sp[5], *(const float*)&sp[6], *(const float*)&sp[7]) atIndex:0];
@@ -461,7 +486,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         if (atlas && atlas->tex) [e setFragmentTexture:atlas->tex atIndex:0];
         for (int layer = 0; layer < 3; layer++) {
             bool alpha = layer > 0;
-            [e setRenderPipelineState:S.gTerrain[(alpha ? 1 : 0) | 2]];
+            [e setRenderPipelineState:S.gTerrain[(alpha ? 1 : 0) | (g_waving ? 2 : 0)]];
             const uint32_t* sp = w.layerSampler[layer];
             [e setFragmentSamplerState:samplerFor((int)sp[0], (int)sp[1], (int)sp[2], (int)sp[3], (int)sp[4],
                                                   *(const float*)&sp[5], *(const float*)&sp[6], *(const float*)&sp[7]) atIndex:0];

@@ -145,6 +145,29 @@ void rtSectionDeleted(int sid) {
     g_rt.erase(it);
 }
 
+void rtRelease() {
+    for (auto& kv : g_rt) {
+        RtSection& r = kv.second;
+        releaseSection(r);
+        r.blas = nil;
+        for (auto& v : r.verts) v = nil;
+        if (!r.queued) {
+            r.queued = true;
+            g_queue.push_back(kv.first);
+        }
+    }
+    for (TlasSlot& t : g_tlas) {
+        t.tlas = nil;
+        t.size = 0;
+        t.count = 0;
+        t.resources.clear();
+        t.keep = nil;
+    }
+    for (auto& b : g_scratch) b = nil;
+    g_cur = -1;
+    g_sceneDirty = true;
+}
+
 bool rtPrepare(id<MTLCommandBuffer> cb, double camX, double camY, double camZ, float radius, RtScene& out) {
     out.instanceCount = 0;
     out.resources = nullptr;
