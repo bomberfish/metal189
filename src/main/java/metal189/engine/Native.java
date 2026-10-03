@@ -94,9 +94,11 @@ public final class Native {
     public static native void setOption(int key, int value);
     public static native void sectionUpload(int id, int layer, long data, int bytes, int vertexCount, int x, int y, int z);
     public static native void sectionDelete(int id);
+    /** Which blocks of a section are opaque cubes (4096 bits, index (y << 8) | (z << 4) | x), and whether any gives light. */
+    public static native void sectionSolid(int id, long bits, boolean emits);
     public static native void advSetEnabled(boolean on);
     public static native void advSetFeatures(int flags);
-    public static native void advSetTables(long materials, long emissions);
+    public static native void advSetTables(long materials, long emissions, long lightColors);
     public static native boolean rtSupported();
     /** Hardware-accelerated ray tracing (Apple GPU family 9 and later: M3, M4, ...). */
     public static native boolean rtAccelerated();

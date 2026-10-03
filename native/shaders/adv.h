@@ -56,6 +56,7 @@ struct AdvFrame {
 #define ADV_WSR          (1u << 17) // engine-set: the voxel volume for world-space reflections is bound
 #define ADV_WSGI         (1u << 18) // engine-set: global illumination from the voxel volume (giTex)
 #define ADV_GLASS_SHADOW (1u << 19) // engine-set: the glass shadow map (tinted translucents in light space) is valid
+#define ADV_COLORED_LIGHT (1u << 20) // engine-set: coloured block light spread through the voxel volume is bound
 
 // Per-item data for G-buffer/shadow draws of captured (non-terrain) geometry.
 struct AdvItem {

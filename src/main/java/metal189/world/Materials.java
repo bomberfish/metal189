@@ -31,8 +31,10 @@ public final class Materials {
     public static void upload() {
         if (uploaded) return;
         uploaded = true;
-        long mat = Mem.malloc(65536), emi = Mem.malloc(65536);
+        long mat = Mem.malloc(65536), emi = Mem.malloc(65536), col = Mem.malloc(65536 * 4);
+        Mem.U.setMemory(col, 65536 * 4, (byte) 0);
         for (Block b : Block.blockRegistry) {
+            float[] c = lightColor(b);
             for (IBlockState state : b.getBlockState().getValidStates()) {
                 int id = Block.getStateId(state);
                 if (id < 0 || id >= 65536) continue;
@@ -42,11 +44,39 @@ public final class Materials {
                 if (b == Blocks.lava || b == Blocks.flowing_lava) m = 6;
                 Mem.U.putByte(mat + id, (byte) m);
                 Mem.U.putByte(emi + id, (byte) e);
+                if (light > 0) {
+                    long a = col + id * 4L;
+                    for (int k = 0; k < 3; k++) Mem.U.putByte(a + k, (byte) Math.round(c[k] * 255));
+                    Mem.U.putByte(a + 3, (byte) e);
+                }
             }
         }
-        Native.advSetTables(mat, emi);
+        Native.advSetTables(mat, emi, col);
         Mem.free(mat);
         Mem.free(emi);
+        Mem.free(col);
+    }
+
+    /**
+     * Colour of a block's light relative to the standard block light colour (torches),
+     * for coloured block light: redstone glows red, sea lanterns and beacons cool white,
+     * portals purple, lava deeper orange.
+     */
+    private static float[] lightColor(Block b) {
+        if (b == Blocks.redstone_torch || b == Blocks.lit_redstone_ore || b == Blocks.powered_repeater
+                || b == Blocks.powered_comparator) return new float[] {1f, 0.12f, 0.06f};
+        if (b == Blocks.sea_lantern) return new float[] {0.4f, 0.66f, 1f};
+        if (b == Blocks.beacon) return new float[] {0.45f, 0.72f, 1f};
+        if (b == Blocks.portal) return new float[] {0.55f, 0.18f, 1f};
+        if (b == Blocks.end_portal || b == Blocks.end_portal_frame) return new float[] {0.3f, 0.8f, 0.7f};
+        if (b == Blocks.ender_chest) return new float[] {0.3f, 0.72f, 0.66f};
+        if (b == Blocks.dragon_egg) return new float[] {0.75f, 0.4f, 1f};
+        if (b == Blocks.lava || b == Blocks.flowing_lava) return new float[] {1f, 0.55f, 0.28f};
+        if (b == Blocks.fire) return new float[] {1f, 0.72f, 0.45f};
+        if (b == Blocks.glowstone) return new float[] {1f, 0.95f, 0.75f};
+        if (b == Blocks.lit_pumpkin || b == Blocks.lit_furnace) return new float[] {1f, 0.82f, 0.55f};
+        if (b == Blocks.lit_redstone_lamp) return new float[] {1f, 0.9f, 0.72f};
+        return new float[] {1f, 1f, 1f};
     }
 
     private static int classify(Block b, IBlockState state) {

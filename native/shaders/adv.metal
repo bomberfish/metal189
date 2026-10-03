@@ -1026,7 +1026,16 @@ kernel void rt_entity_vertices(device const RtEntSource* src [[buffer(0)]],
 struct VoxResolveArgs {
     int4 slot;     // xyz: the section's slot origin in texels
     float4 atlas;  // xy: atlas size in texels
+    uint4 light;   // x: write light properties (coloured block light), y: clear the slot's spread light
 };
+
+// Light properties (coloured block light), RGBA8Uint per voxel: w: 0 lets light pass, 1 solid,
+// 2 filters it by rgb (stained glass), 3 gives light of rgb (colour times level / 15).
+static inline uint4 voxLightOfState(device const uchar4* lightColors, uint state, uint fallback) {
+    uchar4 lc = lightColors[state];
+    if (lc.a == 0) return uint4(0u, 0u, 0u, fallback);
+    return uint4(uint3(float3(lc.rgb) * (float(lc.a) / 255.0) + 0.5), 3u);
+}
 
 kernel void voxel_accum_kernel(device const BlockVertex* verts [[buffer(0)]], constant uint2& info [[buffer(1)]],
                                device atomic_uint* scratch [[buffer(2)]], uint q [[thread_position_in_grid]]) {
@@ -1090,20 +1099,35 @@ kernel void voxel_accum_kernel(device const BlockVertex* verts [[buffer(0)]], co
 kernel void voxel_resolve_kernel(device const BlockVertex* solid [[buffer(0)]], device const BlockVertex* mipped [[buffer(1)]],
                                  device const BlockVertex* cutout [[buffer(2)]], device uint4* scratch [[buffer(3)]],
                                  constant VoxResolveArgs& a [[buffer(4)]],
+                                 constant uint* opaque [[buffer(5)]], device const uchar4* lightColors [[buffer(6)]],
                                  texture3d<ushort, access::write> vox [[texture(0)]], texture3d<uint, access::write> voxShape [[texture(1)]],
+                                 texture3d<uint, access::write> props [[texture(2)]],
+                                 texture3d<float, access::write> flood0 [[texture(3)]], texture3d<float, access::write> flood1 [[texture(4)]],
                                  uint3 gid [[thread_position_in_grid]]) {
     if (any(gid >= 16u)) return;
     uint idx = (gid.z * 16u + gid.y) * 16u + gid.x;
     uint4 s = scratch[idx];
     scratch[idx] = uint4(0u);   // clean for the next section
     uint3 tc = uint3(a.slot.xyz) + gid;
+    // coloured block light: solid blocks (buried ones too, from the chunk build) stop it
+    uint bi = (gid.y << 8) | (gid.z << 4) | gid.x;
+    uint solidBit = (opaque[bi >> 5] >> (bi & 31u)) & 1u;
+    if (a.light.x != 0u && a.light.y != 0u) {
+        flood0.write(float4(0.0), tc);
+        flood1.write(float4(0.0), tc);
+    }
     if (s.z == 0u) {
         vox.write(ushort4(0), tc);
+        if (a.light.x != 0u) props.write(uint4(0u, 0u, 0u, solidBit), tc);
         return;
     }
     uint key = ~s.z, layer = (key >> 26) & 3u;
     device const BlockVertex* verts = layer == 0u ? solid : (layer == 1u ? mipped : cutout);
     uint b = (key & ((1u << 18) - 1u)) * 4u;
+    if (a.light.x != 0u) {
+        ushort2 lmRaw = ushort2(verts[b].lm);
+        props.write(voxLightOfState(lightColors, uint(lmRaw.x >> 8) | (uint(lmRaw.y >> 8) << 8), solidBit), tc);
+    }
     float3 p0 = float3(verts[b].pos), p1 = float3(verts[b + 1].pos), p2 = float3(verts[b + 2].pos), p3 = float3(verts[b + 3].pos);
     float3 n = normalize(cross(p1 - p0, p2 - p0)), an = abs(n);
     // the sprite: its size from how much texture the quad spans over how much face (a torch
@@ -1151,6 +1175,84 @@ kernel void voxel_resolve_kernel(device const BlockVertex* solid [[buffer(0)]], 
         return;
     }
     vox.write(ushort4(ushort(origin.x + 0.5), ushort(origin.y + 0.5), ushort(rgb), ushort(kind | (sky << 2) | (blk << 6) | (lsize << 10) | flags)), tc);
+}
+
+struct VoxTintArgs {
+    int4 slot;     // xyz: the section's slot origin in texels
+    uint4 info;    // x: quads
+};
+
+// The translucent layer's part in coloured block light: stained glass, ice and the like
+// filter light by their colour (as they colour shadows), portals give purple light; water
+// lets it pass.
+kernel void voxel_tint_kernel(device const BlockVertex* verts [[buffer(0)]], device const uchar4* lightColors [[buffer(2)]],
+                              device const uchar* materials [[buffer(3)]], constant VoxTintArgs& a [[buffer(4)]],
+                              texture3d<uint, access::write> props [[texture(0)]], texture2d<float> atlas [[texture(1)]],
+                              uint q [[thread_position_in_grid]]) {
+    if (q >= a.info.x) return;
+    uint b = q * 4u;
+    float3 p0 = float3(verts[b].pos), p1 = float3(verts[b + 1].pos), p2 = float3(verts[b + 2].pos), p3 = float3(verts[b + 3].pos);
+    float3 nn = cross(p1 - p0, p2 - p0);
+    if (dot(nn, nn) < 1e-12) return;
+    float3 n = normalize(nn);
+    int3 cell = int3(floor((p0 + p1 + p2 + p3) * 0.25 - n * 0.02));
+    if (any(cell < 0) || any(cell > 15)) return;
+    uint3 tc = uint3(a.slot.xyz) + uint3(cell);
+    ushort2 lmRaw = ushort2(verts[b].lm);
+    uint state = uint(lmRaw.x >> 8) | (uint(lmRaw.y >> 8) << 8);
+    if (lightColors[state].a != 0) {
+        props.write(voxLightOfState(lightColors, state, 0u), tc);
+        return;
+    }
+    if (materials[state] == 2) return;   // water
+    constexpr sampler avg(filter::linear, mip_filter::linear, address::clamp_to_edge);
+    float2 uv = (float2(verts[b].uv) + float2(verts[b + 2].uv)) * 0.5;   // the face's middle, coarse mip: its average
+    float4 col = float4(verts[b].color) * (1.0 / 255.0);
+    col.rgb /= faceShade(n);
+    float4 t = atlas.sample(avg, uv, level(4.0)) * col;
+    if (t.a < 0.02) return;
+    float peak = max(max(t.r, t.g), max(t.b, 1e-3));
+    float3 T = mix(float3(1.0), pow(t.rgb / peak, 1.5) * mix(1.0, peak, 0.6), saturate(t.a * 2.5));
+    props.write(uint4(uint3(saturate(T) * 255.0 + 0.5), 2u), tc);
+}
+
+struct FloodArgs {
+    int4 wrap;     // xyz: volume origin mod N, w: N
+    int4 origin;   // xyz: the slot's corner in the volume (blocks), w: 1 to clear it instead
+};
+
+// One step of coloured block light spreading through the volume: as vanilla's light levels
+// do, each block takes its brightest neighbour's light less a level (per channel); solid
+// blocks stop it, filters colour it, lights give their own.
+kernel void light_flood_kernel(texture3d<uint, access::read> props [[texture(0)]], texture3d<float, access::read> src [[texture(1)]],
+                               texture3d<float, access::write> dst [[texture(2)]], constant FloodArgs& a [[buffer(0)]],
+                               uint3 gid [[thread_position_in_grid]]) {
+    int N = a.wrap.w;
+    if (any(gid >= 16u)) return;
+    uint3 c = uint3(a.origin.xyz) + gid;   // the block, in the volume
+    uint m = uint(N - 1);
+    uint3 wrap = uint3(a.wrap.xyz);
+    uint3 tc = (c + wrap) & m;
+    if (a.origin.w != 0) {
+        dst.write(float4(0.0), tc);
+        return;
+    }
+    uint4 p = props.read(tc);
+    float3 L = float3(0.0);
+    if (p.w != 1u) {
+        float3 nb = float3(0.0);
+        int3 ci = int3(c);
+        for (int k = 0; k < 6; k++) {
+            int3 o = ci;
+            o[k >> 1] += (k & 1) ? 1 : -1;
+            if (any(o < 0) || any(o >= N)) continue;   // outside the volume: nothing known
+            nb = max(nb, src.read((uint3(o) + wrap) & m).rgb);
+        }
+        L = max(nb - 1.0 / 15.0, 0.0);
+        if (p.w == 2u) L *= float3(p.xyz) * (1.0 / 255.0);
+        else if (p.w == 3u) L = max(L, float3(p.xyz) * (1.0 / 255.0));
+    }
+    dst.write(float4(L, 1.0), tc);
 }
 
 // Which 4-block bricks of a slot hold any block, and whether the slot (16 blocks) does, so
@@ -1824,10 +1926,25 @@ static VoxHit voxTrace(constant AdvFrame& fr, texture3d<ushort> vox, texture3d<u
     return h;
 }
 
+// Coloured block light: the hue of the light spread through the voxel volume at `q` (voxel
+// space): coloured lights, and stained glass it passed. Vanilla's light level still sets how
+// bright block light is; where no coloured light is known, it is the standard colour.
+static float3 blockLightTint(constant AdvFrame& fr, texture3d<float> light, float3 q) {
+    if (!(fr.flags.x & ADV_COLORED_LIGHT)) return float3(1.0);
+    float N = float(fr.voxel.w);
+    if (any(q < 1.0) || any(q > N - 1.0)) return float3(1.0);
+    constexpr sampler ls(filter::linear, address::repeat);
+    float3 L = light.sample(ls, (q + float3(fr.voxel.xyz)) / N).rgb;
+    float m = max(max(L.r, L.g), L.b);
+    if (m < 1e-3) return float3(1.0);
+    return mix(float3(1.0), L / m, saturate(m * 6.0));
+}
+
 // A voxel hit lit like the deferred pass: its texture and tint, sun with the shadow map,
 // sky light and block light from the light it was built with.
 static float3 voxShade(constant AdvFrame& fr, texture2d<float> atlas, depth2d<float> shadowMap, sampler cmp,
-                       texture2d<float> skyLut, sampler lin, VoxHit h, texture2d<float> glassDepth, texture2d<float> glassColor) {
+                       texture2d<float> skyLut, sampler lin, VoxHit h, texture2d<float> glassDepth, texture2d<float> glassColor,
+                       texture3d<float> blockLightVol) {
     float4 tex = atlas.sample(voxPoint, voxAtlasUv(atlas, h.v, h.uv), level(h.lod));
     uint rgb = h.v.z;
     float3 tint = float3(float((rgb >> 11) & 31u) / 31.0, float((rgb >> 5) & 63u) / 63.0, float(rgb & 31u) / 31.0);
@@ -1845,7 +1962,7 @@ static float3 voxShade(constant AdvFrame& fr, texture2d<float> atlas, depth2d<fl
     }
     float daySky = sky * sky * fr.sunDirWorld.w;
     c += albedo * skyAmbient(fr, skyLut, lin, n) * sky * sky * fr.ambient.a;
-    c += albedo * fr.blockLight.rgb * pow(blk, fr.blockLight.a) * (1.0 - 0.75 * daySky);
+    c += albedo * fr.blockLight.rgb * blockLightTint(fr, blockLightVol, h.p + h.n * 0.5) * pow(blk, fr.blockLight.a) * (1.0 - 0.75 * daySky);
     c += albedo * 0.004 * LIGHT_TUNE.x;
     return c;
 }
@@ -1862,6 +1979,7 @@ fragment float4 gi_voxel_fragment(FullscreenOut in [[stage_in]], constant AdvFra
                                   texture3d<ushort> vox [[texture(16)]], texture3d<ushort> voxOcc [[texture(18)]],
                                   texture3d<uint> voxShape [[texture(19)]], texture3d<ushort> voxOccSlot [[texture(20)]],
                                   texture2d<float> glassDepth [[texture(21)]], texture2d<float> glassColor [[texture(22)]],
+                                  texture3d<float> blockLightVol [[texture(23)]],
                                   sampler cmp [[sampler(0)]], sampler lin [[sampler(1)]]) {
     uint2 fp = min(uint2(in.position.xy) * 2u + 1u, uint2(fr.screen.xy) - 1u);
     float d = depth.read(fp);
@@ -1888,7 +2006,7 @@ fragment float4 gi_voxel_fragment(FullscreenOut in [[stage_in]], constant AdvFra
         // diffuse light needs no texture detail: a wide footprint picks coarse mips
         VoxHit h = voxTrace(fr, vox, voxShape, voxOcc, voxOccSlot, atlas, p, dir, len, float2(0.5, 0.1));
         if (h.hit) {
-            sum += voxShade(fr, atlas, shadowMap, cmp, skyLut, lin, h, glassDepth, glassColor) * GI_TUNE.y;
+            sum += voxShade(fr, atlas, shadowMap, cmp, skyLut, lin, h, glassDepth, glassColor, blockLightVol) * GI_TUNE.y;
         } else {
             float3 skyC = (fr.flags.y != 0 ? toLinear(fr.fogColor.rgb) * 0.3 : skyBase(fr, skyLut, lin, dir)) * fr.ambient.a;
             float3 tf = (select(float3(0.0), float3(N), dir > 0.0) - p) / select(dir, float3(1e-9), abs(dir) < 1e-9);
@@ -1937,6 +2055,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                                texture3d<ushort> voxOccSlot [[texture(20)]],
                                device atomic_uint* voxStats [[buffer(21)]],
                                texture2d<float> glassDepth [[texture(21)]], texture2d<float> glassColor [[texture(22)]],
+                               texture3d<float> blockLightVol [[texture(23)]],
                                sampler cmp [[sampler(0)]], sampler lin [[sampler(1)]],
                                sampler rep [[sampler(3)]], sampler wrep [[sampler(4)]],
                                instance_acceleration_structure tlas [[buffer(10), function_constant(ac_rt)]],
@@ -1961,7 +2080,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
         // from the eye (camera-relative positions are relative to the view entity's feet)
         float3 eyeVox = fr.voxCam.xyz + (fr.invView * float4(0.0, 0.0, 0.0, 1.0)).xyz;
         VoxHit vh = voxTrace(fr, vox, voxShape, voxOcc, voxOccSlot, voxAtlas, eyeVox, dirWorld, 128.0, float2(0.0, pixelAngle(fr)));
-        return float4(vh.hit ? voxShade(fr, voxAtlas, shadowMap, cmp, skyLut, lin, vh, glassDepth, glassColor) : skyBase(fr, skyLut, lin, dirWorld), 1.0);
+        return float4(vh.hit ? voxShade(fr, voxAtlas, shadowMap, cmp, skyLut, lin, vh, glassDepth, glassColor, blockLightVol) : skyBase(fr, skyLut, lin, dirWorld), 1.0);
     }
     if (d >= 1.0) {
         float3 sky = skyRadiance(fr, skyLut, lin, dirWorld, cloudMap);
@@ -2157,7 +2276,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                             atomic_fetch_add_explicit(&voxStats[1], 1u, memory_order_relaxed);
                         }
                         if (vh.hit) {
-                            traced = voxShade(fr, voxAtlas, shadowMap, cmp, skyLut, lin, vh, glassDepth, glassColor);
+                            traced = voxShade(fr, voxAtlas, shadowMap, cmp, skyLut, lin, vh, glassDepth, glassColor, blockLightVol);
                             float hd = length(Rrw * vh.t + world);
                             float hf = saturate((hd - fr.fog.x) / max(fr.fog.y - fr.fog.x, 1.0));
                             traced = mix(traced, skyBase(fr, skyLut, lin, Rrw), hf * hf);
@@ -2187,7 +2306,8 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     }
     // block light fades in daylight (vanilla's lightmap is closer to max(sky, block) than a sum)
     float daySky = skyLight * skyLight * fr.sunDirWorld.w;
-    color += albedo * fr.blockLight.rgb * pow(blockL, fr.blockLight.a) * ao * (1.0 - 0.75 * daySky);
+    float3 blockTint = blockLightTint(fr, blockLightVol, world + fr.voxCam.xyz + nWorld * 0.5);
+    color += albedo * fr.blockLight.rgb * blockTint * pow(blockL, fr.blockLight.a) * ao * (1.0 - 0.75 * daySky);
     color += albedo * nrm.w * 6.0;
     color += albedo * 0.004 * LIGHT_TUNE.x * ao;
     if (int(fr.flags.y) == -1) color += albedo * 0.03; // Nether ambient
@@ -2453,6 +2573,7 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
                                texture3d<ushort> vox [[texture(11)]], texture3d<ushort> voxOcc [[texture(12)]],
                                texture3d<uint> voxShape [[texture(13)]], texture3d<ushort> voxOccSlot [[texture(14)]],
                                texture2d<float> glassDepth [[texture(15)]], texture2d<float> glassColor [[texture(16)]],
+                               texture3d<float> blockLightVol [[texture(17)]],
                                instance_acceleration_structure tlas [[buffer(10), function_constant(ac_rt)]],
                                device const RtInstance* rtInst [[buffer(11), function_constant(ac_rt)]],
                                primitive_acceleration_structure entAs [[buffer(12), function_constant(ac_rt)]],
@@ -2481,7 +2602,8 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
         // stained glass, ice, slime (and water with water effects off): lit translucent surface
         float3 albedo = toLinear(t.rgb * in.color.rgb);
         float3 c = albedo * (lightCol * ndl * shadow * skyGate + skyAmbient(fr, skyLut, lin, nWorld) * in.lm.y * in.lm.y +
-                             fr.blockLight.rgb * pow(in.lm.x, fr.blockLight.a) * (1.0 - 0.75 * in.lm.y * in.lm.y * fr.sunDirWorld.w) + 0.004);
+                             fr.blockLight.rgb * blockLightTint(fr, blockLightVol, in.world + fr.voxCam.xyz + nWorld * 0.5) *
+                             pow(in.lm.x, fr.blockLight.a) * (1.0 - 0.75 * in.lm.y * in.lm.y * fr.sunDirWorld.w) + 0.004);
         return float4(c, t.a * in.color.a);
     }
 
@@ -2639,7 +2761,7 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
             // nothing (along the screen-space ray, so the two agree where they meet)
             VoxHit vh = voxTrace(fr, vox, voxShape, voxOcc, voxOccSlot, atlas, in.world + fr.voxCam.xyz + nWorld * 0.02, Rs, REFL_TUNE2.z, float2(dist, 1.0) * pixelAngle(fr));
             if (vh.hit) {
-                float3 hc = voxShade(fr, atlas, shadowMap, cmp, skyLut, lin, vh, glassDepth, glassColor);
+                float3 hc = voxShade(fr, atlas, shadowMap, cmp, skyLut, lin, vh, glassDepth, glassColor, blockLightVol);
                 float hd = length(vh.t * Rs + in.world);
                 float hf = saturate((hd - fr.fog.x) / max(fr.fog.y - fr.fog.x, 1.0));
                 refl = mix(mix(hc, skyBase(fr, skyLut, lin, Rs), hf * hf), refl, hit.z);

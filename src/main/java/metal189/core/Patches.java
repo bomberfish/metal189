@@ -75,8 +75,9 @@ public final class Patches {
                     org.objectweb.asm.tree.InsnList t = new org.objectweb.asm.tree.InsnList();
                     t.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ALOAD, 4));
                     t.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ALOAD, 1));
+                    t.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ALOAD, 2));
                     t.add(new org.objectweb.asm.tree.MethodInsnNode(Opcodes.INVOKESTATIC, "metal189/terrain/Terrain", "endBlock",
-                        "(Lnet/minecraft/client/renderer/WorldRenderer;Lnet/minecraft/block/state/IBlockState;)V", false));
+                        "(Lnet/minecraft/client/renderer/WorldRenderer;Lnet/minecraft/block/state/IBlockState;Lnet/minecraft/util/BlockPos;)V", false));
                     m.instructions.insertBefore(n, t);
                 }
                 return true;
@@ -116,6 +117,8 @@ public final class Patches {
                 "metal189/world/PbrAtlas", "onStitched", "(Lnet/minecraft/client/renderer/texture/TextureMap;)V"));
 
         register("net.minecraft.client.renderer.chunk.RenderChunk", Asm.chain(
+            Asm.injectHeadThisOnly("rebuildChunk", "func_178581_b", "(FFFLnet/minecraft/client/renderer/chunk/ChunkCompileTaskGenerator;)V",
+                "metal189/terrain/Terrain", "beginRebuild", "(Lnet/minecraft/client/renderer/chunk/RenderChunk;)V"),
             Asm.injectHead("deleteGlResources", "func_178566_a", "()V",
                 "metal189/terrain/Terrain", "delete", "(Lnet/minecraft/client/renderer/chunk/RenderChunk;)V", true),
             Asm.injectHeadThisOnly("setPosition", "func_178576_a", "(Lnet/minecraft/util/BlockPos;)V",

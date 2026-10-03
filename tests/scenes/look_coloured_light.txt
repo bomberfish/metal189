@@ -1,0 +1,42 @@
+# Coloured block light in an enclosed hall: a torch boxed in behind red stained glass, redstone
+# torches, a sea lantern, glowstone and lava, a plain torch; on (A, C) and off (B, D)
+sleep 3
+world lookcolour 42 flat
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /weather clear
+cmd /time set 18000
+config colouredBlockLight true
+cmd /tp @p -985 6 -985 180 15
+sleep 4
+cmd /kill @e[type=!Player]
+cmd /fill -1001 2 -1001 -969 12 -969 stonebrick
+cmd /fill -1000 4 -1000 -970 10 -970 air
+cmd /fill -1000 3 -1000 -970 3 -970 quartz_block
+cmd /fill -993 4 -1000 -987 8 -995 stonebrick
+cmd /fill -992 4 -999 -988 7 -996 air
+cmd /setblock -990 4 -998 torch 5
+cmd /fill -992 4 -995 -988 7 -995 stained_glass 14
+cmd /setblock -981 4 -990 redstone_torch 5
+cmd /setblock -979 4 -990 redstone_torch 5
+cmd /setblock -975 4 -982 sea_lantern
+cmd /setblock -996 4 -982 glowstone
+cmd /fill -986 3 -976 -984 3 -974 lava
+cmd /setblock -975 4 -974 torch 5
+sleep 10
+capture CAPTURE_A
+config colouredBlockLight false
+sleep 3
+capture CAPTURE_B
+config colouredBlockLight true
+cmd /tp @p -985 6 -978 0 25
+sleep 4
+capture CAPTURE_C
+config colouredBlockLight false
+sleep 3
+capture CAPTURE_D
+config colouredBlockLight true
+cmd /time set 6000
+quit

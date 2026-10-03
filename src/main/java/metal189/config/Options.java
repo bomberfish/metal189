@@ -207,6 +207,7 @@ public final class Options {
         toggle("lighting", "playerShadow", S);
         toggle("lighting", "plantShadows", S);
         toggle("lighting", "glassShadows", S);
+        toggle("lighting", "colouredBlockLight", S);
         slider("lighting", "foliageTranslucency", S, 0, 200, 5, "%");
         toggle("lighting", "ssao", S);
         toggle("lighting", "waving", S);

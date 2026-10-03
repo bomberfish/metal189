@@ -11,6 +11,7 @@ struct VoxelScene {
     id<MTLTexture> shape = nil; // RG32Uint, N^3: the shapes of partial blocks
     id<MTLTexture> occ = nil;   // R8Uint, (N/4)^3: 1 where a 4-block brick holds any block
     id<MTLTexture> occSlot = nil;   // R8Uint, (N/16)^3: 1 where a 16-block slot does
+    id<MTLTexture> light = nil;     // RGBA8Unorm, N^3: coloured block light spread through the volume (nil when off)
     simd_int4 wrap = {0, 0, 0, 0};     // xyz: volume origin mod N, w: N
     simd_float4 cam = {0, 0, 0, 0};    // xyz: camera position relative to the volume origin (blocks)
     bool valid = false;
@@ -18,7 +19,8 @@ struct VoxelScene {
 
 // Re-voxelizes the sections that changed or came into range (budgeted, closest first)
 // into `cb` and describes the volume for the shaders.
-bool voxelsUpdate(id<MTLCommandBuffer> cb, double camX, double camY, double camZ, int atlasW, int atlasH, VoxelScene& out);
+// With `light`, also keeps coloured block light spreading through the volume.
+bool voxelsUpdate(id<MTLCommandBuffer> cb, double camX, double camY, double camZ, id<MTLTexture> atlas, bool light, VoxelScene& out);
 // Frees the volume (about 34 MB) while world-space reflections are not in use.
 void voxelsRelease();
 

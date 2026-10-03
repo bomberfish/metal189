@@ -61,10 +61,16 @@ void advancedSetEnabled(bool on) { g_enabled = on; }
 bool advancedCloudsActive() { return g_enabled && (g_features & ADV_CLOUDS); }
 void advancedSetFeatures(uint32_t f) { g_features = f; }
 
-void advancedSetTables(const uint8_t* materials, const uint8_t* emissions) {
+static id<MTLBuffer> g_lightColors = nil;
+
+void advancedSetTables(const uint8_t* materials, const uint8_t* emissions, const uint8_t* lightColors) {
     g_materials = [device() newBufferWithBytes:materials length:65536 options:MTLResourceStorageModeShared];
     g_emissions = [device() newBufferWithBytes:emissions length:65536 options:MTLResourceStorageModeShared];
+    g_lightColors = [device() newBufferWithBytes:lightColors length:65536 * 4 options:MTLResourceStorageModeShared];
 }
+
+id<MTLBuffer> advancedLightColors() { return g_lightColors; }
+id<MTLBuffer> advancedMaterials() { return g_materials; }
 
 namespace {
 
@@ -622,13 +628,15 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         int giMode = (int)(g_tuning[60] + 0.5f);
         bool wantWsr = (int)(g_tuning[48] + 0.5f) == 2 && !(features & ADV_RT_REFL);
         bool wantWsgi = (giMode == 1 || (giMode == 2 && !(features & ADV_RT_GI))) && S.giVoxPso && S.giTemporalPso && S.giBlurPso;
-        TexEntry* atlasV = (wantWsr || wantWsgi) ? texture(w.atlasTex) : nullptr;
-        if (atlasV && atlasV->tex && voxelsUpdate(cb, camX, camY, camZ, (int)atlasV->tex.width, (int)atlasV->tex.height, vox)) {
+        bool wantLight = g_tuning[64] > 0.5f;
+        TexEntry* atlasV = (wantWsr || wantWsgi || wantLight) ? texture(w.atlasTex) : nullptr;
+        if (atlasV && atlasV->tex && voxelsUpdate(cb, camX, camY, camZ, atlasV->tex, wantLight, vox)) {
             if (wantWsr) features |= ADV_WSR;
             if (wantWsgi) features |= ADV_WSGI;
+            if (vox.light) features |= ADV_COLORED_LIGHT;
             fr.voxel = vox.wrap;
             fr.voxCam = vox.cam;
-        } else if (!wantWsr && !wantWsgi) {
+        } else if (!wantWsr && !wantWsgi && !wantLight) {
             voxelsRelease();
         }
     }
@@ -1058,6 +1066,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             [e setFragmentTexture:vox.occSlot atIndex:20];
             [e setFragmentTexture:(features & ADV_GLASS_SHADOW) ? S.glassDepth : S.t.linZ atIndex:21];
             [e setFragmentTexture:(features & ADV_GLASS_SHADOW) ? S.glassColor : S.t.linZ atIndex:22];
+            if (vox.light) [e setFragmentTexture:vox.light atIndex:23];
         }
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [e endEncoding];
@@ -1185,6 +1194,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         }
         [e setFragmentTexture:(features & ADV_GLASS_SHADOW) ? S.glassDepth : S.t.linZ atIndex:21];
         [e setFragmentTexture:(features & ADV_GLASS_SHADOW) ? S.glassColor : S.t.linZ atIndex:22];
+        if (vox.light) [e setFragmentTexture:vox.light atIndex:23];
         {
             TexEntry* atlasL = texture(w.atlasTex);
             [e setFragmentTexture:atlasL && atlasL->tex ? atlasL->tex : S.t.albedo atIndex:17];
@@ -1280,6 +1290,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         }
         [e setFragmentTexture:(features & ADV_GLASS_SHADOW) ? S.glassDepth : S.t.linZ atIndex:15];
         [e setFragmentTexture:(features & ADV_GLASS_SHADOW) ? S.glassColor : S.t.linZ atIndex:16];
+        if (vox.light) [e setFragmentTexture:vox.light atIndex:17];
         TexEntry* atlas = texture(w.atlasTex);
         if (atlas && atlas->tex) [e setFragmentTexture:atlas->tex atIndex:0];
         const uint32_t* sp = w.layerSampler[3];

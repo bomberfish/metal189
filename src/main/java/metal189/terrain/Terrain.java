@@ -69,13 +69,35 @@ public final class Terrain {
         blockStart.get()[0] = wr.getVertexCount();
     }
 
+    // which blocks of the section being rebuilt on this thread are opaque cubes (coloured block
+    // light must not pass solid rock, whose buried faces the vertex data does not show)
+    private static final ThreadLocal<long[]> solid = new ThreadLocal<long[]>();
+    private static final java.util.concurrent.ConcurrentHashMap<RenderChunk, long[]> solidMasks =
+            new java.util.concurrent.ConcurrentHashMap<RenderChunk, long[]>();
+
+    /** Head of RenderChunk.rebuildChunk (chunk worker or client thread). */
+    public static void beginRebuild(RenderChunk rc) {
+        long[] m = new long[65];   // 64: opaque cubes; [64] != 0: some block gives light
+        solid.set(m);
+        solidMasks.put(rc, m);
+    }
+
     /**
      * Before BlockRendererDispatcher.renderBlock returns: stamps the block state
      * id into the unused high bytes of the lightmap shorts of the vertices the
      * block produced (light values never exceed 240). The id survives vanilla's
-     * translucent re-sorting because it lives in the vertex itself.
+     * translucent re-sorting because it lives in the vertex itself. Also records
+     * opaque cubes, buried ones (no vertices) included.
      */
-    public static void endBlock(WorldRenderer wr, net.minecraft.block.state.IBlockState state) {
+    public static void endBlock(WorldRenderer wr, net.minecraft.block.state.IBlockState state, BlockPos pos) {
+        long[] m = solid.get();
+        if (m != null) {
+            if (state.getBlock().isOpaqueCube()) {
+                int i = ((pos.getY() & 15) << 8) | ((pos.getZ() & 15) << 4) | (pos.getX() & 15);
+                m[i >> 6] |= 1L << (i & 63);
+            }
+            if (state.getBlock().getLightValue() > 0) m[64] = 1;
+        }
         int start = blockStart.get()[0];
         int end = wr.getVertexCount();
         if (end <= start || wr.getVertexFormat() != DefaultVertexFormats.BLOCK) return;
@@ -116,6 +138,13 @@ public final class Terrain {
         for (EnumWorldBlockLayer layer : LAYERS) {
             if (cc.isLayerEmpty(layer)) Native.sectionUpload(id, layer.ordinal(), 0L, 0, 0, pos.getX(), pos.getY(), pos.getZ());
         }
+        long[] m = solidMasks.remove(rc);
+        if (m != null) {
+            long a = Mem.malloc(512);
+            for (int i = 0; i < 64; i++) Mem.U.putLong(a + i * 8L, m[i]);
+            Native.sectionSolid(id, a, m[64] != 0);
+            Mem.free(a);
+        }
     }
 
     /** Applies compiled-chunk notifications queued by worker threads (client thread). */
@@ -129,6 +158,7 @@ public final class Terrain {
 
     /** Head of RenderChunk.deleteGlResources. */
     public static void delete(RenderChunk rc) {
+        solidMasks.remove(rc);
         Integer id = ids.remove(rc);
         if (id != null) Native.sectionDelete(id);
     }

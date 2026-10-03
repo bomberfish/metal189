@@ -120,10 +120,13 @@ static void JNICALL n_sectionUpload(JNIEnv*, jclass, jint id, jint layer, jlong 
     @autoreleasepool { sectionUpload(id, layer, ptr(data), (size_t)bytes, (uint32_t)count, x, y, z); }
 }
 static void JNICALL n_sectionDelete(JNIEnv*, jclass, jint id) { sectionDelete(id); }
+static void JNICALL n_sectionSolid(JNIEnv*, jclass, jint id, jlong bits, jboolean emits) {
+    sectionSolid(id, (const uint32_t*)ptr(bits), emits);
+}
 static void JNICALL n_advSetEnabled(JNIEnv*, jclass, jboolean on) { advancedSetEnabled(on); }
 static void JNICALL n_advSetFeatures(JNIEnv*, jclass, jint f) { advancedSetFeatures((uint32_t)f); }
-static void JNICALL n_advSetTables(JNIEnv*, jclass, jlong mat, jlong emi) {
-    @autoreleasepool { advancedSetTables((const uint8_t*)ptr(mat), (const uint8_t*)ptr(emi)); }
+static void JNICALL n_advSetTables(JNIEnv*, jclass, jlong mat, jlong emi, jlong col) {
+    @autoreleasepool { advancedSetTables((const uint8_t*)ptr(mat), (const uint8_t*)ptr(emi), (const uint8_t*)ptr(col)); }
 }
 static jboolean JNICALL n_rtSupported(JNIEnv*, jclass) { return rtAvailable(); }
 static jboolean JNICALL n_rtAccelerated(JNIEnv*, jclass) { return engine().rtAccelerated; }
@@ -166,9 +169,10 @@ static JNINativeMethod kMethods[] = {
     {(char*)"setOption", (char*)"(II)V", (void*)n_setOption},
     {(char*)"sectionUpload", (char*)"(IIJIIIII)V", (void*)n_sectionUpload},
     {(char*)"sectionDelete", (char*)"(I)V", (void*)n_sectionDelete},
+    {(char*)"sectionSolid", (char*)"(IJZ)V", (void*)n_sectionSolid},
     {(char*)"advSetEnabled", (char*)"(Z)V", (void*)n_advSetEnabled},
     {(char*)"advSetFeatures", (char*)"(I)V", (void*)n_advSetFeatures},
-    {(char*)"advSetTables", (char*)"(JJ)V", (void*)n_advSetTables},
+    {(char*)"advSetTables", (char*)"(JJJ)V", (void*)n_advSetTables},
     {(char*)"rtSupported", (char*)"()Z", (void*)n_rtSupported},
     {(char*)"rtAccelerated", (char*)"()Z", (void*)n_rtAccelerated},
     {(char*)"advSetPbr", (char*)"(II)V", (void*)n_advSetPbr},
