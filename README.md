@@ -40,7 +40,7 @@ It is an OptiFine replacement: if OptiFine is installed too, metal189 stays disa
 ## Using it
 
 * **Video Settings → Shaders...** opens the rendering settings.
-* **F6** toggles the advanced pipeline on or off. A second key, *Rendering Settings*
+* **K** toggles the advanced pipeline on or off. A second key, *Rendering Settings*
   (unbound by default), opens the settings screen; both can be rebound under
   Controls → metal189.
 * Settings persist in `config/metal189.properties`.

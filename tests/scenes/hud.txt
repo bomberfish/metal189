@@ -1,0 +1,34 @@
+sleep 3
+world hud1 5 flat
+waitWorld
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /gamerule sendCommandFeedback false
+cmd /time set 6000
+cmd /tp @p 0.5 4 0.5 180 10
+sleep 3
+cmd /kill @e[type=!Player]
+cmd /scoreboard objectives add kills dummy Bedwars
+cmd /scoreboard objectives setdisplay sidebar kills
+cmd /scoreboard players set Dev kills 12
+cmd /scoreboard players set Red_Team kills 7
+cmd /scoreboard players set Blue_Team kills 3
+cmd /scoreboard objectives add hp health
+cmd /scoreboard objectives setdisplay list hp
+cmd /summon ArmorStand 0.5 4 -4 {CustomName:"Opponent",CustomNameVisible:1,Invisible:0}
+cmd /summon Zombie 2.5 4 -6 {NoAI:1,CustomName:"Nametag test",CustomNameVisible:1}
+cmd /title @p times 0 400 0
+cmd /title @p subtitle {"text":"subtitle line","color":"gray"}
+cmd /title @p title {"text":"VICTORY","color":"gold","bold":true}
+sleep 2
+capture CAPTURE_A
+tab on
+sleep 1
+capture CAPTURE_B
+tab off
+chatvis 0
+cmd /tellraw @p {"text":"chat line one","color":"yellow"}
+cmd /tellraw @p [{"text":"[","color":"gray"},{"text":"VIP","color":"green"},{"text":"] Player: hello","color":"white"}]
+sleep 1
+capture CAPTURE_C
+quit

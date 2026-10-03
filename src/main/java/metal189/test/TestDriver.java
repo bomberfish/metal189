@@ -57,8 +57,6 @@ public final class TestDriver {
     private static int hurtTicks;
     private static boolean leavingDimension;
     private static Pip pip;
-    private static net.minecraft.server.MinecraftServer quitServer;
-    private static int quitWait;
     private static float spinRate;
     private static int spinFrames;
 
@@ -267,6 +265,14 @@ public final class TestDriver {
                     pip = null;
                 }
                 return true;
+            case "tab":
+                // tab on|off : hold the player list key
+                net.minecraft.client.settings.KeyBinding.setKeyBindState(mc.gameSettings.keyBindPlayerList.getKeyCode(), "on".equals(a[1]));
+                return true;
+            case "chatvis":
+                // chatvis 0|1|2 : chat visibility (tests normally hide chat)
+                mc.gameSettings.chatVisibility = net.minecraft.entity.player.EntityPlayer.EnumChatVisibility.getEnumChatVisibility(Integer.parseInt(a[1]));
+                return true;
             case "toggle":
                 // same path as the toggle keybind (saves config/metal189.properties)
                 metal189.world.Pipeline.toggle();
@@ -306,25 +312,12 @@ public final class TestDriver {
                 fpsFrames = 0;
                 fpsLabel = a.length > 2 ? a[2] : "run";
                 return false;
-            case "quit": {
-                // like Save and Quit to Title first, so the world is saved by the server thread
-                // alone (vanilla races its shutdown hook against it when quitting in-world)
-                net.minecraft.server.MinecraftServer srv = net.minecraft.server.MinecraftServer.getServer();
-                if (mc.theWorld != null) {
-                    quitServer = srv;
-                    mc.theWorld.sendQuittingDisconnectingPacket();
-                    mc.loadWorld(null);
-                    mc.displayGuiScreen(new net.minecraft.client.gui.GuiMainMenu());
-                    pc--;
-                    return false;
-                }
-                if (quitServer != null && !quitServer.isServerStopped() && quitWait++ < 600) {
-                    pc--;
-                    return false;
-                }
+            case "quit":
+                // Plain shutdown. (Vanilla's integrated-server shutdown has races: stopping the
+                // server or disconnecting first can deadlock in IntegratedServer.initiateShutdown,
+                // which waits on a task a stopping server never runs.)
                 mc.shutdown();
                 return false;
-            }
             case "screenshot": {
                 // the F2 path (ScreenShotHelper reads the framebuffer through the GL layer)
                 net.minecraft.util.IChatComponent msg = net.minecraft.util.ScreenShotHelper.saveScreenshot(

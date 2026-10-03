@@ -15,8 +15,9 @@ import net.minecraftforge.fml.common.gameevent.InputEvent;
 /** Settings entry points: a button in Video Settings and two keybinds. */
 public final class ClientEvents {
     private static final int BUTTON_ID = 0x189;
-    // LWJGL key codes: F6 toggles the advanced pipeline; the settings key is unbound by default
-    private final KeyBinding toggle = new KeyBinding("key.metal189.toggle", 64, "key.categories.metal189");
+    // LWJGL key codes: K toggles the advanced pipeline (as in Iris; F6 belongs to 1.8.9's stream
+    // keys); the settings key is unbound by default
+    private final KeyBinding toggle = new KeyBinding("key.metal189.toggle", 37, "key.categories.metal189");
     private final KeyBinding settings = new KeyBinding("key.metal189.settings", 0, "key.categories.metal189");
 
     public ClientEvents() {
