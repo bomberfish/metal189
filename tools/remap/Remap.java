@@ -34,6 +34,7 @@ public class Remap {
                 }
             }
         }
+        readHierarchy(new File(a[0])); // the mod's own classes (overrides of game methods)
         for (int i = 3; i < a.length; i++) readHierarchy(new File(a[i]));
         Remapper rm = new Remapper() {
             @Override public String mapMethodName(String owner, String name, String desc) {

@@ -12,15 +12,22 @@
 
 namespace m189 {
 
+// Per-frame statistics (logged with -Dmetal189.gpuStats=true).
+struct FrameStats { uint64_t draws, terrainDraws, terrainQuads, arenaDraws, meshDraws, passes; };
+static FrameStats g_stats, g_statsAcc;
+static int g_statsFrames;
+
 // Runtime options (set from Java, see metal189.engine.Native.setOption).
 int g_optQuadDiagonal = 1; // 1: split quads along v1-v3 like Apple's GL, 0: along v0-v2
 
 extern bool g_optPresent;
+extern bool g_optGpuStats;
 
 void setOption(int key, int value) {
     switch (key) {
         case 1: g_optQuadDiagonal = value; break;
         case 2: g_optPresent = value != 0; break;
+        case 3: g_optGpuStats = value != 0; break;
         default: break;
     }
 }
@@ -67,7 +74,7 @@ struct PipeKeyHash {
 
 static std::unordered_map<PipeKey, id<MTLRenderPipelineState>, PipeKeyHash> g_pipes;
 static std::unordered_map<uint32_t, id<MTLDepthStencilState>> g_dss;
-static id<MTLFunction> g_vfn[8], g_ffn[8];
+static id<MTLFunction> g_vfn[32], g_ffn[32];
 static id<MTLFunction> g_clearV, g_clearF;
 static id<MTLBuffer> g_quadIndices;
 static uint32_t g_quadIndexQuads = 0;
@@ -132,14 +139,16 @@ static uint32_t indexToGL(uint32_t i) {
 bool executorInit() {
     Engine& e = engine();
     if (!e.library) { log("no shader library"); return false; }
-    for (int v = 0; v < 8; v++) {
+    for (int v = 0; v < 32; v++) {
         MTLFunctionConstantValues* cv = [MTLFunctionConstantValues new];
-        bool alpha = v & 1, logic = (v >> 1) & 1, flat = (v >> 2) & 1;
+        bool alpha = v & 1, logic = (v >> 1) & 1, flat = (v >> 2) & 1, terrain = (v >> 3) & 1, modulate = (v >> 4) & 1;
         [cv setConstantValue:&alpha type:MTLDataTypeBool atIndex:0];
         [cv setConstantValue:&logic type:MTLDataTypeBool atIndex:1];
         [cv setConstantValue:&flat type:MTLDataTypeBool atIndex:2];
+        [cv setConstantValue:&terrain type:MTLDataTypeBool atIndex:3];
+        [cv setConstantValue:&modulate type:MTLDataTypeBool atIndex:4];
         NSError* err = nil;
-        g_vfn[v] = [e.library newFunctionWithName:@"ff_vertex" constantValues:cv error:&err];
+        g_vfn[v] = [e.library newFunctionWithName:(terrain ? @"terrain_vertex" : @"ff_vertex") constantValues:cv error:&err];
         if (!g_vfn[v]) { log("ff_vertex: %s", err.localizedDescription.UTF8String); return false; }
         g_ffn[v] = [e.library newFunctionWithName:@"ff_fragment" constantValues:cv error:&err];
         if (!g_ffn[v]) { log("ff_fragment: %s", err.localizedDescription.UTF8String); return false; }
@@ -168,8 +177,8 @@ static id<MTLRenderPipelineState> pipeline(const PipeKey& k) {
     auto it = g_pipes.find(k);
     if (it != g_pipes.end()) return it->second;
     MTLRenderPipelineDescriptor* d = [MTLRenderPipelineDescriptor new];
-    d.vertexFunction = g_vfn[k.variant & 7];
-    d.fragmentFunction = g_ffn[k.variant & 7];
+    d.vertexFunction = g_vfn[k.variant & 31];
+    d.fragmentFunction = g_ffn[k.variant & 31];
     MTLRenderPipelineColorAttachmentDescriptor* c = d.colorAttachments[0];
     c.pixelFormat = (MTLPixelFormat)k.color;
     if (k.blend) {
@@ -238,8 +247,13 @@ static id<MTLBuffer> quadIndices(uint32_t quads) {
     uint32_t* p = (uint32_t*)b.contents;
     for (uint32_t q = 0; q < n; q++) {
         uint32_t v = q * 4;
-        p[q * 6 + 0] = v; p[q * 6 + 1] = v + 1; p[q * 6 + 2] = v + 2;
-        p[q * 6 + 3] = v; p[q * 6 + 4] = v + 2; p[q * 6 + 5] = v + 3;
+        if (g_optQuadDiagonal) {
+            p[q * 6 + 0] = v; p[q * 6 + 1] = v + 1; p[q * 6 + 2] = v + 3;
+            p[q * 6 + 3] = v + 1; p[q * 6 + 4] = v + 2; p[q * 6 + 5] = v + 3;
+        } else {
+            p[q * 6 + 0] = v; p[q * 6 + 1] = v + 1; p[q * 6 + 2] = v + 2;
+            p[q * 6 + 3] = v; p[q * 6 + 4] = v + 2; p[q * 6 + 5] = v + 3;
+        }
     }
     g_quadIndices = b;
     g_quadIndexQuads = n;
@@ -388,6 +402,7 @@ static void flushBatch(Exec& x) {
     if (x.batchIdxCount == 0 || !x.enc) return;
     [x.enc drawIndexedPrimitives:metalPrim(x.batchClass) indexCount:x.batchIdxCount indexType:MTLIndexTypeUInt32
                      indexBuffer:x.batchIdx indexBufferOffset:x.batchIdxStart * 4];
+    g_stats.arenaDraws++;
 }
 
 static void endPass(Exec& x) {
@@ -461,6 +476,7 @@ static bool beginPass(Exec& x) {
     }
     x.pendColor = x.pendDepth = x.pendStencil = false;
     x.enc = [x.cb renderCommandEncoderWithDescriptor:rp];
+    g_stats.passes++;
     x.bPso = nil;
     x.bDss = nil;
     x.bCull = x.bWinding = -1;
@@ -614,7 +630,7 @@ static size_t buildUniforms(Exec& x, uint32_t texMask) {
 }
 
 // Applies every piece of encoder state a draw needs. Returns false to skip the draw.
-static bool prepareDraw(Exec& x, uint32_t glPrim, int format) {
+static bool prepareDraw(Exec& x, uint32_t glPrim, int format, bool terrain = false) {
     if (!beginPass(x)) return false;
     if (!x.cur.color) return false;
     PrimClass pc = primClass(glPrim);
@@ -643,7 +659,10 @@ static bool prepareDraw(Exec& x, uint32_t glPrim, int format) {
         k.blendEq = g.pipe.eq;
     }
     k.writeMask = g.pipe.colorMask;
-    k.variant = (g.frag.alphaTest && g.frag.alphaFunc != 0x207 ? 1 : 0) | (logic ? 2 : 0) | (flat ? 4 : 0);
+    bool modulate = true;
+    for (int i = 0; i < 3; i++) if ((texMask & (FF_TEX0 << i)) && g.units[i].mode != 0x2100) modulate = false;
+    k.variant = (g.frag.alphaTest && g.frag.alphaFunc != 0x207 ? 1 : 0) | (logic ? 2 : 0) | (flat ? 4 : 0) |
+                (terrain ? 8 : 0) | (modulate ? 16 : 0);
     id<MTLRenderPipelineState> pso = pipeline(k);
     if (!pso) return false;
     if (pso != x.bPso) { [x.enc setRenderPipelineState:pso]; x.bPso = pso; }
@@ -760,6 +779,7 @@ static void drawArena(Exec& x, const DrawCmd& d) {
 
 static void drawMesh(Exec& x, const DrawMeshCmd& d) {
     flushBatch(x);
+    g_stats.meshDraws++;
     id<MTLBuffer> vb = mesh((int)d.mesh);
     if (!vb) return;
     uint32_t n = indexCount(d.prim, d.count);
@@ -772,7 +792,7 @@ static void drawMesh(Exec& x, const DrawMeshCmd& d) {
     }
     bool flat = g.raster.flat != 0;
     PrimClass pc = primClass(d.prim);
-    if (d.prim == 7 && !flat && !g_optQuadDiagonal) {
+    if (d.prim == 7 && !flat) {
         id<MTLBuffer> qi = quadIndices(d.count / 4);
         [x.enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:n indexType:MTLIndexTypeUInt32 indexBuffer:qi indexBufferOffset:0];
         return;
@@ -786,6 +806,65 @@ static void drawMesh(Exec& x, const DrawMeshCmd& d) {
     uint32_t* idx = allocIndices(x, n, &ib, &start);
     writeIndices(idx, d.prim, d.count, 0, flat);
     [x.enc drawIndexedPrimitives:metalPrim(pc) indexCount:n indexType:MTLIndexTypeUInt32 indexBuffer:ib indexBufferOffset:start * 4];
+}
+
+// Section transform, computed with the same float operations GL uses for
+// glTranslatef(offset) followed by glMultMatrixf(chunk matrix).
+static void sectionMatrix(const simd_float4x4& mv, float ox, float oy, float oz, float* out) {
+    float m[16];
+    memcpy(m, &mv, sizeof m);
+    m[12] += m[0] * ox + m[4] * oy + m[8] * oz;
+    m[13] += m[1] * ox + m[5] * oy + m[9] * oz;
+    m[14] += m[2] * ox + m[6] * oy + m[10] * oz;
+    m[15] += m[3] * ox + m[7] * oy + m[11] * oz;
+    // chunk matrix from RenderChunk.initModelviewMatrix: T(-8) S(1.000001) T(8)
+    static float chunk[16];
+    static bool init = false;
+    if (!init) {
+        const float f = 1.000001f;
+        float c[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -8, -8, -8, 1};
+        for (int i = 0; i < 4; i++) { c[i] *= f; c[4 + i] *= f; c[8 + i] *= f; }
+        c[12] += c[0] * 8 + c[4] * 8 + c[8] * 8;
+        c[13] += c[1] * 8 + c[5] * 8 + c[9] * 8;
+        c[14] += c[2] * 8 + c[6] * 8 + c[10] * 8;
+        c[15] += c[3] * 8 + c[7] * 8 + c[11] * 8;
+        memcpy(chunk, c, sizeof c);
+        init = true;
+    }
+    for (int col = 0; col < 4; col++) {
+        float b0 = chunk[col * 4], b1 = chunk[col * 4 + 1], b2 = chunk[col * 4 + 2], b3 = chunk[col * 4 + 3];
+        for (int r = 0; r < 4; r++) out[col * 4 + r] = m[r] * b0 + m[4 + r] * b1 + m[8 + r] * b2 + m[12 + r] * b3;
+    }
+}
+
+static void drawTerrain(Exec& x, const CmdHeader* h) {
+    flushBatch(x);
+    const TerrainCmd& t = payload<TerrainCmd>(h);
+    const TerrainEntry* e = (const TerrainEntry*)((const uint8_t*)(h + 1) + sizeof(TerrainCmd));
+    if (t.layer > 3) return;
+    bool prepared = false;
+    id<MTLBuffer> qi = nil;
+    for (uint32_t i = 0; i < t.count; i++) {
+        Section* s = section((int)e[i].section);
+        if (!s || !s->layers[t.layer]) continue;
+        uint32_t quads = s->vertices[t.layer] / 4;
+        if (quads == 0) continue;
+        if (!prepared) {
+            if (!prepareDraw(x, 7, (int)t.format, true)) return;
+            prepared = true;
+        }
+        float mv[16];
+        sectionMatrix(g.mv, e[i].x, e[i].y, e[i].z, mv);
+        [x.enc setVertexBytes:mv length:sizeof mv atIndex:3];
+        [x.enc setVertexBuffer:s->layers[t.layer] offset:0 atIndex:0];
+        x.bVb = s->layers[t.layer];
+        x.bVbOffset = 0;
+        qi = quadIndices(quads);
+        [x.enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:quads * 6 indexType:MTLIndexTypeUInt32
+                         indexBuffer:qi indexBufferOffset:0];
+        g_stats.terrainDraws++;
+        g_stats.terrainQuads += quads;
+    }
 }
 
 static void doClear(Exec& x, const ClearCmd& c) {
@@ -896,10 +975,24 @@ void executeFrame(id<MTLCommandBuffer> cb, const uint8_t* cmds, size_t len) {
             case OP_DRAW_MESH: drawMesh(x, payload<DrawMeshCmd>(h)); break;
             case OP_COPY_TEX: copyTex(x, payload<CopyTexCmd>(h)); break;
             case OP_PHASE: break;
+            case OP_TERRAIN: drawTerrain(x, h); break;
             default: break;
         }
     }
     endPass(x);
+    if (g_optGpuStats) {
+        g_statsAcc.terrainDraws += g_stats.terrainDraws; g_statsAcc.terrainQuads += g_stats.terrainQuads;
+        g_statsAcc.arenaDraws += g_stats.arenaDraws; g_statsAcc.meshDraws += g_stats.meshDraws; g_statsAcc.passes += g_stats.passes;
+        if (++g_statsFrames == 600) {
+            double n = g_statsFrames;
+            log("per frame: terrain draws %.0f (%.0fk quads), arena draws %.0f, mesh draws %.0f, passes %.1f",
+                g_statsAcc.terrainDraws / n, g_statsAcc.terrainQuads / n / 1000.0, g_statsAcc.arenaDraws / n,
+                g_statsAcc.meshDraws / n, g_statsAcc.passes / n);
+            g_statsAcc = {};
+            g_statsFrames = 0;
+        }
+    }
+    g_stats = {};
 }
 
 } // namespace m189

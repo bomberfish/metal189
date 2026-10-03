@@ -114,6 +114,10 @@ static jboolean JNICALL n_capture(JNIEnv* env, jclass, jint which, jstring path)
 }
 static void JNICALL n_refModeInstall(JNIEnv*, jclass) { refModeInstall(); }
 static void JNICALL n_setOption(JNIEnv*, jclass, jint k, jint v) { setOption(k, v); }
+static void JNICALL n_sectionUpload(JNIEnv*, jclass, jint id, jint layer, jlong data, jint bytes, jint count) {
+    @autoreleasepool { sectionUpload(id, layer, ptr(data), (size_t)bytes, (uint32_t)count); }
+}
+static void JNICALL n_sectionDelete(JNIEnv*, jclass, jint id) { sectionDelete(id); }
 static void JNICALL n_renderbufferStorage(JNIEnv*, jclass, jint id, jint fmt, jint w, jint h) { @autoreleasepool { renderbufferStorage(id, fmt, w, h); } }
 
 static JNINativeMethod kMethods[] = {
@@ -149,6 +153,8 @@ static JNINativeMethod kMethods[] = {
     {(char*)"capture", (char*)"(ILjava/lang/String;)Z", (void*)n_capture},
     {(char*)"refModeInstall", (char*)"()V", (void*)n_refModeInstall},
     {(char*)"setOption", (char*)"(II)V", (void*)n_setOption},
+    {(char*)"sectionUpload", (char*)"(IIJII)V", (void*)n_sectionUpload},
+    {(char*)"sectionDelete", (char*)"(I)V", (void*)n_sectionDelete},
 };
 
 // The Java side calls System.load on this library and then Native.register(),

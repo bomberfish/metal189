@@ -28,6 +28,7 @@ enum Op : uint16_t {
     OP_CLEAR = 15,
     OP_COPY_TEX = 16,
     OP_PHASE = 17,
+    OP_TERRAIN = 18,
 };
 
 struct PipeState { uint32_t blend, srcRGB, dstRGB, srcA, dstA, eq, colorMask, logicOn, logicOp; };
@@ -68,6 +69,8 @@ struct DrawMeshCmd { uint32_t prim, format, mesh, offset, count; };
 struct TargetCmd { uint32_t fbo, colorTex, depth; };
 struct ClearCmd { uint32_t mask; float r, g, b, a, depth; uint32_t stencil; };
 struct CopyTexCmd { uint32_t tex, level; int32_t xoff, yoff, x, y, w, h; };
+struct TerrainCmd { uint32_t layer, format, count; };
+struct TerrainEntry { uint32_t section; float x, y, z; };
 
 struct CmdHeader {
     uint16_t op;

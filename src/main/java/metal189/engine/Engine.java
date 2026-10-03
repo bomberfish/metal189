@@ -35,6 +35,7 @@ public final class Engine {
         initialized = true;
         Native.setOption(1, Integer.getInteger("metal189.quadDiagonal", 1));
         Native.setOption(2, Boolean.parseBoolean(System.getProperty("metal189.present", "true")) ? 1 : 0);
+        Native.setOption(3, Boolean.getBoolean("metal189.gpuStats") ? 1 : 0);
         Native.LOG.info("Metal device: {}", Native.deviceName());
     }
 

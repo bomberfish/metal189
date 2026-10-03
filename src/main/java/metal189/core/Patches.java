@@ -44,6 +44,20 @@ public final class Patches {
         register("net.minecraft.client.renderer.WorldVertexBufferUploader",
             Asm.replaceBody("draw", "func_181679_a", "(Lnet/minecraft/client/renderer/WorldRenderer;)V",
                 "metal189/capture/Tess", "draw", "(Lnet/minecraft/client/renderer/WorldRenderer;)V", false));
+
+        // Terrain: engine-owned section buffers and per-layer draws.
+        register("net.minecraft.client.renderer.RenderGlobal", Asm.chain(
+            Asm.redirectNew("net/minecraft/client/renderer/RenderList", "metal189/terrain/TerrainContainer"),
+            Asm.redirectNew("net/minecraft/client/renderer/VboRenderList", "metal189/terrain/TerrainContainer")));
+        register("net.minecraft.client.renderer.chunk.ChunkRenderDispatcher",
+            Asm.injectHead("uploadChunk", "func_178503_a",
+                "(Lnet/minecraft/util/EnumWorldBlockLayer;Lnet/minecraft/client/renderer/WorldRenderer;Lnet/minecraft/client/renderer/chunk/RenderChunk;Lnet/minecraft/client/renderer/chunk/CompiledChunk;)Lcom/google/common/util/concurrent/ListenableFuture;",
+                "metal189/terrain/Terrain", "upload",
+                "(Lnet/minecraft/util/EnumWorldBlockLayer;Lnet/minecraft/client/renderer/WorldRenderer;Lnet/minecraft/client/renderer/chunk/RenderChunk;Lnet/minecraft/client/renderer/chunk/CompiledChunk;)Lcom/google/common/util/concurrent/ListenableFuture;",
+                false));
+        register("net.minecraft.client.renderer.chunk.RenderChunk",
+            Asm.injectHead("deleteGlResources", "func_178566_a", "()V",
+                "metal189/terrain/Terrain", "delete", "(Lnet/minecraft/client/renderer/chunk/RenderChunk;)V", true));
     }
 
     static ClassPatch forClass(String name) { return PATCHES.get(name); }

@@ -73,6 +73,8 @@ val reobfJar by tasks.registering(Exec::class) {
     val input = tasks.jar.flatMap { it.archiveFile }
     val output = layout.buildDirectory.file("libs/metal189-${project.version}.jar")
     inputs.file(input)
+    inputs.file("tools/remap/Remap.java")
+    inputs.file("tools/reobf.sh")
     outputs.file(output)
     commandLine("tools/reobf.sh", input.get().asFile.absolutePath, output.get().asFile.absolutePath)
 }

@@ -1,0 +1,34 @@
+sleep 3
+world flat2 42 flat
+waitWorld
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /time set 14000
+cmd /weather clear
+cmd /tp @p 0.5 4 0.5 180 15
+sleep 4
+cmd /summon Zombie -3 4 -5 {NoAI:1,Rotation:[0f,0f],Equipment:[{id:iron_sword},{},{},{id:iron_chestplate},{id:iron_helmet}]}
+cmd /summon Skeleton -1.5 4 -5 {NoAI:1,Rotation:[0f,0f],Equipment:[{id:bow},{},{},{},{}]}
+cmd /summon Creeper 0 4 -5 {NoAI:1,Rotation:[0f,0f]}
+cmd /summon Pig 1.5 4 -5 {NoAI:1,Rotation:[90f,0f],Saddle:1}
+cmd /summon Sheep 3 4 -5 {NoAI:1,Rotation:[90f,0f],Color:14}
+cmd /summon Cow -0.5 4 -8 {NoAI:1,Rotation:[90f,0f]}
+cmd /summon Chicken 1.5 4 -7 {NoAI:1,Rotation:[0f,0f]}
+cmd /summon ArmorStand -1 4 -3 {Rotation:[0f,0f],ShowArms:1,Equipment:[{id:diamond_sword,tag:{ench:[{id:16,lvl:1}]}},{id:golden_boots},{id:golden_leggings},{id:golden_chestplate},{id:golden_helmet}]}
+sleep 3
+capture CAPTURE_A
+hurtall 5
+sleep 1
+capture CAPTURE_B
+hurtall 0
+gui survival
+sleep 1
+capture CAPTURE_C
+gui inventory
+sleep 1
+capture CAPTURE_D
+gui none
+f3
+sleep 1
+capture CAPTURE_E
+quit

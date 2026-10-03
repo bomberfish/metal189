@@ -96,6 +96,7 @@ void arenaGrow(size_t minBytes, int64_t* info) {
 // frames present synchronously from the frame's own command buffer.
 
 bool g_optPresent = true;
+bool g_optGpuStats = false;
 static bool g_vsync = false;
 
 enum ScreenState { SS_FREE, SS_WRITING, SS_READY, SS_PRESENTING };
@@ -303,6 +304,10 @@ void endFrame(const uint8_t* cmds, size_t len) {
         dispatch_semaphore_t sem = e.inflight;
         [cb addCompletedHandler:^(id<MTLCommandBuffer> b) {
             if (b.status == MTLCommandBufferStatusError) log("command buffer error: %s", b.error.localizedDescription.UTF8String);
+            double gpu = (b.GPUEndTime - b.GPUStartTime) * 1000.0;
+            static double acc = 0; static int n = 0;
+            acc += gpu; n++;
+            if (n == 600) { if (g_optGpuStats) log("gpu frame time avg %.3f ms", acc / n); acc = 0; n = 0; }
             dispatch_semaphore_signal(sem);
         }];
         [cb commit];

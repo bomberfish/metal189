@@ -7,6 +7,8 @@
 constant bool fc_alphaTest [[function_constant(0)]];
 constant bool fc_logicOp   [[function_constant(1)]];
 constant bool fc_flat      [[function_constant(2)]];
+constant bool fc_terrain   [[function_constant(3)]];  // per-section modelview in buffer(3)
+constant bool fc_modulate  [[function_constant(4)]];  // every enabled unit uses GL_MODULATE
 constant bool fc_smooth = !fc_flat;
 
 struct FFOut {
@@ -83,7 +85,8 @@ static float4 lightVertex(constant FFUniforms& u, float4 color, float3 n, float3
 vertex FFOut ff_vertex(uint vid [[vertex_id]],
                        device const uchar* vbuf [[buffer(0)]],
                        constant VertexLayout& layout [[buffer(1)]],
-                       constant FFUniforms& u [[buffer(2)]]) {
+                       constant FFUniforms& u [[buffer(2)]],
+                       constant float4x4& sectionMV [[buffer(3), function_constant(fc_terrain)]]) {
     device const uchar* v = vbuf + vid * layout.stride.x;
     float4 objPos = fetch(v, layout.pos, float4(0, 0, 0, 1));
     float4 color = fetch(v, layout.color, u.color);
@@ -91,7 +94,7 @@ vertex FFOut ff_vertex(uint vid [[vertex_id]],
     float4 t1 = fetch(v, layout.tex1, u.texCoord1);
     float3 nrm = fetch(v, layout.normal, float4(u.normal.xyz, 0)).xyz;
 
-    float4 eye = u.modelview * objPos;
+    float4 eye = (fc_terrain ? sectionMV : u.modelview) * objPos;
     FFOut o;
     float4 clip = u.proj * eye;
     if (u.flags.x & FF_FLIP_Y) clip.y = -clip.y;
@@ -120,6 +123,48 @@ vertex FFOut ff_vertex(uint vid [[vertex_id]],
     o.tex0 = u.texMatrix0 * t0;
     float4 tc1 = u.texMatrix1 * t1;
     o.tex1 = tc1.xy / tc1.w;
+    if (f & FF_FOG) {
+        float dist = (f & FF_FOG_RADIAL) ? length(eye.xyz) : abs(eye.z);
+        float ff;
+        uint mode = u.flags.z;
+        if (mode == 0) ff = (u.fogParams.y - dist) * u.fogParams.w;
+        else if (mode == 1) ff = exp(-u.fogParams.z * dist);
+        else { float d = u.fogParams.z * dist; ff = exp(-d * d); }
+        o.fogFactor = saturate(ff);
+    } else {
+        o.fogFactor = 1.0;
+    }
+    return o;
+}
+
+// ---------------------------------------------------------------------------
+// terrain: vanilla BLOCK vertices (pos 3f, colour 4ub, uv 2f, lightmap 2s)
+
+struct BlockVertex {
+    packed_float3 pos;
+    uchar4 color;
+    packed_float2 uv;
+    packed_short2 lm;
+};
+
+vertex FFOut terrain_vertex(uint vid [[vertex_id]],
+                            device const BlockVertex* verts [[buffer(0)]],
+                            constant FFUniforms& u [[buffer(2)]],
+                            constant float4x4& sectionMV [[buffer(3)]]) {
+    BlockVertex v = verts[vid];
+    float4 eye = sectionMV * float4(float3(v.pos), 1.0);
+    FFOut o;
+    float4 clip = u.proj * eye;
+    if (u.flags.x & FF_FLIP_Y) clip.y = -clip.y;
+    clip.z = 0.5 * (clip.z + clip.w);
+    o.position = clip;
+    o.pointSize = 1.0;
+    float4 color = float4(v.color) * (1.0 / 255.0);
+    if (fc_flat) o.colorFlat = color; else o.colorSmooth = color;
+    o.tex0 = u.texMatrix0 * float4(float2(v.uv), 0.0, 1.0);
+    float4 tc1 = u.texMatrix1 * float4(float2(v.lm), 0.0, 1.0);
+    o.tex1 = tc1.xy / tc1.w;
+    uint f = u.flags.x;
     if (f & FF_FOG) {
         float dist = (f & FF_FOG_RADIAL) ? length(eye.xyz) : abs(eye.z);
         float ff;
@@ -264,9 +309,13 @@ fragment FFFragOut ff_fragment(FFOut in [[stage_in]],
     if (f & FF_TEX1) texels[1] = tex1.sample(s1, in.tex1);
     if (f & FF_TEX2) texels[2] = tex2.sample(s2, float2(0.0)); // unit 2 keeps its default coords
     float4 c = primary;
-    if (f & FF_TEX0) c = texEnv(u.env[0], u.envScale[0], texels[0], primary, c, u.envColor[0], texels);
-    if (f & FF_TEX1) c = texEnv(u.env[1], u.envScale[1], texels[1], primary, c, u.envColor[1], texels);
-    if (f & FF_TEX2) c = texEnv(u.env[2], u.envScale[2], texels[2], primary, c, u.envColor[2], texels);
+    if (fc_modulate) {
+        c *= texels[0] * texels[1] * texels[2]; // disabled units hold 1.0
+    } else {
+        if (f & FF_TEX0) c = texEnv(u.env[0], u.envScale[0], texels[0], primary, c, u.envColor[0], texels);
+        if (f & FF_TEX1) c = texEnv(u.env[1], u.envScale[1], texels[1], primary, c, u.envColor[1], texels);
+        if (f & FF_TEX2) c = texEnv(u.env[2], u.envScale[2], texels[2], primary, c, u.envColor[2], texels);
+    }
 
     if (fc_alphaTest) {
         if (!alphaPass(u.flags.w, c.a, u.alpha.x)) discard_fragment();

@@ -37,6 +37,14 @@ void renderbufferStorage(int id, int internalFormat, int w, int h);
 int meshCreate(const void* data, size_t size);
 void meshDelete(int id);
 
+struct Section {
+    id<MTLBuffer> layers[4] = {nil, nil, nil, nil};
+    uint32_t vertices[4] = {0, 0, 0, 0};
+};
+Section* section(int id);
+void sectionUpload(int id, int layer, const void* data, size_t bytes, uint32_t vertexCount);
+void sectionDelete(int id);
+
 StagingAlloc stagingAlloc(size_t bytes);
 void encodePendingResourceWork(id<MTLCommandBuffer> cb);
 void releaseDeferred();

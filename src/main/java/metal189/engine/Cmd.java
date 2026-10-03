@@ -21,6 +21,7 @@ public final class Cmd {
     public static final int CLEAR = 15;          // 7: mask, r f, g f, b f, a f, depth f, stencil
     public static final int COPY_TEX = 16;       // 8: tex, level, xoff, yoff, x, y, w, h
     public static final int PHASE = 17;          // 1: phase id
+    public static final int TERRAIN = 18;        // 3 + 4n: layer, format, n, {section, offX f, offY f, offZ f}*n
 
     public static final int SZ_PIPE = 9, SZ_DEPTH = 4, SZ_RASTER = 8, SZ_FRAG = 13, SZ_UNIT = 31, SZ_UNITS = 3 * 31,
             SZ_TEXGEN = 37, SZ_LIGHT = 33, SZ_ATTRIB = 15, SZ_VIEWPORT = 9;

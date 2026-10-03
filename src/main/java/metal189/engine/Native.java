@@ -92,6 +92,8 @@ public final class Native {
     public static native boolean capture(int which, String path);
     public static native void refModeInstall();
     public static native void setOption(int key, int value);
+    public static native void sectionUpload(int id, int layer, long data, int bytes, int vertexCount);
+    public static native void sectionDelete(int id);
 
     // ---- window / input ----
     public static native boolean windowCreate(int w, int h, String title, int flags);

@@ -307,6 +307,34 @@ void renderbufferStorage(int id, int internalFormat, int w, int h) {
 }
 
 // ---------------------------------------------------------------------------
+// terrain sections
+
+static std::unordered_map<int, Section> g_sections;
+
+Section* section(int sid) {
+    auto it = g_sections.find(sid);
+    return it == g_sections.end() ? nullptr : &it->second;
+}
+
+void sectionUpload(int sid, int layer, const void* data, size_t bytes, uint32_t vertexCount) {
+    if (layer < 0 || layer > 3) return;
+    Section& s = g_sections[sid];
+    if (s.layers[layer]) g_deferredReleases.push_back(s.layers[layer]);
+    s.layers[layer] = nil;
+    s.vertices[layer] = 0;
+    if (bytes == 0 || vertexCount == 0) return;
+    s.layers[layer] = [device() newBufferWithBytes:data length:bytes options:MTLResourceStorageModeShared];
+    s.vertices[layer] = vertexCount;
+}
+
+void sectionDelete(int sid) {
+    auto it = g_sections.find(sid);
+    if (it == g_sections.end()) return;
+    for (id<MTLBuffer> b : it->second.layers) if (b) g_deferredReleases.push_back(b);
+    g_sections.erase(it);
+}
+
+// ---------------------------------------------------------------------------
 // meshes
 
 int meshCreate(const void* data, size_t size) {
