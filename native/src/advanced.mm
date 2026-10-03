@@ -52,14 +52,20 @@ namespace {
 
 struct Targets {
     int w = 0, h = 0;
-    id<MTLTexture> albedo, normal, light, linZ, hdr, sceneColor, sceneDepth;
+    id<MTLTexture> albedo, normal, light, linZ, hdr, sceneColor, sceneDepth, taa[2];
     std::vector<id<MTLTexture>> bloom;
 };
 
 struct State {
     bool init = false;
     id<MTLRenderPipelineState> gTerrain[4], gGeneric[2], shadowTerrain[4], shadowGeneric[2];
-    id<MTLRenderPipelineState> lightPso[2], waterPso[2], tonemapPso, bloomDown, bloomUp, skyLutPso;
+    id<MTLRenderPipelineState> lightPso[2], waterPso[2], tonemapPso, bloomDown, bloomUp, skyLutPso, taaPso;
+    // TAA history
+    simd_float4x4 prevViewProj = matrix_identity_float4x4;
+    double prevCam[3] = {0, 0, 0};
+    int prevDim = 0;
+    bool historyValid = false;
+    int taaIndex = 0;
     id<MTLTexture> skyLut;
     id<MTLDepthStencilState> depthWrite, depthTestNoWrite, depthAlways;
     id<MTLSamplerState> shadowCmp, linearClamp, pointClamp;
@@ -133,6 +139,12 @@ bool initState() {
         ld.fragmentFunction = fn(@"light_fragment", false, false, true);
         S.lightPso[1] = pso(ld);
     }
+
+    MTLRenderPipelineDescriptor* ta = [MTLRenderPipelineDescriptor new];
+    ta.vertexFunction = fn(@"fullscreen_vertex");
+    ta.fragmentFunction = fn(@"taa_fragment");
+    ta.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+    S.taaPso = pso(ta);
 
     MTLRenderPipelineDescriptor* sl = [MTLRenderPipelineDescriptor new];
     sl.vertexFunction = fn(@"fullscreen_vertex");
@@ -223,6 +235,9 @@ void ensureTargets(int w, int h) {
     S.t.light = rt(MTLPixelFormatRGBA8Unorm, w, h, @"gLight");
     S.t.linZ = rt(MTLPixelFormatR32Float, w, h, @"gLinZ");
     S.t.hdr = rt(MTLPixelFormatRGBA16Float, w, h, @"hdr");
+    S.t.taa[0] = rt(MTLPixelFormatRGBA16Float, w, h, @"taa0");
+    S.t.taa[1] = rt(MTLPixelFormatRGBA16Float, w, h, @"taa1");
+    S.historyValid = false;
     S.t.sceneColor = rt(MTLPixelFormatRGBA16Float, w, h, @"sceneColor");
     S.t.sceneDepth = rt(MTLPixelFormatDepth32Float, w, h, @"sceneDepth");
     S.t.bloom.clear();
@@ -380,6 +395,24 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
                 rtPrepare(cb, camX, camY, camZ, std::max(env.renderDistance, 32.0f) + 16.0f, rts);
     if (!rtOn) features &= ~(ADV_RT_SHADOW | ADV_RT_REFL);
     fr.rtCam = simd_make_float4(rts.camera, 0);
+
+    // TAA: Halton(2,3) sub-pixel jitter; history is reprojected with the camera motion
+    bool taaOn = (features & ADV_TAA) && S.taaPso;
+    if (!taaOn) features &= ~ADV_TAA;
+    {
+        static const float h2[8] = {0.5f, 0.25f, 0.75f, 0.125f, 0.625f, 0.375f, 0.875f, 0.0625f};
+        static const float h3[8] = {1 / 3.0f, 2 / 3.0f, 1 / 9.0f, 4 / 9.0f, 7 / 9.0f, 2 / 9.0f, 5 / 9.0f, 8 / 9.0f};
+        int k = (int)(S.frame % 8);
+        if (taaOn) fr.jitter = simd_make_float4((h2[k] - 0.5f) * 2.0f / W, (h3[k] - 0.5f) * 2.0f / H, 0, 0);
+        double dx = camX - S.prevCam[0], dy = camY - S.prevCam[1], dz = camZ - S.prevCam[2];
+        bool valid = taaOn && S.historyValid && S.prevDim == env.dimension && fabs(dx) + fabs(dy) + fabs(dz) < 16.0;
+        fr.prevViewProj = S.prevViewProj;
+        fr.taa = simd_make_float4((float)dx, (float)dy, (float)dz, valid ? 1.0f : 0.0f);
+        S.prevViewProj = simd_mul(fr.proj, fr.view);
+        S.prevCam[0] = camX; S.prevCam[1] = camY; S.prevCam[2] = camZ;
+        S.prevDim = env.dimension;
+        S.historyValid = taaOn;
+    }
     fr.flags = simd_make_uint4(features, (uint32_t)env.dimension, (uint32_t)S.frame, (uint32_t)g_optAdvDebug);
     int shadowRes = g_shadowRes;
     if (features & ADV_SHADOWS) {
@@ -653,9 +686,32 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [e endEncoding];
     }
 
+    // ---- temporal anti-aliasing ----
+    id<MTLTexture> post = S.t.hdr;
+    if (taaOn) {
+        id<MTLTexture> out = S.t.taa[S.taaIndex], prev = S.t.taa[S.taaIndex ^ 1];
+        S.taaIndex ^= 1;
+        MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = out;
+        rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        profRender(rp, "taa", true);
+        id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+        e.label = @"taa";
+        [e setRenderPipelineState:S.taaPso];
+        [e setFragmentBytes:&fr length:sizeof fr atIndex:1];
+        [e setFragmentTexture:S.t.hdr atIndex:0];
+        [e setFragmentTexture:prev atIndex:1];
+        [e setFragmentTexture:depth atIndex:2];
+        [e setFragmentSamplerState:S.linearClamp atIndex:0];
+        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [e endEncoding];
+        post = out;
+    }
+
     // ---- bloom ----
     if ((features & ADV_BLOOM) && !S.t.bloom.empty()) {
-        id<MTLTexture> src = S.t.hdr;
+        id<MTLTexture> src = post;
         for (size_t i = 0; i < S.t.bloom.size(); i++) {
             id<MTLTexture> dst = S.t.bloom[i];
             MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -702,8 +758,8 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         e.label = @"tonemap";
         [e setRenderPipelineState:S.tonemapPso];
         [e setFragmentBytes:&fr length:sizeof fr atIndex:1];
-        [e setFragmentTexture:S.t.hdr atIndex:0];
-        [e setFragmentTexture:S.t.bloom.empty() ? S.t.hdr : S.t.bloom[0] atIndex:1];
+        [e setFragmentTexture:post atIndex:0];
+        [e setFragmentTexture:S.t.bloom.empty() ? post : S.t.bloom[0] atIndex:1];
         [e setFragmentSamplerState:S.linearClamp atIndex:0];
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [e endEncoding];

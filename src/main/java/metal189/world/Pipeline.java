@@ -11,7 +11,8 @@ import metal189.engine.Native;
 public final class Pipeline {
     private Pipeline() {}
 
-    public static final int SHADOWS = 1, BLOOM = 2, SKY = 4, WATER = 8, SSAO = 16, PCSS = 32, RT_SHADOWS = 64, RT_REFLECTIONS = 128;
+    public static final int SHADOWS = 1, BLOOM = 2, SKY = 4, WATER = 8, SSAO = 16, PCSS = 32, RT_SHADOWS = 64, RT_REFLECTIONS = 128,
+            TAA = 256;
 
     private static final String SHADERS_OVERRIDE = System.getProperty("metal189.shaders");
     private static final Integer FEATURES_OVERRIDE = Integer.getInteger("metal189.shaderFeatures");
@@ -47,6 +48,7 @@ public final class Pipeline {
             if (Config.water) features |= WATER;
             if (Config.rtShadows) features |= RT_SHADOWS;
             if (Config.rtReflections) features |= RT_REFLECTIONS;
+            if (Config.taa) features |= TAA;
         }
         if (advanced) Materials.upload();
         Native.setOption(OPT_SHADOW_RES, Config.shadowResolution);

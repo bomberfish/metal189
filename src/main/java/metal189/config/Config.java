@@ -23,6 +23,7 @@ public final class Config {
     public static boolean sky = true;
     public static boolean water = true;
     public static boolean waving = true;
+    public static boolean taa = true;
     public static int exposure = 100;        // percent
     public static boolean rtShadows = false;
     public static boolean rtReflections = false;
@@ -60,6 +61,7 @@ public final class Config {
         sky = bool(p, "sky", sky);
         water = bool(p, "water", water);
         waving = bool(p, "waving", waving);
+        taa = bool(p, "taa", taa);
         exposure = clamp(integer(p, "exposure", exposure), 25, 400);
         rtShadows = bool(p, "rtShadows", rtShadows);
         rtReflections = bool(p, "rtReflections", rtReflections);
@@ -76,6 +78,7 @@ public final class Config {
         p.setProperty("sky", Boolean.toString(sky));
         p.setProperty("water", Boolean.toString(water));
         p.setProperty("waving", Boolean.toString(waving));
+        p.setProperty("taa", Boolean.toString(taa));
         p.setProperty("exposure", Integer.toString(exposure));
         p.setProperty("rtShadows", Boolean.toString(rtShadows));
         p.setProperty("rtReflections", Boolean.toString(rtReflections));

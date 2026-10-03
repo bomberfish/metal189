@@ -12,6 +12,7 @@ metal189.gui.bloomStrength=Bloom Strength
 metal189.gui.sky=Physical Sky
 metal189.gui.water=Water Effects
 metal189.gui.waving=Waving Foliage
+metal189.gui.taa=Temporal AA
 metal189.gui.exposure=Exposure
 metal189.gui.rtShadows=RT Shadows
 metal189.gui.rtReflections=RT Reflections

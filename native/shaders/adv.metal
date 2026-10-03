@@ -22,9 +22,10 @@ struct BlockVertex {
 static inline float3 toLinear(float3 c) { return pow(max(c, 0.0), 2.2); }
 static inline float3 toGamma(float3 c) { return pow(max(c, 0.0), 1.0 / 2.2); }
 
-static inline float4 metalClip(float4 glClip) {
-    // offscreen targets keep GL row order: flip Y, map z to [0,1]
+static inline float4 metalClip(float4 glClip, float2 jitter) {
+    // sub-pixel jitter (TAA), then: offscreen targets keep GL row order: flip Y, map z to [0,1]
     float4 c = glClip;
+    c.xy += jitter * c.w;
     c.y = -c.y;
     c.z = 0.5 * (c.z + c.w);
     return c;
@@ -114,7 +115,7 @@ vertex GTerrainOut gbuf_terrain_vertex(uint vid [[vertex_id]],
     float3 local = wave(verts, vid, float3(v.pos), sectionWorld.xyz, fr, mat);
     float4 eye = sectionMV * float4(local, 1.0);
     GTerrainOut o;
-    o.position = metalClip(fr.proj * eye);
+    o.position = metalClip(fr.proj * eye, fr.jitter.xy);
     o.uv = float2(v.uv);
     o.color = float4(v.color) * (1.0 / 255.0);
     o.lm = float2(lmRaw & ushort2(0xFF)) * (1.0 / 240.0);
@@ -191,7 +192,7 @@ vertex GGenericOut gbuf_generic_vertex(uint vid [[vertex_id]],
     float4 pos = fetch(v, layout.pos, float4(0, 0, 0, 1));
     float4 eye = xf.modelview * pos;
     GGenericOut o;
-    o.position = metalClip(fr.proj * eye);
+    o.position = metalClip(fr.proj * eye, fr.jitter.xy);
     float4 t0 = fetch(v, layout.tex0, float4(0, 0, 0, 1));
     o.uv = (texMat * t0).xy;
     o.color = fetch(v, layout.color, item.color);
@@ -288,7 +289,7 @@ vertex FullscreenOut fullscreen_vertex(uint vid [[vertex_id]]) {
 
 // Eye-space position from a depth sample of a GL-ordered target.
 static float3 eyeFromDepth(constant AdvFrame& fr, float2 fragCoord, float depth) {
-    float2 ndc = float2(fragCoord.x * fr.screen.z * 2.0 - 1.0, fragCoord.y * fr.screen.w * 2.0 - 1.0);
+    float2 ndc = float2(fragCoord.x * fr.screen.z * 2.0 - 1.0, fragCoord.y * fr.screen.w * 2.0 - 1.0) - fr.jitter.xy;
     float4 p = fr.invProj * float4(ndc, depth * 2.0 - 1.0, 1.0);
     return p.xyz / p.w;
 }
@@ -578,7 +579,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     uint2 px = uint2(in.position.xy);
     float d = depth.read(px);
     // eye-space position from the exact linear depth (the depth buffer loses precision far away)
-    float2 ndc = float2(in.position.x * fr.screen.z * 2.0 - 1.0, in.position.y * fr.screen.w * 2.0 - 1.0);
+    float2 ndc = float2(in.position.x * fr.screen.z * 2.0 - 1.0, in.position.y * fr.screen.w * 2.0 - 1.0) - fr.jitter.xy;
     float4 pf = fr.invProj * float4(ndc, 1.0, 1.0);
     float3 rd = pf.xyz / pf.w;
     float3 eye = d >= 1.0 ? rd : rd * (gLinZ.read(px).r / -rd.z);
@@ -687,7 +688,7 @@ vertex WaterOut water_vertex(uint vid [[vertex_id]],
     uint state = uint(lmRaw.x >> 8) | (uint(lmRaw.y >> 8) << 8);
     float4 eye = sectionMV * float4(float3(v.pos), 1.0);
     WaterOut o;
-    o.position = metalClip(fr.proj * eye);
+    o.position = metalClip(fr.proj * eye, fr.jitter.xy);
     o.uv = float2(v.uv);
     o.color = float4(v.color) * (1.0 / 255.0);
     o.lm = float2(lmRaw & ushort2(0xFF)) * (1.0 / 240.0);
@@ -821,6 +822,85 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
 }
 
 // ---------------------------------------------------------------------------
+// temporal anti-aliasing
+
+static inline float3 rgbToYCoCg(float3 c) {
+    return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * c.r - 0.5 * c.b, -0.25 * c.r + 0.5 * c.g - 0.25 * c.b);
+}
+static inline float3 yCoCgToRgb(float3 c) { return float3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z); }
+// Resolve in a compressed range so bright pixels do not dominate the history (Karis).
+static inline float3 compress(float3 c) { return c / (1.0 + max(c.r, max(c.g, c.b))); }
+static inline float3 uncompress(float3 c) { return c / max(1.0 - max(c.r, max(c.g, c.b)), 1e-4); }
+
+// 5-tap Catmull-Rom history fetch (bilinear taps at weighted positions).
+static float3 sampleCatmullRom(texture2d<float> t, sampler s, float2 uv, float2 size) {
+    float2 pos = uv * size;
+    float2 c = floor(pos - 0.5) + 0.5;
+    float2 f = pos - c;
+    float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    float2 w3 = f * f * (-0.5 + 0.5 * f);
+    float2 w12 = w1 + w2;
+    float2 tc0 = (c - 1.0) / size, tc3 = (c + 2.0) / size, tc12 = (c + w2 / w12) / size;
+    float3 r = t.sample(s, float2(tc12.x, tc0.y)).rgb * (w12.x * w0.y) +
+               t.sample(s, float2(tc0.x, tc12.y)).rgb * (w0.x * w12.y) +
+               t.sample(s, tc12).rgb * (w12.x * w12.y) +
+               t.sample(s, float2(tc3.x, tc12.y)).rgb * (w3.x * w12.y) +
+               t.sample(s, float2(tc12.x, tc3.y)).rgb * (w12.x * w3.y);
+    float wsum = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
+    return max(r / wsum, 0.0);
+}
+
+fragment float4 taa_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
+                             texture2d<float> cur [[texture(0)]], texture2d<float> hist [[texture(1)]],
+                             depth2d<float> depth [[texture(2)]], sampler lin [[sampler(0)]]) {
+    int2 px = int2(in.position.xy);
+    int2 maxPx = int2(fr.screen.xy) - 1;
+    float3 c = cur.read(uint2(px)).rgb;
+    if (fr.taa.w < 0.5) return float4(c, 1.0);
+    // neighbourhood statistics (YCoCg, compressed) and the closest depth for reprojection
+    float3 m1 = 0, m2 = 0;
+    float dMin = 1.0;
+    int2 dPx = px;
+    for (int y = -1; y <= 1; y++)
+        for (int x = -1; x <= 1; x++) {
+            int2 q = clamp(px + int2(x, y), int2(0), maxPx);
+            float3 v = rgbToYCoCg(compress(cur.read(uint2(q)).rgb));
+            m1 += v;
+            m2 += v * v;
+            float d = depth.read(uint2(q));
+            if (d < dMin) { dMin = d; dPx = q; }
+        }
+    float3 mean = m1 / 9.0, sigma = sqrt(max(m2 / 9.0 - mean * mean, 0.0));
+    float3 boxMin = mean - 1.25 * sigma, boxMax = mean + 1.25 * sigma;
+
+    // reproject the closest surface with the camera motion (sky: direction only)
+    float3 eye = eyeFromDepth(fr, float2(dPx) + 0.5, dMin >= 1.0 ? 0.9999999 : dMin);
+    float3 rel = (fr.invView * float4(eye, 1.0)).xyz;
+    float3 prevRel = dMin >= 1.0 ? normalize(rel) * 1e5 : rel + fr.taa.xyz;
+    float4 pc = fr.prevViewProj * float4(prevRel, 1.0);
+    if (pc.w <= 0.0) return float4(c, 1.0);
+    // motion excludes this frame's jitter: the surface seen at dPx sits at (ndc - jitter) unjittered
+    float2 prevNdc = pc.xy / pc.w + fr.jitter.xy;
+    float2 prevUv = prevNdc * 0.5 + 0.5 + (float2(px) + 0.5 - (float2(dPx) + 0.5)) * fr.screen.zw;
+    if (any(prevUv < 0.0) || any(prevUv > 1.0)) return float4(c, 1.0);
+
+    float3 h = rgbToYCoCg(compress(sampleCatmullRom(hist, lin, prevUv, fr.screen.xy)));
+    // clip the history towards the neighbourhood mean (AABB clipping)
+    float3 center = 0.5 * (boxMax + boxMin), ext = 0.5 * (boxMax - boxMin) + 1e-5;
+    float3 off = h - center;
+    float3 ts = abs(off / ext);
+    float tmax = max(ts.x, max(ts.y, ts.z));
+    if (tmax > 1.0) h = center + off / tmax;
+    // more weight on the current frame when the history moved a lot (disocclusion-prone)
+    float motion = length((prevUv - (float2(px) + 0.5) * fr.screen.zw) * fr.screen.xy);
+    float alpha = mix(0.08, 0.25, saturate(motion / 8.0));
+    float3 outC = mix(h, rgbToYCoCg(compress(c)), alpha);
+    return float4(uncompress(yCoCgToRgb(outC)), 1.0);
+}
+
+// ---------------------------------------------------------------------------
 // post: bloom + tonemap
 
 fragment float4 bloom_down_fragment(FullscreenOut in [[stage_in]], texture2d<float> src [[texture(0)]],
@@ -867,11 +947,21 @@ static float3 aces(float3 x) {
 fragment float4 tonemap_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
                                  texture2d<float> hdr [[texture(0)]], texture2d<float> bloom [[texture(1)]],
                                  sampler s [[sampler(0)]]) {
-    uint2 px = uint2(in.position.xy);
-    float3 c = hdr.read(px).rgb;
-    if (fr.flags.x & ADV_BLOOM) c += bloom.sample(s, in.uv).rgb * (0.06 * fr.post.x);
-    c *= fr.params.z;
-    c = aces(c);
+    int2 px = int2(in.position.xy);
+    float3 b = (fr.flags.x & ADV_BLOOM) ? bloom.sample(s, in.uv).rgb * (0.06 * fr.post.x) : float3(0);
+    float3 c = aces((hdr.read(uint2(px)).rgb + b) * fr.params.z);
+    if (fr.flags.x & ADV_TAA) {
+        // contrast-adaptive sharpening (after AMD CAS) to restore texture detail TAA softens
+        int2 mx = int2(fr.screen.xy) - 1;
+        float3 n = aces((hdr.read(uint2(clamp(px + int2(0, -1), int2(0), mx))).rgb + b) * fr.params.z);
+        float3 w_ = aces((hdr.read(uint2(clamp(px + int2(-1, 0), int2(0), mx))).rgb + b) * fr.params.z);
+        float3 e = aces((hdr.read(uint2(clamp(px + int2(1, 0), int2(0), mx))).rgb + b) * fr.params.z);
+        float3 so = aces((hdr.read(uint2(clamp(px + int2(0, 1), int2(0), mx))).rgb + b) * fr.params.z);
+        float3 mn = min(min(min(n, w_), min(e, so)), c), mxv = max(max(max(n, w_), max(e, so)), c);
+        float3 amp = sqrt(saturate(min(mn, 1.0 - mxv) / max(mxv, 1e-4)));
+        float3 wgt = -amp / mix(8.0, 5.0, 0.55);
+        c = saturate((c + (n + w_ + e + so) * wgt) / (1.0 + 4.0 * wgt));
+    }
     // subtle vignette
     float2 q = in.uv - 0.5;
     c *= 1.0 - dot(q, q) * 0.35;

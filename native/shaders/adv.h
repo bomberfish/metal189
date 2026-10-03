@@ -27,6 +27,9 @@ struct AdvFrame {
     m189_uint4 flags;            // x: feature bits, y: dimension, z: frame index, w: debug view
     m189_float4 rtCam;           // xyz: camera position in ray tracing space (relative to the TLAS origin)
     m189_float4 post;            // x: bloom strength (1 = default)
+    m189_float4 jitter;          // xy: sub-pixel projection jitter (GL NDC units), zw: unused
+    m189_float4x4 prevViewProj;  // previous frame's proj * view (GL clip, unjittered)
+    m189_float4 taa;             // xyz: camera position minus previous camera position, w: history valid
 };
 
 #define ADV_SHADOWS   (1u << 0)
@@ -37,6 +40,7 @@ struct AdvFrame {
 #define ADV_PCSS      (1u << 5)
 #define ADV_RT_SHADOW (1u << 6)
 #define ADV_RT_REFL   (1u << 7)
+#define ADV_TAA       (1u << 8)
 
 // Per-item data for G-buffer/shadow draws of captured (non-terrain) geometry.
 struct AdvItem {

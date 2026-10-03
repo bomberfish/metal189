@@ -12,7 +12,7 @@ import net.minecraftforge.fml.client.config.GuiSlider;
 /** metal189 rendering settings (opened from Video Settings or the settings keybind). */
 public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
     private static final int SHADERS = 1, SHADOWS = 2, SHADOW_RES = 3, SHADOW_DIST = 4, BLOOM = 5, SKY = 6, WATER = 7,
-            WAVING = 8, RT_SHADOWS = 9, RT_REFL = 10, EXPOSURE = 11, BLOOM_STRENGTH = 12, DONE = 200;
+            WAVING = 8, RT_SHADOWS = 9, RT_REFL = 10, EXPOSURE = 11, BLOOM_STRENGTH = 12, TAA = 13, DONE = 200;
 
     private final GuiScreen parent;
 
@@ -43,6 +43,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
         y += 22;
         buttonList.add(new GuiSlider(EXPOSURE, x0, y, 150, 20, I18n.format("metal189.gui.exposure") + ": ", "%",
                 25, 400, Config.exposure, false, true, this));
+        buttonList.add(new GuiButton(TAA, x1, y, 150, 20, ""));
         y += 26;
         buttonList.add(new GuiButton(RT_SHADOWS, x0, y, 150, 20, ""));
         buttonList.add(new GuiButton(RT_REFL, x1, y, 150, 20, ""));
@@ -65,6 +66,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
                 case SKY: b.displayString = I18n.format("metal189.gui.sky") + ": " + onOff(Config.sky); break;
                 case WATER: b.displayString = I18n.format("metal189.gui.water") + ": " + onOff(Config.water); break;
                 case WAVING: b.displayString = I18n.format("metal189.gui.waving") + ": " + onOff(Config.waving); break;
+                case TAA: b.displayString = I18n.format("metal189.gui.taa") + ": " + onOff(Config.taa); break;
                 case RT_SHADOWS:
                     b.enabled = rt;
                     b.displayString = I18n.format("metal189.gui.rtShadows") + ": " + (rt ? onOff(Config.rtShadows) : I18n.format("metal189.gui.unsupported"));
@@ -92,6 +94,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
             case SKY: Config.sky = !Config.sky; break;
             case WATER: Config.water = !Config.water; break;
             case WAVING: Config.waving = !Config.waving; break;
+            case TAA: Config.taa = !Config.taa; break;
             case RT_SHADOWS: Config.rtShadows = !Config.rtShadows; break;
             case RT_REFL: Config.rtReflections = !Config.rtReflections; break;
             case DONE:

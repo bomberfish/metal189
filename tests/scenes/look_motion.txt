@@ -1,0 +1,17 @@
+sleep 3
+world ref1 1234567
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /time set 4000
+cmd /weather clear
+cmd /tp @p 120 90 40 -45 20
+sleep 12
+cmd /kill @e[type=!Player]
+sleep 1
+spin 0.6 100000
+sleep 1.5
+capture CAPTURE_A
+sleep 0.3
+capture CAPTURE_B
+quit
