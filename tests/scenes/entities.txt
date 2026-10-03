@@ -7,6 +7,9 @@ cmd /time set 14000
 cmd /weather clear
 cmd /tp @p 0.5 4 0.5 180 15
 sleep 4
+cmd /kill @e[type=!Player]
+cmd /fill -6 4 -10 6 6 -2 air
+sleep 1
 cmd /summon Zombie -3 4 -5 {NoAI:1,Rotation:[0f,0f],Equipment:[{id:iron_sword},{},{},{id:iron_chestplate},{id:iron_helmet}]}
 cmd /summon Skeleton -1.5 4 -5 {NoAI:1,Rotation:[0f,0f],Equipment:[{id:bow},{},{},{},{}]}
 cmd /summon Creeper 0 4 -5 {NoAI:1,Rotation:[0f,0f]}

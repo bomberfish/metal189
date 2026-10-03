@@ -1,5 +1,5 @@
 sleep 3
-world flat2 42 flat
+world lookflat 42 flat
 waitWorld
 fly
 toggle

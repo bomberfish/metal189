@@ -1,5 +1,5 @@
 sleep 3
-world ref1 1234567
+world ref1robust 1234567
 waitWorld
 fly
 cmd /gamerule doDaylightCycle false
