@@ -88,6 +88,38 @@ public final class Terrain {
         if (id != null) Native.sectionDelete(id);
     }
 
+    private static final java.util.concurrent.ConcurrentLinkedQueue<Object[]> pendingCompiled = new java.util.concurrent.ConcurrentLinkedQueue<Object[]>();
+    private static final EnumWorldBlockLayer[] LAYERS = EnumWorldBlockLayer.values();
+
+    /**
+     * Head of RenderChunk.setCompiledChunk: vanilla only uploads non-empty layers, so
+     * layers that became empty are cleared here (the engine's shadow and ray tracing
+     * passes read every resident section, not only the visible ones). May run on a
+     * chunk worker thread, in which case the clear is applied on the client thread.
+     */
+    public static void compiled(RenderChunk rc, CompiledChunk cc) {
+        if (cc == null) return;
+        if (!Minecraft.getMinecraft().isCallingFromMinecraftThread()) {
+            pendingCompiled.add(new Object[] {rc, cc});
+            return;
+        }
+        Integer id = ids.get(rc);
+        if (id == null) return;
+        BlockPos pos = rc.getPosition();
+        for (EnumWorldBlockLayer layer : LAYERS) {
+            if (cc.isLayerEmpty(layer)) Native.sectionUpload(id, layer.ordinal(), 0L, 0, 0, pos.getX(), pos.getY(), pos.getZ());
+        }
+    }
+
+    /** Applies compiled-chunk notifications queued by worker threads (client thread). */
+    public static void drainPending() {
+        Object[] e;
+        while ((e = pendingCompiled.poll()) != null) {
+            RenderChunk rc = (RenderChunk) e[0];
+            if (rc.getCompiledChunk() == e[1]) compiled(rc, (CompiledChunk) e[1]);
+        }
+    }
+
     /** Head of RenderChunk.deleteGlResources. */
     public static void delete(RenderChunk rc) {
         Integer id = ids.remove(rc);

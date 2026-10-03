@@ -37,6 +37,7 @@ public final class Phases {
 
     public static void worldBegin() {
         Pipeline.ensureApplied();
+        metal189.terrain.Terrain.drainPending();
         begin(WORLD_BEGIN);
     }
     public static void worldEnd() { begin(WORLD_END); begin(UI); }

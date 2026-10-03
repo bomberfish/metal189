@@ -24,7 +24,8 @@ struct AdvFrame {
     m189_float4 params;          // x: time seconds, y: rain, z: exposure, w: shadow distance
     m189_float4 screen;          // x: width, y: height, z: 1/width, w: 1/height
     m189_float4 camera;          // xyz: camera fractional position within its block (for world-space noise)
-    m189_uint4 flags;            // x: feature bits, y: dimension, z: frame index
+    m189_uint4 flags;            // x: feature bits, y: dimension, z: frame index, w: debug view
+    m189_float4 rtCam;           // xyz: camera position in ray tracing space (relative to the TLAS origin)
 };
 
 #define ADV_SHADOWS   (1u << 0)

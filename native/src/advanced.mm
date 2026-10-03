@@ -7,6 +7,8 @@
 // replayed by the baseline executor on top.
 
 #import "advanced.h"
+#import "raytrace.h"
+#import "gpu_profiler.h"
 #import "resources.h"
 #include <cmath>
 
@@ -32,17 +34,17 @@ namespace {
 
 struct Targets {
     int w = 0, h = 0;
-    id<MTLTexture> albedo, normal, light, hdr, sceneColor, sceneDepth;
+    id<MTLTexture> albedo, normal, light, linZ, hdr, sceneColor, sceneDepth;
     std::vector<id<MTLTexture>> bloom;
 };
 
 struct State {
     bool init = false;
     id<MTLRenderPipelineState> gTerrain[4], gGeneric[2], shadowTerrain[2], shadowGeneric[2];
-    id<MTLRenderPipelineState> lightPso, waterPso, tonemapPso, bloomDown, bloomUp, skyLutPso;
+    id<MTLRenderPipelineState> lightPso[2], waterPso[2], tonemapPso, bloomDown, bloomUp, skyLutPso;
     id<MTLTexture> skyLut;
     id<MTLDepthStencilState> depthWrite, depthTestNoWrite, depthAlways;
-    id<MTLSamplerState> shadowCmp, linearClamp;
+    id<MTLSamplerState> shadowCmp, linearClamp, pointClamp;
     id<MTLTexture> shadowMap;
     int shadowRes = 0;
     Targets t;
@@ -52,10 +54,11 @@ struct State {
 };
 State S;
 
-id<MTLFunction> fn(NSString* name, bool alpha = false, bool waving = false) {
+id<MTLFunction> fn(NSString* name, bool alpha = false, bool waving = false, bool raytrace = false) {
     MTLFunctionConstantValues* cv = [MTLFunctionConstantValues new];
     [cv setConstantValue:&alpha type:MTLDataTypeBool atIndex:10];
     [cv setConstantValue:&waving type:MTLDataTypeBool atIndex:11];
+    [cv setConstantValue:&raytrace type:MTLDataTypeBool atIndex:12];
     NSError* err = nil;
     id<MTLFunction> f = [engine().library newFunctionWithName:name constantValues:cv error:&err];
     if (!f) log("advanced: function %s: %s", name.UTF8String, err.localizedDescription.UTF8String);
@@ -76,6 +79,7 @@ MTLRenderPipelineDescriptor* gbufDesc(id<MTLFunction> v, id<MTLFunction> f) {
     d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
     d.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Float;
     d.colorAttachments[2].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    d.colorAttachments[3].pixelFormat = MTLPixelFormatR32Float;
     d.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
     return d;
 }
@@ -100,7 +104,11 @@ bool initState() {
     ld.vertexFunction = fn(@"fullscreen_vertex");
     ld.fragmentFunction = fn(@"light_fragment");
     ld.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
-    S.lightPso = pso(ld);
+    S.lightPso[0] = pso(ld);
+    if (rtAvailable()) {
+        ld.fragmentFunction = fn(@"light_fragment", false, false, true);
+        S.lightPso[1] = pso(ld);
+    }
 
     MTLRenderPipelineDescriptor* sl = [MTLRenderPipelineDescriptor new];
     sl.vertexFunction = fn(@"fullscreen_vertex");
@@ -122,7 +130,11 @@ bool initState() {
     wd.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
     wd.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
     wd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
-    S.waterPso = pso(wd);
+    S.waterPso[0] = pso(wd);
+    if (rtAvailable()) {
+        wd.fragmentFunction = fn(@"water_fragment", false, false, true);
+        S.waterPso[1] = pso(wd);
+    }
 
     MTLRenderPipelineDescriptor* td = [MTLRenderPipelineDescriptor new];
     td.vertexFunction = fn(@"fullscreen_vertex");
@@ -161,7 +173,11 @@ bool initState() {
     lin.minFilter = lin.magFilter = MTLSamplerMinMagFilterLinear;
     lin.sAddressMode = lin.tAddressMode = MTLSamplerAddressModeClampToEdge;
     S.linearClamp = [device() newSamplerStateWithDescriptor:lin];
-    S.init = S.lightPso && S.tonemapPso && S.gTerrain[0];
+    MTLSamplerDescriptor* pt = [MTLSamplerDescriptor new];
+    pt.minFilter = pt.magFilter = MTLSamplerMinMagFilterNearest;
+    pt.sAddressMode = pt.tAddressMode = MTLSamplerAddressModeClampToEdge;
+    S.pointClamp = [device() newSamplerStateWithDescriptor:pt];
+    S.init = S.lightPso[0] && S.tonemapPso && S.gTerrain[0];
     return S.init;
 }
 
@@ -181,6 +197,7 @@ void ensureTargets(int w, int h) {
     S.t.albedo = rt(MTLPixelFormatRGBA8Unorm, w, h, @"gAlbedo");
     S.t.normal = rt(MTLPixelFormatRGBA16Float, w, h, @"gNormal");
     S.t.light = rt(MTLPixelFormatRGBA8Unorm, w, h, @"gLight");
+    S.t.linZ = rt(MTLPixelFormatR32Float, w, h, @"gLinZ");
     S.t.hdr = rt(MTLPixelFormatRGBA16Float, w, h, @"hdr");
     S.t.sceneColor = rt(MTLPixelFormatRGBA16Float, w, h, @"sceneColor");
     S.t.sceneDepth = rt(MTLPixelFormatDepth32Float, w, h, @"sceneDepth");
@@ -330,7 +347,14 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
     fr.camera = simd_make_float4(env.camFracX + (float)(env.camBlockX & 1023), env.camFracY, env.camFracZ + (float)(env.camBlockZ & 1023),
                                  env.starBrightness);
     uint32_t features = g_features;
-    if (env.dimension != 0) features &= ~ADV_SHADOWS; // no sun in the Nether / End
+    if (env.dimension != 0) features &= ~(ADV_SHADOWS | ADV_RT_SHADOW); // no sun in the Nether / End
+    double camX = env.camBlockX + (double)env.camFracX, camY = env.camBlockY + (double)env.camFracY,
+           camZ = env.camBlockZ + (double)env.camFracZ;
+    RtScene rts;
+    bool rtOn = (features & (ADV_RT_SHADOW | ADV_RT_REFL)) && S.lightPso[1] && S.waterPso[1] &&
+                rtPrepare(cb, camX, camY, camZ, std::max(env.renderDistance, 32.0f) + 16.0f, rts);
+    if (!rtOn) features &= ~(ADV_RT_SHADOW | ADV_RT_REFL);
+    fr.rtCam = simd_make_float4(rts.camera, 0);
     fr.flags = simd_make_uint4(features, (uint32_t)env.dimension, (uint32_t)S.frame, (uint32_t)g_optAdvDebug);
     int shadowRes = 4096;
     if (features & ADV_SHADOWS) {
@@ -346,6 +370,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         rp.depthAttachment.loadAction = MTLLoadActionClear;
         rp.depthAttachment.clearDepth = 1.0;
         rp.depthAttachment.storeAction = MTLStoreActionStore;
+        profRender(rp, "shadow");
         id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
         e.label = @"shadow";
         [e setDepthStencilState:S.depthWrite];
@@ -355,11 +380,10 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [e setVertexBuffer:g_materials offset:0 atIndex:5];
         TexEntry* atlas = texture(w.atlasTex);
         if (atlas && atlas->tex) [e setFragmentTexture:atlas->tex atIndex:0];
-        // Every loaded section near the camera casts shadows, not just the visible ones.
-        double camX = env.camBlockX + (double)env.camFracX, camY = env.camBlockY + (double)env.camFracY,
-               camZ = env.camBlockZ + (double)env.camFracZ;
+        // Every loaded section near the camera casts shadows, not just the visible ones
+        // (with ray-traced shadows the map only holds dynamic geometry).
         float reach = shadowRadius + 24.0f;
-        for (int layer = 0; layer < 3; layer++) {
+        for (int layer = 0; layer < ((features & ADV_RT_SHADOW) ? 0 : 3); layer++) {
             bool alpha = layer > 0;
             [e setRenderPipelineState:S.shadowTerrain[alpha ? 1 : 0]];
             const uint32_t* sp = w.layerSampler[layer];
@@ -408,8 +432,8 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
     // ---- G-buffer ----
     {
         MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
-        id<MTLTexture> att[3] = {S.t.albedo, S.t.normal, S.t.light};
-        for (int i = 0; i < 3; i++) {
+        id<MTLTexture> att[4] = {S.t.albedo, S.t.normal, S.t.light, S.t.linZ};
+        for (int i = 0; i < 4; i++) {
             rp.colorAttachments[i].texture = att[i];
             rp.colorAttachments[i].loadAction = MTLLoadActionClear;
             rp.colorAttachments[i].clearColor = MTLClearColorMake(0, 0, 0, 0);
@@ -424,6 +448,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             rp.stencilAttachment.loadAction = MTLLoadActionClear;
             rp.stencilAttachment.storeAction = MTLStoreActionStore;
         }
+        profRender(rp, "gbuffer");
         id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
         e.label = @"gbuffer";
         [e setDepthStencilState:S.depthWrite];
@@ -489,13 +514,16 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         rp.colorAttachments[0].texture = S.skyLut;
         rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
         rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        profRender(rp, "skylut", true);
         id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
         e.label = @"skylut";
         [e setRenderPipelineState:S.skyLutPso];
         [e setFragmentBytes:&fr length:sizeof fr atIndex:1];
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [e endEncoding];
-        id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+        MTLBlitPassDescriptor* bp = [MTLBlitPassDescriptor blitPassDescriptor];
+        profBlit(bp, "skylut mips");
+        id<MTLBlitCommandEncoder> b = [cb blitCommandEncoderWithDescriptor:bp];
         [b generateMipmapsForTexture:S.skyLut];
         [b endEncoding];
     }
@@ -506,9 +534,11 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         rp.colorAttachments[0].texture = S.t.hdr;
         rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
         rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        profRender(rp, "lighting", true);
         id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
         e.label = @"lighting";
-        [e setRenderPipelineState:S.lightPso];
+        bool rtLight = (features & ADV_RT_SHADOW) != 0;
+        [e setRenderPipelineState:S.lightPso[rtLight ? 1 : 0]];
         [e setFragmentBytes:&fr length:sizeof fr atIndex:1];
         [e setFragmentTexture:S.t.albedo atIndex:0];
         [e setFragmentTexture:S.t.normal atIndex:1];
@@ -518,6 +548,16 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [e setFragmentTexture:S.skyLut atIndex:5];
         [e setFragmentSamplerState:S.shadowCmp atIndex:0];
         [e setFragmentSamplerState:S.linearClamp atIndex:1];
+        [e setFragmentTexture:S.t.linZ atIndex:6];
+        if (rtLight) {
+            TexEntry* atlas = texture(w.atlasTex);
+            [e setFragmentAccelerationStructure:rts.tlas atBufferIndex:10];
+            [e setFragmentBuffer:rts.instances offset:0 atIndex:11];
+            [e setFragmentTexture:atlas && atlas->tex ? atlas->tex : S.t.albedo atIndex:7];
+            [e setFragmentSamplerState:S.pointClamp atIndex:2];
+            if (rts.resources)
+                [e useResources:rts.resources->data() count:rts.resources->size() usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
+        }
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [e endEncoding];
     }
@@ -525,7 +565,9 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
     // ---- translucent terrain (water, glass, ice) ----
     if (!w.terrain[3].empty()) {
         // refraction and screen-space reflections read the opaque scene from copies
-        id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+        MTLBlitPassDescriptor* bp = [MTLBlitPassDescriptor blitPassDescriptor];
+        profBlit(bp, "scene copy");
+        id<MTLBlitCommandEncoder> b = [cb blitCommandEncoderWithDescriptor:bp];
         [b copyFromTexture:S.t.hdr toTexture:S.t.sceneColor];
         if (depth.pixelFormat == S.t.sceneDepth.pixelFormat) [b copyFromTexture:depth toTexture:S.t.sceneDepth];
         [b endEncoding];
@@ -541,9 +583,18 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             rp.stencilAttachment.loadAction = MTLLoadActionLoad;
             rp.stencilAttachment.storeAction = MTLStoreActionStore;
         }
+        profRender(rp, "translucent");
         id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
         e.label = @"translucent";
-        [e setRenderPipelineState:S.waterPso];
+        bool rtWater = (features & ADV_RT_REFL) != 0;
+        [e setRenderPipelineState:S.waterPso[rtWater ? 1 : 0]];
+        if (rtWater) {
+            [e setFragmentAccelerationStructure:rts.tlas atBufferIndex:10];
+            [e setFragmentBuffer:rts.instances offset:0 atIndex:11];
+            [e setFragmentSamplerState:S.pointClamp atIndex:3];
+            if (rts.resources)
+                [e useResources:rts.resources->data() count:rts.resources->size() usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
+        }
         [e setDepthStencilState:S.depthTestNoWrite];
         [e setCullMode:MTLCullModeBack];
         [e setFrontFacingWinding:MTLWindingClockwise];
@@ -586,6 +637,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             rp.colorAttachments[0].texture = dst;
             rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
             rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            profRender(rp, "bloom", true);
             id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
             [e setRenderPipelineState:S.bloomDown];
             simd_float4 p = simd_make_float4(i == 0 ? 1.0f : 0.0f, 1.2f, 1.0f / src.width, 1.0f / src.height);
@@ -602,6 +654,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             rp.colorAttachments[0].texture = d;
             rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
             rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            profRender(rp, "bloom", true);
             id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
             [e setRenderPipelineState:S.bloomUp];
             simd_float4 p = simd_make_float4(0.75f, 0, 1.0f / s.width, 1.0f / s.height); // x: weight of the coarser level
@@ -619,6 +672,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         rp.colorAttachments[0].texture = color;
         rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
         rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        profRender(rp, "tonemap", true);
         id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
         e.label = @"tonemap";
         [e setRenderPipelineState:S.tonemapPso];

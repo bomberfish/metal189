@@ -2,9 +2,12 @@
 // water and post-processing.
 #include "common.h"
 #include "adv.h"
+#include <metal_raytracing>
+using namespace metal::raytracing;
 
 constant bool ac_alphaTest [[function_constant(10)]];
 constant bool ac_waving    [[function_constant(11)]];
+constant bool ac_rt        [[function_constant(12)]];
 
 // ---------------------------------------------------------------------------
 // shared helpers
@@ -48,6 +51,7 @@ struct GBufferOut {
     float4 albedo [[color(0)]];   // rgb: albedo (gamma), a: baked AO
     float4 normal [[color(1)]];   // xyz: eye-space normal, w: emission
     float4 light  [[color(2)]];   // x: block light, y: sky light, z: material/255, w: roughness
+    float linZ    [[color(3)]];   // eye-space depth (-z), exact position reconstruction
 };
 
 // ---------------------------------------------------------------------------
@@ -62,6 +66,7 @@ struct GTerrainOut {
     float shade [[flat]];
     uint material [[flat]];
     float emission [[flat]];
+    float eyeZ;
 };
 
 static float3 quadNormal(device const BlockVertex* verts, uint vid) {
@@ -103,6 +108,7 @@ vertex GTerrainOut gbuf_terrain_vertex(uint vid [[vertex_id]],
     o.shade = faceShade(nLocal);
     o.material = mat;
     o.emission = float(emissions[state]) * (1.0 / 255.0);
+    o.eyeZ = -eye.z;
     return o;
 }
 
@@ -120,6 +126,7 @@ fragment GBufferOut gbuf_terrain_fragment(GTerrainOut in [[stage_in]], bool fron
     o.normal = float4(n, emission);
     float rough = in.material == 4 ? 0.3 : in.material == 2 ? 0.05 : 0.85;
     o.light = float4(in.lm.x, in.lm.y, float(in.material) / 255.0, rough);
+    o.linZ = in.eyeZ;
     return o;
 }
 
@@ -155,6 +162,7 @@ struct GGenericOut {
     float4 color;
     float2 lm;
     float3 normalView;
+    float eyeZ;
 };
 
 vertex GGenericOut gbuf_generic_vertex(uint vid [[vertex_id]],
@@ -178,6 +186,7 @@ vertex GGenericOut gbuf_generic_vertex(uint vid [[vertex_id]],
     float3 nv = float3x3(xf.normal0.xyz, xf.normal1.xyz, xf.normal2.xyz) * n;
     float l = length(nv);
     o.normalView = l > 1e-6 ? nv / l : float3(0, 0, 1);
+    o.eyeZ = -eye.z;
     return o;
 }
 
@@ -192,6 +201,7 @@ fragment GBufferOut gbuf_generic_fragment(GGenericOut in [[stage_in]], bool fron
     float3 n = front ? in.normalView : -in.normalView;
     o.normal = float4(n, item.alpha.z);
     o.light = float4(in.lm.x, in.lm.y, item.alpha.w / 255.0, 0.7);
+    o.linZ = in.eyeZ;
     return o;
 }
 
@@ -430,6 +440,112 @@ static float sampleShadow(constant AdvFrame& fr, depth2d<float> shadowMap, sampl
     return sum / 16.0;
 }
 
+// ---------------------------------------------------------------------------
+// hardware ray tracing (terrain acceleration structures, see raytrace.mm)
+
+struct RtInstance {
+    device const BlockVertex* verts[3];   // by geometry index
+    uint layers;                          // render layer of geometry g in bits [2g, 2g+2)
+    uint pad;
+};
+
+// Vertex indices of BLAS triangle `prim` (quads split (0,1,2) (0,2,3)).
+static inline uint3 rtTri(uint prim) {
+    uint b = (prim >> 1) * 4;
+    return (prim & 1) ? uint3(b, b + 2, b + 3) : uint3(b, b + 1, b + 2);
+}
+
+static inline float3 rtBary(float2 b) { return float3(1.0 - b.x - b.y, b.x, b.y); }
+
+// Alpha test of a cutout candidate (vanilla's 0.1 cutout threshold on texture * vertex alpha).
+static bool rtOpaqueAt(device const RtInstance* insts, texture2d<float> atlas, sampler s,
+                       uint inst, uint geom, uint prim, float2 bary) {
+    device const BlockVertex* v = insts[inst].verts[geom];
+    uint3 t = rtTri(prim);
+    float3 w = rtBary(bary);
+    float2 uv = float2(v[t.x].uv) * w.x + float2(v[t.y].uv) * w.y + float2(v[t.z].uv) * w.z;
+    return atlas.sample(s, uv, level(0)).a >= 0.1;
+}
+
+static bool rtOccluded(instance_acceleration_structure tlas, device const RtInstance* insts,
+                       texture2d<float> atlas, sampler s, float3 o, float3 d, float tmax) {
+    intersection_query<instancing, triangle_data> q;
+    intersection_params p;
+    p.accept_any_intersection(true);
+    q.reset(ray(o, d, 0.0, tmax), tlas, 0xFF, p);
+    while (q.next()) {
+        if (rtOpaqueAt(insts, atlas, s, q.get_candidate_user_instance_id(), q.get_candidate_geometry_id(),
+                       q.get_candidate_primitive_id(), q.get_candidate_triangle_barycentric_coord()))
+            q.commit_triangle_intersection();
+    }
+    return q.get_committed_intersection_type() != intersection_type::none;
+}
+
+struct RtHit {
+    bool hit;
+    float t;
+    uint inst, geom, prim;
+    float2 bary;
+};
+
+static RtHit rtClosest(instance_acceleration_structure tlas, device const RtInstance* insts,
+                       texture2d<float> atlas, sampler s, float3 o, float3 d, float tmax) {
+    intersection_query<instancing, triangle_data> q;
+    intersection_params p;
+    q.reset(ray(o, d, 0.0, tmax), tlas, 0xFF, p);
+    while (q.next()) {
+        if (rtOpaqueAt(insts, atlas, s, q.get_candidate_user_instance_id(), q.get_candidate_geometry_id(),
+                       q.get_candidate_primitive_id(), q.get_candidate_triangle_barycentric_coord()))
+            q.commit_triangle_intersection();
+    }
+    RtHit h;
+    h.hit = q.get_committed_intersection_type() == intersection_type::triangle;
+    h.t = h.hit ? q.get_committed_distance() : tmax;
+    h.inst = q.get_committed_user_instance_id();
+    h.geom = q.get_committed_geometry_id();
+    h.prim = q.get_committed_primitive_id();
+    h.bary = q.get_committed_triangle_barycentric_coord();
+    return h;
+}
+
+static float3 skyAmbient(constant AdvFrame& fr, texture2d<float> skyLut, sampler s, float3 nWorld);
+
+// Shades a ray-traced terrain hit like the deferred pass does (sun with a shadow ray,
+// sky ambient, block light), used for reflections.
+static float3 rtShade(constant AdvFrame& fr, instance_acceleration_structure tlas, device const RtInstance* insts,
+                      texture2d<float> atlas, sampler s, texture2d<float> skyLut, sampler lin,
+                      RtHit h, float3 o, float3 d, bool traceShadow) {
+    device const BlockVertex* v = insts[h.inst].verts[h.geom];
+    uint3 t = rtTri(h.prim);
+    float3 w = rtBary(h.bary);
+    float2 uv = float2(v[t.x].uv) * w.x + float2(v[t.y].uv) * w.y + float2(v[t.z].uv) * w.z;
+    float4 col = (float4(v[t.x].color) * w.x + float4(v[t.y].color) * w.y + float4(v[t.z].color) * w.z) * (1.0 / 255.0);
+    float2 lm = (float2(ushort2(v[t.x].lm) & ushort2(0xFF)) * w.x + float2(ushort2(v[t.y].lm) & ushort2(0xFF)) * w.y +
+                 float2(ushort2(v[t.z].lm) & ushort2(0xFF)) * w.z) * (1.0 / 240.0);
+    float3 p0 = float3(v[t.x].pos), p1 = float3(v[t.y].pos), p2 = float3(v[t.z].pos);
+    float3 n = normalize(cross(p1 - p0, p2 - p0));
+    if (dot(n, d) > 0.0) n = -n;
+    float4 tex = atlas.sample(s, uv, level(0));
+    float3 albedo = toLinear(tex.rgb * col.rgb / faceShade(n));
+    float3 p = o + d * h.t;
+    bool sunUp = fr.sunDirWorld.w > 0.0;
+    float3 L = sunUp ? fr.sunDirWorld.xyz : -fr.sunDirWorld.xyz;
+    float3 lightCol = sunUp ? fr.sunColor.rgb : fr.moonColor.rgb;
+    float ndl = saturate(dot(n, L));
+    float3 c = float3(0);
+    if (ndl > 0.0 && fr.flags.y == 0) {
+        // without a shadow ray, sky light approximates sun visibility
+        float vis = traceShadow ? (rtOccluded(tlas, insts, atlas, s, p + n * 0.01, L, 320.0) ? 0.0 : 1.0)
+                                : smoothstep(0.85, 1.0, lm.y);
+        c += lightCol * albedo * ndl * smoothstep(0.35, 0.9, lm.y) * vis;
+    }
+    float daySky = lm.y * lm.y * fr.sunDirWorld.w;
+    c += albedo * skyAmbient(fr, skyLut, lin, n) * lm.y * lm.y;
+    c += albedo * fr.blockLight.rgb * pow(lm.x, fr.blockLight.a) * (1.0 - 0.75 * daySky);
+    c += albedo * 0.004;
+    return c;
+}
+
 fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                                constant AdvFrame& fr [[buffer(1)]],
                                texture2d<float> gAlbedo [[texture(0)]],
@@ -438,10 +554,19 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                                depth2d<float> depth [[texture(3)]],
                                depth2d<float> shadowMap [[texture(4)]],
                                texture2d<float> skyLut [[texture(5)]],
-                               sampler cmp [[sampler(0)]], sampler lin [[sampler(1)]]) {
+                               texture2d<float> gLinZ [[texture(6)]],
+                               sampler cmp [[sampler(0)]], sampler lin [[sampler(1)]],
+                               instance_acceleration_structure tlas [[buffer(10), function_constant(ac_rt)]],
+                               device const RtInstance* rtInst [[buffer(11), function_constant(ac_rt)]],
+                               texture2d<float> atlas [[texture(7), function_constant(ac_rt)]],
+                               sampler pointS [[sampler(2), function_constant(ac_rt)]]) {
     uint2 px = uint2(in.position.xy);
     float d = depth.read(px);
-    float3 eye = eyeFromDepth(fr, in.position.xy, d);
+    // eye-space position from the exact linear depth (the depth buffer loses precision far away)
+    float2 ndc = float2(in.position.x * fr.screen.z * 2.0 - 1.0, in.position.y * fr.screen.w * 2.0 - 1.0);
+    float4 pf = fr.invProj * float4(ndc, 1.0, 1.0);
+    float3 rd = pf.xyz / pf.w;
+    float3 eye = d >= 1.0 ? rd : rd * (gLinZ.read(px).r / -rd.z);
     float3 dirWorld = normalize((fr.invView * float4(eye, 0)).xyz);
     if (d >= 1.0) {
         float3 sky = skyRadiance(fr, skyLut, lin, dirWorld);
@@ -467,9 +592,19 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     float ndl = dot(n, lightDir);
     float wrap = material == 1 ? 0.35 : 0.0; // foliage transmits some light
     float diffuse = saturate((ndl + wrap) / (1.0 + wrap));
+    float rtShadow = 1.0;
     if (diffuse > 0.0 && fr.flags.y == 0) {
         float shadow = 1.0;
-        if (fr.flags.x & ADV_SHADOWS) shadow = sampleShadow(fr, shadowMap, cmp, world, nWorld, saturate(ndl));
+        if (ac_rt && (fr.flags.x & ADV_RT_SHADOW)) {
+            // terrain: exact ray-traced shadows over the whole loaded world;
+            // the shadow map then only holds dynamic geometry (entities)
+            float3 Lw = fr.sunDirView.w > 0.0 ? fr.sunDirWorld.xyz : -fr.sunDirWorld.xyz;
+            float3 nOff = dot(nWorld, Lw) >= 0.0 ? nWorld : -nWorld;
+            float3 o = world + fr.rtCam.xyz + nOff * (0.004 + length(eye) * 0.0002);
+            rtShadow = rtOccluded(tlas, rtInst, atlas, pointS, o, Lw, 320.0) ? 0.0 : 1.0;
+            shadow = rtShadow;
+            if (fr.flags.x & ADV_SHADOWS) shadow *= sampleShadow(fr, shadowMap, cmp, world, nWorld, saturate(ndl));
+        } else if (fr.flags.x & ADV_SHADOWS) shadow = sampleShadow(fr, shadowMap, cmp, world, nWorld, saturate(ndl));
         float skyGate = smoothstep(0.35, 0.9, skyLight); // no direct light deep inside caves
         float3 h = normalize(lightDir + v);
         float a2 = max(rough * rough, 0.002);
@@ -494,6 +629,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     if (dbg == 3) return float4(nWorld * 0.5 + 0.5, 1.0);
     if (dbg == 4) return float4(color / max(albedo, 0.02), 1.0);
     if (dbg == 5) return float4(float3((fr.flags.x & ADV_SHADOWS) ? sampleShadow(fr, shadowMap, cmp, world, nWorld, saturate(ndl)) : 1.0), 1.0);
+    if (dbg == 6) return float4(float3(rtShadow), 1.0);
 
     float dist = length(eye);
     if (fr.fog.w > 0.5) {
@@ -580,7 +716,10 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
                                texture2d<float> atlas [[texture(0)]], sampler s [[sampler(0)]],
                                depth2d<float> shadowMap [[texture(4)]], sampler cmp [[sampler(1)]],
                                texture2d<float> skyLut [[texture(5)]], sampler lin [[sampler(2)]],
-                               texture2d<float> sceneColor [[texture(6)]], depth2d<float> sceneDepth [[texture(7)]]) {
+                               texture2d<float> sceneColor [[texture(6)]], depth2d<float> sceneDepth [[texture(7)]],
+                               instance_acceleration_structure tlas [[buffer(10), function_constant(ac_rt)]],
+                               device const RtInstance* rtInst [[buffer(11), function_constant(ac_rt)]],
+                               sampler pointS [[sampler(3), function_constant(ac_rt)]]) {
     float4 t = atlas.sample(s, in.uv);
     float3 n = front ? in.normalView : -in.normalView;
     float3 v = normalize(-in.eye);
@@ -634,11 +773,26 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
     float3 rdWorld = reflect(dirWorld, nw);
     float3 rdView = normalize((fr.view * float4(rdWorld, 0)).xyz);
     float3 sky = skyRadiance(fr, skyLut, lin, normalize(float3(rdWorld.x, abs(rdWorld.y), rdWorld.z))) * smoothstep(0.2, 0.9, in.lm.y);
-    float3 hit = ssr(fr, sceneDepth, in.eye, rdView);
     float3 refl = sky;
-    if (hit.z > 0.0) refl = mix(sky, sceneColor.sample(lin, hit.xy).rgb, hit.z);
     float cosT = saturate(dot(-dirWorld, nw));
     float fres = 0.02 + 0.98 * pow(1.0 - cosT, 5.0);
+    if (ac_rt && (fr.flags.x & ADV_RT_REFL)) {
+        // ray-traced reflection of the terrain (off-screen geometry included); skipped
+        // where the Fresnel weight makes it invisible
+        float3 o = in.world + fr.rtCam.xyz + nw * 0.02;
+        RtHit rh;
+        rh.hit = false;
+        if (fres > 0.03) rh = rtClosest(tlas, rtInst, atlas, pointS, o, rdWorld, 320.0);
+        if (rh.hit) {
+            float3 hc = rtShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, rh, o, rdWorld, fres > 0.15);
+            float hd = length(rh.t * rdWorld + in.world);  // distance from the camera
+            float hf = saturate((hd - fr.fog.x) / max(fr.fog.y - fr.fog.x, 1.0));
+            refl = mix(hc, skyBase(fr, skyLut, lin, rdWorld), hf * hf);
+        }
+    } else {
+        float3 hit = ssr(fr, sceneDepth, in.eye, rdView);
+        if (hit.z > 0.0) refl = mix(sky, sceneColor.sample(lin, hit.xy).rgb, hit.z);
+    }
     float3 h = normalize(-dirWorld + fr.sunDirWorld.xyz);
     float glint = pow(saturate(dot(nw, h)), 600.0) * 60.0 * shadow * fr.sunDirWorld.w * skyGate;
     float3 c = mix(below, refl, fres) + fr.sunColor.rgb * glint;

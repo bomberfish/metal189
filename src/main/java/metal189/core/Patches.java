@@ -102,7 +102,10 @@ public final class Patches {
             Asm.injectHead("deleteGlResources", "func_178566_a", "()V",
                 "metal189/terrain/Terrain", "delete", "(Lnet/minecraft/client/renderer/chunk/RenderChunk;)V", true),
             Asm.injectHeadThisOnly("setPosition", "func_178576_a", "(Lnet/minecraft/util/BlockPos;)V",
-                "metal189/terrain/Terrain", "moved", "(Lnet/minecraft/client/renderer/chunk/RenderChunk;)V")));
+                "metal189/terrain/Terrain", "moved", "(Lnet/minecraft/client/renderer/chunk/RenderChunk;)V"),
+            Asm.injectHead("setCompiledChunk", "func_178580_a", "(Lnet/minecraft/client/renderer/chunk/CompiledChunk;)V",
+                "metal189/terrain/Terrain", "compiled",
+                "(Lnet/minecraft/client/renderer/chunk/RenderChunk;Lnet/minecraft/client/renderer/chunk/CompiledChunk;)V", true)));
     }
 
     static ClassPatch forClass(String name) { return PATCHES.get(name); }

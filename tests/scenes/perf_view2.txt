@@ -1,0 +1,9 @@
+sleep 3
+world ref1 1234567
+waitWorld
+cmd /gamerule doDaylightCycle false
+cmd /time set 6000
+cmd /tp @p 64 90 -32 45 20
+sleep 15
+fps 12 forest_view2
+quit

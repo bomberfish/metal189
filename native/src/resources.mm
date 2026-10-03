@@ -2,6 +2,7 @@
 
 #import "engine.h"
 #import "resources.h"
+#import "raytrace.h"
 #include <unordered_map>
 
 namespace m189 {
@@ -320,6 +321,7 @@ const std::unordered_map<int, Section>& allSections() { return g_sections; }
 
 void sectionUpload(int sid, int layer, const void* data, size_t bytes, uint32_t vertexCount, int ox, int oy, int oz) {
     if (layer < 0 || layer > 3) return;
+    if (layer < 3) rtSectionChanged(sid);
     Section& s = g_sections[sid];
     s.ox = ox;
     s.oy = oy;
@@ -333,6 +335,7 @@ void sectionUpload(int sid, int layer, const void* data, size_t bytes, uint32_t 
 }
 
 void sectionDelete(int sid) {
+    rtSectionDeleted(sid);
     auto it = g_sections.find(sid);
     if (it == g_sections.end()) return;
     for (id<MTLBuffer> b : it->second.layers) if (b) g_deferredReleases.push_back(b);

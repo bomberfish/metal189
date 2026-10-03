@@ -2,6 +2,7 @@
 
 #import "m189.h"
 #import "engine.h"
+#import "gpu_profiler.h"
 #import "resources.h"
 #include <vector>
 #include <thread>
@@ -289,6 +290,7 @@ static void present(id<MTLCommandBuffer> cb) {
 static id<MTLCommandBuffer> encode(const uint8_t* cmds, size_t len) {
     Engine& e = engine();
     id<MTLCommandBuffer> cb = [e.queue commandBuffer];
+    profBeginFrame(cb);
     encodePendingResourceWork(cb);
     executeFrame(cb, cmds, len);
     return cb;
