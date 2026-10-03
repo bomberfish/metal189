@@ -28,6 +28,8 @@ public final class Config {
     public static boolean volumetrics = true;
     public static boolean autoExposure = true;
     public static boolean ssao = true;
+    /** LWJGL's macOS Ctrl+left click = right click; off by default when mcmouser (which removes it) is installed. */
+    public static boolean ctrlClickRightClick = !metal189.core.Compat.mcmouserInstalled();
     public static int exposure = 100;        // percent
     public static boolean rtShadows = false;
     public static boolean rtReflections = false;
@@ -72,6 +74,10 @@ public final class Config {
         volumetrics = bool(p, "volumetrics", volumetrics);
         autoExposure = bool(p, "autoExposure", autoExposure);
         ssao = bool(p, "ssao", ssao);
+        ctrlClickRightClick = bool(p, "ctrlClickRightClick", ctrlClickRightClick);
+        Native.LOG.info("metal189: Ctrl+left click is a {} click (mcmouser installed: {})",
+                ctrlClickRightClick ? "right" : "left", metal189.core.Compat.mcmouserInstalled());
+        applyInput();
         exposure = clamp(integer(p, "exposure", exposure), 25, 400);
         rtShadows = bool(p, "rtShadows", rtShadows);
         rtReflections = bool(p, "rtReflections", rtReflections);
@@ -95,6 +101,7 @@ public final class Config {
         p.setProperty("volumetrics", Boolean.toString(volumetrics));
         p.setProperty("autoExposure", Boolean.toString(autoExposure));
         p.setProperty("ssao", Boolean.toString(ssao));
+        p.setProperty("ctrlClickRightClick", Boolean.toString(ctrlClickRightClick));
         p.setProperty("exposure", Integer.toString(exposure));
         p.setProperty("rtShadows", Boolean.toString(rtShadows));
         p.setProperty("rtReflections", Boolean.toString(rtReflections));
@@ -111,6 +118,11 @@ public final class Config {
         } finally {
             if (out != null) try { out.close(); } catch (IOException ignored) {}
         }
+    }
+
+    /** Input options live in the platform layer and apply in both renderers. */
+    public static void applyInput() {
+        Native.setOption(5, ctrlClickRightClick ? 1 : 0);
     }
 
     private static boolean bool(Properties p, String k, boolean def) {

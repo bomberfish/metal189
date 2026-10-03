@@ -37,6 +37,7 @@ public final class Engine {
         Native.setOption(2, Boolean.parseBoolean(System.getProperty("metal189.present", "true")) ? 1 : 0);
         Native.setOption(3, Boolean.getBoolean("metal189.gpuStats") ? 1 : 0);
         Native.setOption(4, Integer.getInteger("metal189.advDebug", 0));
+        Native.setOption(5, metal189.config.Config.ctrlClickRightClick ? 1 : 0);
         Native.LOG.info("Metal device: {}", Native.deviceName());
     }
 

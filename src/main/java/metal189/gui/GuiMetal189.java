@@ -20,7 +20,7 @@ import net.minecraftforge.fml.client.config.GuiSlider;
 public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
     private enum Opt {
         SHADERS, TAA, SHADOWS, SHADOW_RES, SHADOW_DIST, BLOOM, SKY, WATER, WAVING, BLOOM_STRENGTH, CLOUDS, VOLUMETRICS,
-        AUTO_EXP, EXPOSURE, SSAO, RT_SHADOWS, RT_REFL, RT_AO, RT_GI
+        AUTO_EXP, EXPOSURE, SSAO, RT_SHADOWS, RT_REFL, RT_AO, RT_GI, CTRL_CLICK
     }
 
     private static final Opt[][] ROWS = {
@@ -31,7 +31,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
         {Opt.CLOUDS, Opt.VOLUMETRICS},
         {Opt.WAVING, Opt.BLOOM_STRENGTH},
         {Opt.AUTO_EXP, Opt.EXPOSURE},
-        {Opt.SSAO, null},
+        {Opt.SSAO, Opt.CTRL_CLICK},
         {Opt.RT_SHADOWS, Opt.RT_REFL},
         {Opt.RT_AO, Opt.RT_GI},
     };
@@ -88,13 +88,14 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
                 case VOLUMETRICS: b.displayString = label("volumetrics", onOff(Config.volumetrics)); break;
                 case AUTO_EXP: b.displayString = label("autoExposure", onOff(Config.autoExposure)); break;
                 case SSAO: b.displayString = label("ssao", onOff(Config.ssao)); break;
+                case CTRL_CLICK: b.displayString = label("ctrlClick", I18n.format(Config.ctrlClickRightClick ? "metal189.gui.ctrlClick.right" : "metal189.gui.ctrlClick.left")); break;
                 case RT_SHADOWS: b.displayString = label("rtShadows", rt ? onOff(Config.rtShadows) : unsupported); break;
                 case RT_REFL: b.displayString = label("rtReflections", rt ? onOff(Config.rtReflections) : unsupported); break;
                 case RT_AO: b.displayString = label("rtAO", rt ? onOff(Config.rtAmbientOcclusion) : unsupported); break;
                 case RT_GI: b.displayString = label("rtGI", rt ? onOff(Config.rtGlobalIllumination) : unsupported); break;
                 default: break;   // sliders draw their own label
             }
-            b.enabled = o == Opt.SHADERS || (Config.shaders && (!isRt(o) || rt));
+            b.enabled = o == Opt.SHADERS || o == Opt.CTRL_CLICK || (Config.shaders && (!isRt(o) || rt));
         }
     }
 
@@ -116,6 +117,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
             case VOLUMETRICS: Config.volumetrics = !Config.volumetrics; break;
             case AUTO_EXP: Config.autoExposure = !Config.autoExposure; break;
             case SSAO: Config.ssao = !Config.ssao; break;
+            case CTRL_CLICK: Config.ctrlClickRightClick = !Config.ctrlClickRightClick; Config.applyInput(); break;
             case RT_SHADOWS: Config.rtShadows = !Config.rtShadows; break;
             case RT_REFL: Config.rtReflections = !Config.rtReflections; break;
             case RT_AO: Config.rtAmbientOcclusion = !Config.rtAmbientOcclusion; break;
