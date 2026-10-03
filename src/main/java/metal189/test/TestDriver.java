@@ -55,11 +55,21 @@ public final class TestDriver {
     }
 
     private static int hurtTicks;
+    private static float spinRate;
+    private static int spinFrames;
 
     /** Called after every presented frame. */
     public static void onFrame() {
         if (!active) return;
         frame++;
+        if (spinFrames > 0) {
+            spinFrames--;
+            Minecraft m = Minecraft.getMinecraft();
+            if (m.thePlayer != null) {
+                m.thePlayer.prevRotationYaw = m.thePlayer.rotationYaw;
+                m.thePlayer.rotationYaw += spinRate;
+            }
+        }
         if (hurtTicks > 0) {
             Minecraft m = Minecraft.getMinecraft();
             if (m.theWorld != null) {
@@ -94,7 +104,7 @@ public final class TestDriver {
     private static boolean run(String line) {
         String[] a = line.split("\\s+");
         Minecraft mc = Minecraft.getMinecraft();
-        Native.LOG.info("metal189-test [{}] {}", frame, line);
+        if (!line.startsWith("cmd /summon")) Native.LOG.info("metal189-test [{}] {}", frame, line);
         switch (a[0]) {
             case "wait": waitFrames = Integer.parseInt(a[1]); return false;
             case "sleep": waitUntil = System.nanoTime() + (long) (Double.parseDouble(a[1]) * 1e9); return false;
@@ -138,6 +148,27 @@ public final class TestDriver {
             case "hurtall":
                 hurtTicks = Integer.parseInt(a[1]);
                 return true;
+            case "summongrid": {
+                // summongrid N SPACING Type1,Type2,...  -> NoAI mobs in a square grid in front of the player
+                int n = Integer.parseInt(a[1]);
+                double sp = Double.parseDouble(a[2]);
+                String[] types = a[3].split(",");
+                int side = (int) Math.ceil(Math.sqrt(n));
+                double px = mc.thePlayer.posX, py = mc.thePlayer.posY, pz = mc.thePlayer.posZ;
+                StringBuilder all = new StringBuilder();
+                for (int i = 0; i < n; i++) {
+                    double x = px + (i % side - side / 2) * sp, z = pz - 4 - (i / side) * sp;
+                    String t = types[i % types.length];
+                    run("cmd /summon " + t + " " + x + " " + py + " " + z + " {NoAI:1,Rotation:[" + (i * 37 % 360) + "f,0f]}");
+                }
+                return true;
+            }
+            case "spin": {
+                // spin DEGREES_PER_FRAME FRAMES : rotate the camera continuously while measuring
+                spinRate = Float.parseFloat(a[1]);
+                spinFrames = Integer.parseInt(a[2]);
+                return true;
+            }
             case "look":
                 if (mc.thePlayer != null) {
                     mc.thePlayer.rotationYaw = mc.thePlayer.prevRotationYaw = Float.parseFloat(a[1]);

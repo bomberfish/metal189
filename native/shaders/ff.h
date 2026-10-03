@@ -78,6 +78,12 @@ struct FFUniforms {
     m189_uint4 env[3];
 };
 
+// Per-draw transform, bound inline at buffer(3) for every draw.
+struct DrawTransform {
+    m189_float4x4 modelview;
+    m189_float4 normal0, normal1, normal2; // columns of the normal matrix
+};
+
 // Clear quad parameters.
 struct ClearUniforms {
     m189_float4 color;

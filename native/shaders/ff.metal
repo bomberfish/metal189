@@ -86,7 +86,7 @@ vertex FFOut ff_vertex(uint vid [[vertex_id]],
                        device const uchar* vbuf [[buffer(0)]],
                        constant VertexLayout& layout [[buffer(1)]],
                        constant FFUniforms& u [[buffer(2)]],
-                       constant float4x4& sectionMV [[buffer(3), function_constant(fc_terrain)]]) {
+                       constant DrawTransform& xf [[buffer(3)]]) {
     device const uchar* v = vbuf + vid * layout.stride.x;
     float4 objPos = fetch(v, layout.pos, float4(0, 0, 0, 1));
     float4 color = fetch(v, layout.color, u.color);
@@ -94,7 +94,7 @@ vertex FFOut ff_vertex(uint vid [[vertex_id]],
     float4 t1 = fetch(v, layout.tex1, u.texCoord1);
     float3 nrm = fetch(v, layout.normal, float4(u.normal.xyz, 0)).xyz;
 
-    float4 eye = (fc_terrain ? sectionMV : u.modelview) * objPos;
+    float4 eye = xf.modelview * objPos;
     FFOut o;
     float4 clip = u.proj * eye;
     if (u.flags.x & FF_FLIP_Y) clip.y = -clip.y;
@@ -104,7 +104,7 @@ vertex FFOut ff_vertex(uint vid [[vertex_id]],
 
     uint f = u.flags.x;
     if (f & FF_LIGHTING) {
-        float3 n = (u.normalMatrix * float4(nrm, 0)).xyz;
+        float3 n = float3x3(xf.normal0.xyz, xf.normal1.xyz, xf.normal2.xyz) * nrm;
         if (f & FF_NORMALIZE) n = normalize(n);
         color = lightVertex(u, color, n, eye.xyz);
     } else {

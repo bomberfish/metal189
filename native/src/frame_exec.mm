@@ -76,8 +76,8 @@ static std::unordered_map<PipeKey, id<MTLRenderPipelineState>, PipeKeyHash> g_pi
 static std::unordered_map<uint32_t, id<MTLDepthStencilState>> g_dss;
 static id<MTLFunction> g_vfn[32], g_ffn[32];
 static id<MTLFunction> g_clearV, g_clearF;
-static id<MTLBuffer> g_quadIndices;
-static uint32_t g_quadIndexQuads = 0;
+static id<MTLBuffer> g_quadIndices, g_flatQuadIndices;
+static uint32_t g_quadIndexQuads = 0, g_flatQuadIndexQuads = 0;
 
 static MTLBlendFactor blendFactor(uint32_t gl) {
     switch (gl) {
@@ -239,6 +239,23 @@ static id<MTLDepthStencilState> depthState(bool test, uint32_t func, bool write)
     return s;
 }
 
+// Flat-shaded quads: GL's provoking vertex (v3) first in both triangles.
+static id<MTLBuffer> flatQuadIndices(uint32_t quads) {
+    if (quads <= g_flatQuadIndexQuads && g_flatQuadIndices) return g_flatQuadIndices;
+    uint32_t n = std::max<uint32_t>(quads, 65536);
+    n = (n + 65535) & ~65535u;
+    id<MTLBuffer> b = [device() newBufferWithLength:(size_t)n * 6 * 4 options:MTLResourceStorageModeShared];
+    uint32_t* p = (uint32_t*)b.contents;
+    for (uint32_t q = 0; q < n; q++) {
+        uint32_t v = q * 4;
+        p[q * 6 + 0] = v + 3; p[q * 6 + 1] = v; p[q * 6 + 2] = v + 1;
+        p[q * 6 + 3] = v + 3; p[q * 6 + 4] = v + 1; p[q * 6 + 5] = v + 2;
+    }
+    g_flatQuadIndices = b;
+    g_flatQuadIndexQuads = n;
+    return b;
+}
+
 static id<MTLBuffer> quadIndices(uint32_t quads) {
     if (quads <= g_quadIndexQuads && g_quadIndices) return g_quadIndices;
     uint32_t n = std::max<uint32_t>(quads, 65536);
@@ -385,6 +402,12 @@ struct Exec {
     bool flipForUniforms = false;
     size_t uniOffset = SIZE_MAX;
     uint32_t uniMask = 0;
+    bool xfDirty = true;    // modelview changed since the transform was last bound
+    bool stateDirty = true; // any non-matrix GL state changed since the last fully prepared draw
+    uint32_t lastPrimClass = 0xFF;
+    int lastFormat = -1;
+    bool lastTerrain = false;
+    bool lastOk = false;
     // batch of merged arena draws
     bool batchOpen = false;
     PrimClass batchClass = PC_TRI;
@@ -487,6 +510,8 @@ static bool beginPass(Exec& x) {
     x.bVbOffset = SIZE_MAX;
     x.bFormat = -1;
     x.bUniOffset = SIZE_MAX;
+    x.xfDirty = true;
+    x.stateDirty = true;
     if (x.cur.fbo == 0) engine().screenDirty = true;
     return true;
 }
@@ -630,7 +655,34 @@ static size_t buildUniforms(Exec& x, uint32_t texMask) {
 }
 
 // Applies every piece of encoder state a draw needs. Returns false to skip the draw.
+static bool prepareDrawFull(Exec& x, uint32_t glPrim, int format, bool terrain);
+
+// Fast path: when only the modelview changed since the previous prepared draw
+// (typical for consecutive entity model parts), rebind just the transform.
 static bool prepareDraw(Exec& x, uint32_t glPrim, int format, bool terrain = false) {
+    PrimClass pc0 = primClass(glPrim);
+    if (!x.stateDirty && x.enc && x.lastOk && x.lastPrimClass == (uint32_t)pc0 && x.lastFormat == format && x.lastTerrain == terrain) {
+        if (!terrain && x.xfDirty) {
+            DrawTransform xf;
+            xf.modelview = g.mv;
+            xf.normal0 = g.normal.columns[0];
+            xf.normal1 = g.normal.columns[1];
+            xf.normal2 = g.normal.columns[2];
+            [x.enc setVertexBytes:&xf length:sizeof xf atIndex:3];
+            x.xfDirty = false;
+        }
+        return true;
+    }
+    bool ok = prepareDrawFull(x, glPrim, format, terrain);
+    x.stateDirty = false;
+    x.lastOk = ok;
+    x.lastPrimClass = (uint32_t)pc0;
+    x.lastFormat = format;
+    x.lastTerrain = terrain;
+    return ok;
+}
+
+static bool prepareDrawFull(Exec& x, uint32_t glPrim, int format, bool terrain) {
     if (!beginPass(x)) return false;
     if (!x.cur.color) return false;
     PrimClass pc = primClass(glPrim);
@@ -696,6 +748,15 @@ static bool prepareDraw(Exec& x, uint32_t glPrim, int format, bool terrain = fal
         [x.enc setVertexBuffer:x.fr->uniforms offset:x.uniOffset atIndex:2];
         [x.enc setFragmentBuffer:x.fr->uniforms offset:x.uniOffset atIndex:2];
         x.bUniOffset = x.uniOffset;
+    }
+    if (!terrain && x.xfDirty) {
+        DrawTransform xf;
+        xf.modelview = g.mv;
+        xf.normal0 = g.normal.columns[0];
+        xf.normal1 = g.normal.columns[1];
+        xf.normal2 = g.normal.columns[2];
+        [x.enc setVertexBytes:&xf length:sizeof xf atIndex:3];
+        x.xfDirty = false;
     }
     if (format != x.bFormat) {
         const VertexLayout* L = layout(format);
@@ -792,8 +853,8 @@ static void drawMesh(Exec& x, const DrawMeshCmd& d) {
     }
     bool flat = g.raster.flat != 0;
     PrimClass pc = primClass(d.prim);
-    if (d.prim == 7 && !flat) {
-        id<MTLBuffer> qi = quadIndices(d.count / 4);
+    if (d.prim == 7) {
+        id<MTLBuffer> qi = flat ? flatQuadIndices(d.count / 4) : quadIndices(d.count / 4);
         [x.enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:n indexType:MTLIndexTypeUInt32 indexBuffer:qi indexBufferOffset:0];
         return;
     }
@@ -865,6 +926,7 @@ static void drawTerrain(Exec& x, const CmdHeader* h) {
         g_stats.terrainDraws++;
         g_stats.terrainQuads += quads;
     }
+    x.xfDirty = true;
 }
 
 static void doClear(Exec& x, const ClearCmd& c) {
@@ -888,6 +950,7 @@ static void doClear(Exec& x, const ClearCmd& c) {
     if (!ps) return;
     [x.enc setRenderPipelineState:ps];
     x.bPso = ps;
+    x.stateDirty = true;
     id<MTLDepthStencilState> dss = depthState(wantDepth, 0x207, wantDepth);
     [x.enc setDepthStencilState:dss];
     x.bDss = dss;
@@ -950,26 +1013,25 @@ void executeFrame(id<MTLCommandBuffer> cb, const uint8_t* cmds, size_t len) {
     CmdReader rd(cmds, len);
     while (const CmdHeader* h = rd.next()) {
         switch (h->op) {
-            case OP_STATE_PIPE: flushBatch(x); g.pipe = payload<PipeState>(h); g.uniformsDirty = true; break;
-            case OP_STATE_DEPTH: flushBatch(x); g.depth = payload<DepthState>(h); break;
-            case OP_STATE_RASTER: flushBatch(x); g.raster = payload<RasterState>(h); break;
-            case OP_STATE_FRAG: flushBatch(x); g.frag = payload<FragState>(h); g.uniformsDirty = true; break;
-            case OP_STATE_UNITS: flushBatch(x); memcpy(g.units, h + 1, sizeof g.units); g.uniformsDirty = true; break;
-            case OP_STATE_TEXGEN: flushBatch(x); g.texgen = payload<TexGenState>(h); g.uniformsDirty = true; break;
-            case OP_STATE_LIGHT: flushBatch(x); g.light = payload<LightState>(h); g.uniformsDirty = true; break;
-            case OP_STATE_ATTRIB: flushBatch(x); g.attrib = payload<AttribState>(h); g.uniformsDirty = true; break;
-            case OP_STATE_VIEWPORT: flushBatch(x); g.vp = payload<ViewportState>(h); break;
+            case OP_STATE_PIPE: flushBatch(x); x.stateDirty = true; g.pipe = payload<PipeState>(h); g.uniformsDirty = true; break;
+            case OP_STATE_DEPTH: flushBatch(x); x.stateDirty = true; g.depth = payload<DepthState>(h); break;
+            case OP_STATE_RASTER: flushBatch(x); x.stateDirty = true; g.raster = payload<RasterState>(h); break;
+            case OP_STATE_FRAG: flushBatch(x); x.stateDirty = true; g.frag = payload<FragState>(h); g.uniformsDirty = true; break;
+            case OP_STATE_UNITS: flushBatch(x); x.stateDirty = true; memcpy(g.units, h + 1, sizeof g.units); g.uniformsDirty = true; break;
+            case OP_STATE_TEXGEN: flushBatch(x); x.stateDirty = true; g.texgen = payload<TexGenState>(h); g.uniformsDirty = true; break;
+            case OP_STATE_LIGHT: flushBatch(x); x.stateDirty = true; g.light = payload<LightState>(h); g.uniformsDirty = true; break;
+            case OP_STATE_ATTRIB: flushBatch(x); x.stateDirty = true; g.attrib = payload<AttribState>(h); g.uniformsDirty = true; break;
+            case OP_STATE_VIEWPORT: flushBatch(x); x.stateDirty = true; g.vp = payload<ViewportState>(h); break;
             case OP_MATRIX: {
                 flushBatch(x);
                 const uint32_t which = *(const uint32_t*)(h + 1);
                 simd_float4x4 m = loadMatrix((const float*)(h + 1) + 1);
-                if (which == 0) { g.mv = m; g.normal = normalMatrix(m); }
-                else if (which == 1) g.proj = m;
-                else if (which - 2 < 3) g.tex[which - 2] = m;
-                g.uniformsDirty = true;
+                if (which == 0) { g.mv = m; g.normal = normalMatrix(m); x.xfDirty = true; }
+                else if (which == 1) { g.proj = m; g.uniformsDirty = true; x.stateDirty = true; }
+                else if (which - 2 < 3) { g.tex[which - 2] = m; g.uniformsDirty = true; x.stateDirty = true; }
                 break;
             }
-            case OP_TARGET: flushBatch(x); resolveTarget(x, payload<TargetCmd>(h)); break;
+            case OP_TARGET: flushBatch(x); resolveTarget(x, payload<TargetCmd>(h)); x.stateDirty = true; break;
             case OP_CLEAR: doClear(x, payload<ClearCmd>(h)); break;
             case OP_DRAW: drawArena(x, payload<DrawCmd>(h)); break;
             case OP_DRAW_MESH: drawMesh(x, payload<DrawMeshCmd>(h)); break;

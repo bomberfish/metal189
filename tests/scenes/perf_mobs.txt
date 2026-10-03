@@ -1,0 +1,15 @@
+sleep 3
+world mobs1 42 flat
+waitWorld
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /time set 6000
+cmd /tp @p 0.5 4 0.5 180 20
+sleep 3
+cmd /kill @e[type=!Player]
+summongrid 300 1.6 Zombie,Skeleton,Creeper,Pig,Sheep,Cow,Chicken,Villager,Spider,Wolf
+sleep 8
+fps 10 mobs300_static
+spin 0.5 100000
+fps 10 mobs300_spin
+quit
