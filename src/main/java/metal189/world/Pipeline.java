@@ -12,7 +12,7 @@ public final class Pipeline {
     private Pipeline() {}
 
     public static final int SHADOWS = 1, BLOOM = 2, SKY = 4, WATER = 8, SSAO = 16, PCSS = 32, RT_SHADOWS = 64, RT_REFLECTIONS = 128,
-            TAA = 256, CLOUDS = 512, VOLUMETRICS = 1024, AUTO_EXPOSURE = 2048;
+            TAA = 256, CLOUDS = 512, VOLUMETRICS = 1024, AUTO_EXPOSURE = 2048, RT_AO = 8192;
 
     private static final String SHADERS_OVERRIDE = System.getProperty("metal189.shaders");
     private static final Integer FEATURES_OVERRIDE = Integer.getInteger("metal189.shaderFeatures");
@@ -52,6 +52,7 @@ public final class Pipeline {
             if (Config.clouds) features |= CLOUDS;
             if (Config.volumetrics) features |= VOLUMETRICS;
             if (Config.autoExposure) features |= AUTO_EXPOSURE;
+            if (Config.rtAmbientOcclusion) features |= RT_AO;
         }
         if (advanced) Materials.upload();
         Native.setOption(OPT_SHADOW_RES, Config.shadowResolution);
@@ -59,7 +60,7 @@ public final class Pipeline {
         Native.setOption(OPT_EXPOSURE, Config.exposure);
         Native.setOption(OPT_BLOOM, Config.bloomStrength);
         Native.setOption(OPT_WAVING, Config.waving ? 1 : 0);
-        boolean rtOn = advanced && (features & (RT_SHADOWS | RT_REFLECTIONS)) != 0;
+        boolean rtOn = advanced && (features & (RT_SHADOWS | RT_REFLECTIONS | RT_AO)) != 0;
         if (rtWasOn && !rtOn) Native.setOption(OPT_RT_RELEASE, 1); // free acceleration structures
         rtWasOn = rtOn;
         Native.advSetFeatures(features);

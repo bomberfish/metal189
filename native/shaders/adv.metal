@@ -797,6 +797,61 @@ static float3 rtShade(constant AdvFrame& fr, instance_acceleration_structure tla
     return c;
 }
 
+// Ray-traced ambient occlusion at half resolution: 4 short cosine-weighted rays per
+// texel (rotated each frame), denoised by aoblur_fragment and accumulated by TAA.
+fragment float4 rtao_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
+                              depth2d<float> depth [[texture(0)]], texture2d<float> gLinZ [[texture(1)]],
+                              texture2d<float> gNormal [[texture(2)]],
+                              instance_acceleration_structure tlas [[buffer(10)]],
+                              device const RtInstance* rtInst [[buffer(11)]],
+                              texture2d<float> atlas [[texture(7)]], sampler pointS [[sampler(2)]]) {
+    uint2 fp = min(uint2(in.position.xy) * 2u + 1u, uint2(fr.screen.xy) - 1u);
+    float d = depth.read(fp);
+    if (d >= 1.0) return float4(1.0);
+    float2 ndc = float2((float(fp.x) + 0.5) * fr.screen.z * 2.0 - 1.0, (float(fp.y) + 0.5) * fr.screen.w * 2.0 - 1.0) - fr.jitter.xy;
+    float4 pf = fr.invProj * float4(ndc, 1.0, 1.0);
+    float3 rd = pf.xyz / pf.w;
+    float3 eye = rd * (gLinZ.read(fp).r / -rd.z);
+    float3 world = (fr.invView * float4(eye, 1)).xyz;
+    float3 nWorld = normalize((fr.invView * float4(normalize(gNormal.read(fp).xyz), 0)).xyz);
+    float3 up = abs(nWorld.y) < 0.999 ? float3(0, 1, 0) : float3(1, 0, 0);
+    float3 tx = normalize(cross(up, nWorld)), ty = cross(nWorld, tx);
+    float3 o = world + fr.rtCam.xyz + nWorld * (0.01 + length(eye) * 0.0002);
+    // TAA integrates over frames, so 2 rotating rays suffice with it; 4 without
+    int rays = fr.taa.w > 0.5 ? 2 : 4;
+    float open = 0.0;
+    float rot = hash12(in.position.xy) * 6.2831853 + float(fr.flags.z % 64u) * 2.399963;
+    for (int i = 0; i < rays; i++) {
+        float u = (float(i) + fract(hash12(in.position.yx + float(i)) + float(fr.flags.z % 16u) * 0.618034)) / float(rays);
+        float r = sqrt(u), phi = rot + float(i) * 6.2831853 / float(rays);
+        float3 dir = normalize(tx * (r * cos(phi)) + ty * (r * sin(phi)) + nWorld * sqrt(max(0.0, 1.0 - u)));
+        open += rtOccluded(tlas, rtInst, atlas, pointS, o, dir, 2.5) ? 0.0 : 1.0;
+    }
+    return float4(open / float(rays), 1.0, 1.0, 1.0);
+}
+
+// Separable depth/normal-aware blur of the half-resolution AO (p.xy: texel step).
+fragment float4 aoblur_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
+                                texture2d<float> ao [[texture(0)]], texture2d<float> gLinZ [[texture(1)]],
+                                texture2d<float> gNormal [[texture(2)]], constant float4& p [[buffer(0)]]) {
+    int2 c = int2(in.position.xy);
+    int2 mx = int2(ao.get_width(), ao.get_height()) - 1;
+    uint2 fpc = min(uint2(c) * 2u + 1u, uint2(fr.screen.xy) - 1u);
+    float z0 = gLinZ.read(fpc).r;
+    float3 n0 = gNormal.read(fpc).xyz;
+    float sum = 0.0, wsum = 0.0;
+    for (int i = -4; i <= 4; i++) {
+        int2 q = clamp(c + int2(p.xy) * i, int2(0), mx);
+        uint2 fq = min(uint2(q) * 2u + 1u, uint2(fr.screen.xy) - 1u);
+        float z = gLinZ.read(fq).r;
+        float3 nq = gNormal.read(fq).xyz;
+        float w = exp(-float(i * i) / 8.0) * exp(-abs(z - z0) / max(z0 * 0.03, 0.05)) * pow(saturate(dot(nq, n0)), 8.0);
+        sum += ao.read(uint2(q)).r * w;
+        wsum += w;
+    }
+    return float4(sum / max(wsum, 1e-4), 1.0, 1.0, 1.0);
+}
+
 static float3 ssr(constant AdvFrame& fr, depth2d<float> depthTex, float3 eyePos, float3 rdView);
 
 static inline float2 hash22(float2 p) {
@@ -818,6 +873,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                                texture3d<float> cloudNoise [[texture(9)]],
                                texture2d<float> gSpec [[texture(10)]],
                                texture2d<float> history [[texture(11)]],
+                               texture2d<float> rtaoTex [[texture(12)]],
                                sampler cmp [[sampler(0)]], sampler lin [[sampler(1)]],
                                sampler rep [[sampler(3)]],
                                instance_acceleration_structure tlas [[buffer(10), function_constant(ac_rt)]],
@@ -874,6 +930,8 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
         rough = mix(rough, 0.03, wet * puddle);
         F0 = max(F0, float3(0.02 * wet));
     }
+    // ray-traced ambient occlusion (half resolution, denoised; see rtao_fragment)
+    if (fr.flags.x & ADV_RT_AO) ao *= mix(1.0, rtaoTex.sample(lin, in.uv).r, 0.85);
     float3 color = float3(0);
     float3 lightDir = fr.sunDirView.w > 0.0 ? fr.sunDirView.xyz : fr.moonDirView.xyz;
     float3 lightCol = fr.sunDirView.w > 0.0 ? fr.sunColor.rgb : fr.moonColor.rgb;
