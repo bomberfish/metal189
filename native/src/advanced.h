@@ -46,6 +46,7 @@ struct AdvWorld {
 };
 
 bool advancedEnabled();
+bool advancedCloudsActive();   // the engine draws clouds itself (vanilla clouds are skipped)
 void advancedSetEnabled(bool on);
 void advancedSetFeatures(uint32_t flags);
 void advancedSetTables(const uint8_t* materials, const uint8_t* emissions);

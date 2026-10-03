@@ -1187,11 +1187,13 @@ void executeFrame(id<MTLCommandBuffer> cb, const uint8_t* cmds, size_t len) {
                 doClear(x, payload<ClearCmd>(h));
                 break;
             case OP_DRAW:
-                if (x.advReplay && (g_phase == PH_SKY || advConsumes(g, g_phase, payload<DrawCmd>(h).prim))) break;
+                if (x.advReplay && (g_phase == PH_SKY || (g_phase == PH_CLOUDS && advancedCloudsActive()) ||
+                                    advConsumes(g, g_phase, payload<DrawCmd>(h).prim))) break;
                 drawArena(x, payload<DrawCmd>(h));
                 break;
             case OP_DRAW_MESH:
-                if (x.advReplay && (g_phase == PH_SKY || advConsumes(g, g_phase, payload<DrawMeshCmd>(h).prim))) break;
+                if (x.advReplay && (g_phase == PH_SKY || (g_phase == PH_CLOUDS && advancedCloudsActive()) ||
+                                    advConsumes(g, g_phase, payload<DrawMeshCmd>(h).prim))) break;
                 drawMesh(x, payload<DrawMeshCmd>(h));
                 break;
             case OP_COPY_TEX: copyTex(x, payload<CopyTexCmd>(h)); break;

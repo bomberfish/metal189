@@ -418,7 +418,198 @@ static float3 hazeColor(constant AdvFrame& fr, texture2d<float> skyLut, sampler 
     return amb + (fr.sunColor.rgb * hg(mu, 0.6) * sunVis + fr.moonColor.rgb * hg(-mu, 0.6)) * 0.35;
 }
 
-static float3 skyRadiance(constant AdvFrame& fr, texture2d<float> skyLut, sampler s, float3 dirWorld) {
+// ---------------------------------------------------------------------------
+// volumetric clouds: a layer between kCloudBottom and kCloudTop, raymarched into a
+// direction-space cloud map (rgb: in-scattered light, a: transmittance) shared by the
+// sky, reflections and terrain cloud shadows
+
+constant float kCloudBottom = 190.0, kCloudTop = 290.0;
+constant float kCloudPeriod = 1024.0;   // horizontal noise repeat (blocks); matches the camera wrap
+
+static inline float remap(float v, float lo, float hi, float nlo, float nhi) {
+    return nlo + (v - lo) * (nhi - nlo) / (hi - lo);
+}
+
+static float3 hash33(float3 p) {
+    p = fract(p * float3(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yxz + 33.33);
+    return fract((p.xxy + p.yxx) * p.zyx);
+}
+
+static inline float3 wrapCell(float3 c, float period) { return c - floor(c / period) * period; }
+
+static float worleyTiled(float3 p, float period) {
+    float3 id = floor(p), f = fract(p);
+    float d = 1e9;
+    for (int z = -1; z <= 1; z++)
+        for (int y = -1; y <= 1; y++)
+            for (int x = -1; x <= 1; x++) {
+                float3 o = float3(x, y, z);
+                float3 pt = o + hash33(wrapCell(id + o, period)) - f;
+                d = min(d, dot(pt, pt));
+            }
+    return sqrt(d);
+}
+
+static inline float gradDot(float3 cell, float3 d, float period) {
+    float3 g = hash33(wrapCell(cell, period)) * 2.0 - 1.0;
+    return dot(normalize(g + 1e-4), d);
+}
+
+static float perlinTiled(float3 p, float period) {
+    float3 i = floor(p), f = fract(p);
+    float3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    float n000 = gradDot(i, f, period), n100 = gradDot(i + float3(1, 0, 0), f - float3(1, 0, 0), period);
+    float n010 = gradDot(i + float3(0, 1, 0), f - float3(0, 1, 0), period), n110 = gradDot(i + float3(1, 1, 0), f - float3(1, 1, 0), period);
+    float n001 = gradDot(i + float3(0, 0, 1), f - float3(0, 0, 1), period), n101 = gradDot(i + float3(1, 0, 1), f - float3(1, 0, 1), period);
+    float n011 = gradDot(i + float3(0, 1, 1), f - float3(0, 1, 1), period), n111 = gradDot(i + float3(1, 1, 1), f - float3(1, 1, 1), period);
+    return mix(mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y), mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y), u.z);
+}
+
+// Tileable cloud noise volume: r = Perlin-Worley (shape), g = Worley fbm, b = high-frequency Worley (erosion).
+kernel void cloud_noise_kernel(texture3d<float, access::write> out [[texture(0)]], uint3 gid [[thread_position_in_grid]]) {
+    float n = float(out.get_width());
+    float3 p = (float3(gid) + 0.5) / n;
+    float pf = 0, amp = 1, tot = 0;
+    for (int o = 0; o < 4; o++) {
+        float per = 4.0 * exp2(float(o));
+        pf += perlinTiled(p * per, per) * amp;
+        tot += amp;
+        amp *= 0.5;
+    }
+    pf = pf / tot * 0.7 + 0.5;
+    float w = 0;
+    amp = 1;
+    tot = 0;
+    for (int o = 0; o < 3; o++) {
+        float per = 6.0 * exp2(float(o));
+        w += (1.0 - saturate(worleyTiled(p * per, per))) * amp;
+        tot += amp;
+        amp *= 0.5;
+    }
+    w /= tot;
+    float wd = 0;
+    amp = 1;
+    tot = 0;
+    for (int o = 0; o < 3; o++) {
+        float per = 16.0 * exp2(float(o));
+        wd += (1.0 - saturate(worleyTiled(p * per, per))) * amp;
+        tot += amp;
+        amp *= 0.5;
+    }
+    wd /= tot;
+    float pw = saturate(remap(pf, w - 1.0, 1.0, 0.0, 1.0));
+    out.write(float4(pw, w, wd, 1.0), gid);
+}
+
+// Cloud density at absolute world position p (horizontal coordinates mod 1024).
+static float cloudDensity(texture3d<float> noise, sampler rep, float3 p, constant AdvFrame& fr, bool detail) {
+    float h = (p.y - kCloudBottom) / (kCloudTop - kCloudBottom);
+    if (h <= 0.0 || h >= 1.0) return 0.0;
+    float wind = fr.params.x * 4.0;
+    float3 q = float3(p.x + wind, p.y * 1.5, p.z + wind * 0.35) / kCloudPeriod;
+    float4 n = noise.sample(rep, q);
+    float coverage = mix(0.44, 0.9, fr.params.y);
+    float profile = smoothstep(0.0, 0.12, h) * smoothstep(1.0, 0.55, h);
+    float base = (n.r * 0.55 + n.g * 0.45) * profile;
+    float d = saturate(remap(base, 1.0 - coverage, 1.0, 0.0, 1.0) * 1.6);
+    if (detail && d > 0.0) {
+        float e = noise.sample(rep, q * 7.0 + float3(0.0, fr.params.x * 0.003, 0.0)).b;
+        d = saturate(remap(d, e * 0.4 * (1.0 - h * 0.5), 1.0, 0.0, 1.0));
+    }
+    return d;
+}
+
+// Cloud map parameterisation: x = azimuth, y = sqrt(elevation) over the upper hemisphere.
+static float3 cloudMapDir(float2 uv) {
+    float az = uv.x * 2.0 * 3.14159265;
+    float el = uv.y * uv.y * 1.5707963;
+    return float3(cos(el) * cos(az), sin(el), cos(el) * sin(az));
+}
+
+static float2 cloudMapUv(float3 d) {
+    float el = asin(saturate(d.y));
+    float az = atan2(d.z, d.x);
+    if (az < 0.0) az += 2.0 * 3.14159265;
+    return float2(az / (2.0 * 3.14159265), sqrt(el / 1.5707963));
+}
+
+static float3 skyBase(constant AdvFrame& fr, texture2d<float> skyLut, sampler s, float3 d);
+static float hg(float mu, float g);
+
+fragment float4 clouds_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
+                                texture3d<float> noise [[texture(0)]], texture2d<float> skyLut [[texture(1)]],
+                                texture2d<float> prevMap [[texture(2)]], sampler rep [[sampler(0)]], sampler lin [[sampler(1)]]) {
+    // checkerboard: half the texels are marched each frame, the rest keep their history
+    uint2 cpx = uint2(in.position.xy);
+    if (fr.post.y > 0.5 && ((cpx.x + cpx.y + fr.flags.z) & 1u) != 0u) return prevMap.read(cpx);
+    float3 d = cloudMapDir(in.uv);
+    float3 cam = fr.camera.xyz;
+    float4 result = float4(0, 0, 0, 1);
+    float t0 = 0, t1 = 0;
+    bool march = true;
+    if (cam.y < kCloudBottom) {
+        if (d.y < 0.005) march = false;
+        t0 = (kCloudBottom - cam.y) / max(d.y, 1e-4);
+        t1 = (kCloudTop - cam.y) / max(d.y, 1e-4);
+    } else if (cam.y > kCloudTop) {
+        march = false;   // above the layer: the map only covers the upper hemisphere
+    } else {
+        t0 = 0.0;
+        t1 = (kCloudTop - cam.y) / max(d.y, 0.05);
+    }
+    if (march && t0 < 24000.0) {
+        t1 = min(t1, t0 + 3000.0);
+        const int N = 24;
+        float dt = (t1 - t0) / N;
+        float jit = fract(hash12(in.position.xy) + float(fr.flags.z % 64u) * 0.618034);
+        bool sunUp = fr.sunDirWorld.w > 0.0;
+        float3 L = sunUp ? fr.sunDirWorld.xyz : -fr.sunDirWorld.xyz;
+        float3 lightCol = sunUp ? fr.sunColor.rgb : fr.moonColor.rgb * 1.5;
+        float mu = dot(d, L);
+        float phase = mix(hg(mu, 0.65), hg(mu, -0.25), 0.35);
+        float3 amb = skyLut.sample(lin, float2(0.5, 1.0), level(5)).rgb;
+        const float sigma = 0.06;
+        float T = 1.0;
+        float3 S = 0;
+        for (int i = 0; i < N && T > 0.02; i++) {
+            float3 p = cam + d * (t0 + (i + jit) * dt);
+            float dens = cloudDensity(noise, rep, p, fr, true);
+            if (dens <= 0.002) continue;
+            float od = 0, ls = 12.0;
+            for (int j = 0; j < 5; j++) {
+                od += cloudDensity(noise, rep, p + L * (ls * (j + 0.5)), fr, false) * ls;
+                ls *= 1.7;
+            }
+            float tl = exp(-od * sigma);
+            float powder = 1.0 - exp(-od * sigma * 2.0);
+            float h = saturate((p.y - kCloudBottom) / (kCloudTop - kCloudBottom));
+            float3 lum = lightCol * tl * phase * mix(1.0, powder, 0.5) * 9.0 + amb * (0.4 + 0.6 * h) * 1.2;
+            float st = exp(-dens * sigma * dt);
+            S += T * lum * (1.0 - st);
+            T *= st;
+        }
+        // distant clouds fade into the sky
+        float fade = exp(-t0 / 9000.0);
+        result = float4(S * fade, mix(1.0, T, fade));
+    }
+    // temporal accumulation (the map is direction space, so only translation and wind change it)
+    if (fr.post.y > 0.5) result = mix(prevMap.read(cpx), result, 0.3);
+    return result;
+}
+
+// Transmittance of the cloud layer towards the light at an absolute world position.
+static float cloudShadow(constant AdvFrame& fr, texture3d<float> noise, sampler rep, float3 worldAbs, float3 L) {
+    if (L.y < 0.05) return 1.0;
+    float t = ((kCloudBottom + kCloudTop) * 0.5 - worldAbs.y) / L.y;
+    if (t < 0.0) return 1.0;
+    float d = cloudDensity(noise, rep, worldAbs + L * t, fr, false);
+    float od = d * 0.06 * (kCloudTop - kCloudBottom) * 0.5 / L.y;
+    return mix(1.0, exp(-od), 0.9);
+}
+
+static float3 skyRadiance(constant AdvFrame& fr, texture2d<float> skyLut, sampler s, float3 dirWorld,
+                          texture2d<float> cloudMap) {
     if (fr.flags.y != 0) return toLinear(fr.fogColor.rgb);
     float3 d = dirWorld;
     float3 base = skyBase(fr, skyLut, s, d);
@@ -427,6 +618,10 @@ static float3 skyRadiance(constant AdvFrame& fr, texture2d<float> skyLut, sample
     float moon = smoothstep(0.99935, 0.9996, -mu) * (1.0 - fr.sunDirWorld.w);
     float3 c = base + fr.sunColor.rgb * disc * 60.0 + float3(0.8, 0.85, 1.0) * moon * 1.5;
     c += starField(d, fr.camera.w * (1.0 - fr.params.y));
+    if ((fr.flags.x & ADV_CLOUDS) && d.y > 0.0) {
+        float4 cl = cloudMap.sample(s, cloudMapUv(d));
+        c = c * cl.a + cl.rgb;
+    }
     return c;
 }
 
@@ -571,7 +766,10 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                                depth2d<float> shadowMap [[texture(4)]],
                                texture2d<float> skyLut [[texture(5)]],
                                texture2d<float> gLinZ [[texture(6)]],
+                               texture2d<float> cloudMap [[texture(8)]],
+                               texture3d<float> cloudNoise [[texture(9)]],
                                sampler cmp [[sampler(0)]], sampler lin [[sampler(1)]],
+                               sampler rep [[sampler(3)]],
                                instance_acceleration_structure tlas [[buffer(10), function_constant(ac_rt)]],
                                device const RtInstance* rtInst [[buffer(11), function_constant(ac_rt)]],
                                texture2d<float> atlas [[texture(7), function_constant(ac_rt)]],
@@ -585,7 +783,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     float3 eye = d >= 1.0 ? rd : rd * (gLinZ.read(px).r / -rd.z);
     float3 dirWorld = normalize((fr.invView * float4(eye, 0)).xyz);
     if (d >= 1.0) {
-        float3 sky = skyRadiance(fr, skyLut, lin, dirWorld);
+        float3 sky = skyRadiance(fr, skyLut, lin, dirWorld, cloudMap);
         if (fr.fog.w > 0.5) sky = toLinear(fr.fogColor.rgb) * 0.4;
         return float4(sky, 1.0);
     }
@@ -628,6 +826,10 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
         float nh = saturate(dot(n, h));
         float dd = nh * nh * (a2 - 1.0) + 1.0;
         float spec = a2 / (3.14159 * dd * dd) * 0.04 * (1.0 - rough);
+        if (fr.flags.x & ADV_CLOUDS) {
+            float3 Lw = fr.sunDirView.w > 0.0 ? fr.sunDirWorld.xyz : -fr.sunDirWorld.xyz;
+            shadow *= cloudShadow(fr, cloudNoise, rep, world + fr.camera.xyz, Lw);
+        }
         color += lightCol * (albedo * diffuse + spec * saturate(ndl)) * shadow * skyGate;
     }
     color += albedo * skyAmbient(fr, skyLut, lin, nWorld) * (skyLight * skyLight) * ao * fr.ambient.a;
@@ -735,7 +937,8 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
                                texture2d<float> sceneColor [[texture(6)]], depth2d<float> sceneDepth [[texture(7)]],
                                instance_acceleration_structure tlas [[buffer(10), function_constant(ac_rt)]],
                                device const RtInstance* rtInst [[buffer(11), function_constant(ac_rt)]],
-                               sampler pointS [[sampler(3), function_constant(ac_rt)]]) {
+                               sampler pointS [[sampler(3), function_constant(ac_rt)]],
+                               texture2d<float> cloudMap [[texture(8)]]) {
     float4 t = atlas.sample(s, in.uv);
     float3 n = front ? in.normalView : -in.normalView;
     float3 v = normalize(-in.eye);
@@ -788,7 +991,8 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
     // reflection
     float3 rdWorld = reflect(dirWorld, nw);
     float3 rdView = normalize((fr.view * float4(rdWorld, 0)).xyz);
-    float3 sky = skyRadiance(fr, skyLut, lin, normalize(float3(rdWorld.x, abs(rdWorld.y), rdWorld.z))) * smoothstep(0.2, 0.9, in.lm.y);
+    float3 sky = skyRadiance(fr, skyLut, lin, normalize(float3(rdWorld.x, abs(rdWorld.y), rdWorld.z)), cloudMap) *
+                 smoothstep(0.2, 0.9, in.lm.y);
     float3 refl = sky;
     float cosT = saturate(dot(-dirWorld, nw));
     float fres = 0.02 + 0.98 * pow(1.0 - cosT, 5.0);

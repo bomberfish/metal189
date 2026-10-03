@@ -41,6 +41,7 @@ void advancedSetParam(int key, int value) {
 }
 
 void advancedSetEnabled(bool on) { g_enabled = on; }
+bool advancedCloudsActive() { return g_enabled && (g_features & ADV_CLOUDS); }
 void advancedSetFeatures(uint32_t f) { g_features = f; }
 
 void advancedSetTables(const uint8_t* materials, const uint8_t* emissions) {
@@ -59,7 +60,13 @@ struct Targets {
 struct State {
     bool init = false;
     id<MTLRenderPipelineState> gTerrain[4], gGeneric[2], shadowTerrain[4], shadowGeneric[2];
-    id<MTLRenderPipelineState> lightPso[2], waterPso[2], tonemapPso, bloomDown, bloomUp, skyLutPso, taaPso;
+    id<MTLRenderPipelineState> lightPso[2], waterPso[2], tonemapPso, bloomDown, bloomUp, skyLutPso, taaPso, cloudsPso;
+    // volumetric clouds
+    id<MTLComputePipelineState> cloudNoiseKernel;
+    id<MTLTexture> cloudNoise, cloudMap[2];
+    id<MTLSamplerState> repeatLinear;
+    bool cloudNoiseReady = false, cloudHistory = false;
+    int cloudIndex = 0;
     // TAA history
     simd_float4x4 prevViewProj = matrix_identity_float4x4;
     double prevCam[3] = {0, 0, 0};
@@ -138,6 +145,38 @@ bool initState() {
     if (rtAvailable()) {
         ld.fragmentFunction = fn(@"light_fragment", false, false, true);
         S.lightPso[1] = pso(ld);
+    }
+
+    {
+        NSError* err = nil;
+        id<MTLFunction> k = fn(@"cloud_noise_kernel");
+        S.cloudNoiseKernel = k ? [device() newComputePipelineStateWithFunction:k error:&err] : nil;
+        if (!S.cloudNoiseKernel) log("advanced: cloud noise kernel: %s", err ? err.localizedDescription.UTF8String : "missing");
+        MTLTextureDescriptor* nd = [MTLTextureDescriptor new];
+        nd.textureType = MTLTextureType3D;
+        nd.pixelFormat = MTLPixelFormatRGBA8Unorm;
+        nd.width = nd.height = nd.depth = 128;
+        nd.storageMode = MTLStorageModePrivate;
+        nd.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        S.cloudNoise = [device() newTextureWithDescriptor:nd];
+        S.cloudNoise.label = @"cloudNoise";
+        for (int i = 0; i < 2; i++) {
+            MTLTextureDescriptor* cd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                                                         width:768 height:320 mipmapped:NO];
+            cd.storageMode = MTLStorageModePrivate;
+            cd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+            S.cloudMap[i] = [device() newTextureWithDescriptor:cd];
+            S.cloudMap[i].label = @"cloudMap";
+        }
+        MTLRenderPipelineDescriptor* cl = [MTLRenderPipelineDescriptor new];
+        cl.vertexFunction = fn(@"fullscreen_vertex");
+        cl.fragmentFunction = fn(@"clouds_fragment");
+        cl.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+        S.cloudsPso = pso(cl);
+        MTLSamplerDescriptor* rs = [MTLSamplerDescriptor new];
+        rs.minFilter = rs.magFilter = MTLSamplerMinMagFilterLinear;
+        rs.sAddressMode = rs.tAddressMode = rs.rAddressMode = MTLSamplerAddressModeRepeat;
+        S.repeatLinear = [device() newSamplerStateWithDescriptor:rs];
     }
 
     MTLRenderPipelineDescriptor* ta = [MTLRenderPipelineDescriptor new];
@@ -413,6 +452,11 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         S.prevDim = env.dimension;
         S.historyValid = taaOn;
     }
+    if (env.dimension != 0 || !S.cloudsPso || !S.cloudNoiseKernel) features &= ~ADV_CLOUDS;
+    bool cloudsOn = (features & ADV_CLOUDS) != 0;
+    fr.post.y = cloudsOn && S.cloudHistory && fr.taa.w > 0.5f ? 1.0f : 0.0f; // teleports reset the cloud history too
+    if (!taaOn) fr.post.y = cloudsOn && S.cloudHistory ? 1.0f : 0.0f;
+    S.cloudHistory = cloudsOn;
     fr.flags = simd_make_uint4(features, (uint32_t)env.dimension, (uint32_t)S.frame, (uint32_t)g_optAdvDebug);
     int shadowRes = g_shadowRes;
     if (features & ADV_SHADOWS) {
@@ -586,6 +630,39 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [b endEncoding];
     }
 
+    // ---- volumetric clouds -> direction-space cloud map ----
+    id<MTLTexture> cloudMap = S.skyLut;   // placeholder binding when clouds are off
+    if (cloudsOn) {
+        if (!S.cloudNoiseReady) {
+            id<MTLComputeCommandEncoder> c = [cb computeCommandEncoder];
+            c.label = @"cloud noise";
+            [c setComputePipelineState:S.cloudNoiseKernel];
+            [c setTexture:S.cloudNoise atIndex:0];
+            [c dispatchThreads:MTLSizeMake(128, 128, 128) threadsPerThreadgroup:MTLSizeMake(8, 8, 4)];
+            [c endEncoding];
+            S.cloudNoiseReady = true;
+        }
+        id<MTLTexture> out = S.cloudMap[S.cloudIndex], prev = S.cloudMap[S.cloudIndex ^ 1];
+        S.cloudIndex ^= 1;
+        MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = out;
+        rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        profRender(rp, "clouds", true);
+        id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+        e.label = @"clouds";
+        [e setRenderPipelineState:S.cloudsPso];
+        [e setFragmentBytes:&fr length:sizeof fr atIndex:1];
+        [e setFragmentTexture:S.cloudNoise atIndex:0];
+        [e setFragmentTexture:S.skyLut atIndex:1];
+        [e setFragmentTexture:prev atIndex:2];
+        [e setFragmentSamplerState:S.repeatLinear atIndex:0];
+        [e setFragmentSamplerState:S.linearClamp atIndex:1];
+        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [e endEncoding];
+        cloudMap = out;
+    }
+
     // ---- lighting + sky -> HDR ----
     {
         MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -607,6 +684,9 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [e setFragmentSamplerState:S.shadowCmp atIndex:0];
         [e setFragmentSamplerState:S.linearClamp atIndex:1];
         [e setFragmentTexture:S.t.linZ atIndex:6];
+        [e setFragmentTexture:cloudMap atIndex:8];
+        [e setFragmentTexture:S.cloudNoise atIndex:9];
+        [e setFragmentSamplerState:S.repeatLinear atIndex:3];
         if (rtLight) {
             TexEntry* atlas = texture(w.atlasTex);
             [e setFragmentAccelerationStructure:rts.tlas atBufferIndex:10];
@@ -665,6 +745,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [e setFragmentSamplerState:S.linearClamp atIndex:2];
         [e setFragmentTexture:S.t.sceneColor atIndex:6];
         [e setFragmentTexture:S.t.sceneDepth atIndex:7];
+        [e setFragmentTexture:cloudMap atIndex:8];
         TexEntry* atlas = texture(w.atlasTex);
         if (atlas && atlas->tex) [e setFragmentTexture:atlas->tex atIndex:0];
         const uint32_t* sp = w.layerSampler[3];
