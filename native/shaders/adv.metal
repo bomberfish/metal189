@@ -315,6 +315,9 @@ vertex ShadowOut shadow_terrain_vertex(uint vid [[vertex_id]],
     float3 world = local + sectionWorld.xyz;
     ShadowOut o;
     o.position = fr.shadowViewProj * float4(world, 1.0);
+    // grass, flowers and other plants stay out of the shadow map when plant shadows are off
+    // (fr.tune[5].y bit 0); the whole quad goes outside the clip volume
+    if (mat >= 8 && (uint(fr.tune[5].y + 0.5) & 1u) == 0u) o.position = float4(2.0, 2.0, 2.0, 1.0);
     o.uv = float2(v.uv);
     o.alpha = float(v.color.a) / 255.0;
     return o;
@@ -1372,11 +1375,14 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     float3 lightDir = fr.sunDirView.w > 0.0 ? fr.sunDirView.xyz : fr.moonDirView.xyz;
     float3 lightCol = fr.sunDirView.w > 0.0 ? fr.sunColor.rgb : fr.moonColor.rgb;
     float ndl = dot(n, lightDir);
-    float wrap = isFoliage(material) ? 0.35 : 0.0; // foliage transmits some light
+    bool foliage = isFoliage(material);
+    float wrap = foliage ? 0.35 : 0.0; // foliage transmits some light
     float diffuse = saturate((ndl + wrap) / (1.0 + wrap));
     float rtShadow = 1.0;
-    if (diffuse > 0.0 && fr.flags.y == 0) {
+    if ((diffuse > 0.0 || (foliage && fr.tune[5].x > 0.0)) && fr.flags.y == 0) {
         float shadow = 1.0;
+        // shadow lookups offset towards the light (a backlit leaf must not shadow itself)
+        float3 nShadow = ndl < 0.0 ? -nWorld : nWorld;
         if (ac_rt && (fr.flags.x & ADV_RT_SHADOW)) {
             // terrain: exact ray-traced shadows over the whole loaded world;
             // the shadow map then only holds dynamic geometry (entities)
@@ -1385,8 +1391,8 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
             float3 o = world + fr.rtCam.xyz + nOff * (0.004 + length(eye) * 0.0002);
             rtShadow = rtOccluded(tlas, rtInst, atlas, pointS, o, Lw, 320.0) ? 0.0 : 1.0;
             shadow = rtShadow;
-            if (fr.flags.x & ADV_SHADOWS) shadow *= sampleShadow(fr, shadowMap, cmp, world, nWorld, saturate(ndl));
-        } else if (fr.flags.x & ADV_SHADOWS) shadow = sampleShadow(fr, shadowMap, cmp, world, nWorld, saturate(ndl));
+            if (fr.flags.x & ADV_SHADOWS) shadow *= sampleShadow(fr, shadowMap, cmp, world, nShadow, abs(ndl));
+        } else if (fr.flags.x & ADV_SHADOWS) shadow = sampleShadow(fr, shadowMap, cmp, world, nShadow, abs(ndl));
         // no direct light deep inside caves; under water the light path above decides instead
         float skyGate = waterPath > 0.0 ? 1.0 : smoothstep(0.35, 0.9, skyLight);
         if (fr.flags.x & ADV_CLOUDS) {
@@ -1406,6 +1412,12 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
         // lightCol is scaled so that Lambert is albedo * N.L; the specular lobe gets the matching pi
         float3 specular = 3.14159 * D * G * F / (4.0 * nv);
         color += lightCol * waterSun * (albedo * diffuse * (1.0 - F) * (1.0 - metal) + specular * nl) * shadow * skyGate;
+        if (foliage) {
+            // light passing through thin leaves and blades: some reaches the shaded side,
+            // most of it towards a viewer looking at the sun through them
+            float through = saturate(-ndl) * 0.35 + pow(saturate(dot(-v, lightDir)), 3.0) * 1.4;
+            color += lightCol * waterSun * albedo * through * fr.tune[5].x * 0.8 * shadow * skyGate * ao;
+        }
     }
     // sky light: diffuse irradiance + split-sum specular reflection (Lazarov's environment BRDF fit)
     {

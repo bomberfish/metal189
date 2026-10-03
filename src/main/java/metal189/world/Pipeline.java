@@ -111,6 +111,9 @@ public final class Pipeline {
         t[17] = 1f;
         t[18] = (Config.waterBiomeTint ? WATER_FLAG_BIOME_TINT : 0) | (Config.waterCalmIndoors ? WATER_FLAG_CALM_INDOORS : 0);
         t[19] = 1.2f * Config.waterFoamWidth / 100f;
+        // lighting: foliage translucency, flags (bit 0: plant shadows)
+        t[20] = Config.foliageTranslucency / 100f;
+        t[21] = Config.plantShadows ? 1 : 0;
         for (int i = 0; i < TUNING; i++) metal189.engine.Mem.putFloat(tuning + i * 4L, t[i]);
         Native.advSetTuning(tuning, TUNING);
     }

@@ -1,0 +1,24 @@
+sleep 3
+world ref1 1234567
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /weather clear
+cmd /time set 11600
+cmd /tp @p 64 80 -32 90 5
+sleep 12
+capture CAPTURE_A
+config foliageTranslucency 0
+sleep 2
+capture CAPTURE_B
+config foliageTranslucency 100
+cmd /time set 11000
+cmd /tp @p 78 68 -199 270 30
+sleep 6
+capture CAPTURE_C
+config plantShadows false
+sleep 2
+capture CAPTURE_D
+config plantShadows true
+quit

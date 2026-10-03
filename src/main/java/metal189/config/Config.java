@@ -39,6 +39,8 @@ public final class Config {
     public static boolean rtEntities = true;
     /** Shaders mode: the first-person player casts a shadow (and appears in ray tracing). */
     public static boolean playerShadow = true;
+    public static boolean plantShadows = true;        // grass, flowers and crops cast shadows
+    public static int foliageTranslucency = 100;      // percent: sunlight shining through leaves and plants
 
     // water (shaders mode)
     public static int waterStyle = 0;             // 0 smooth waves, 1 pixel waves, 2 vanilla texture
