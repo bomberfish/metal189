@@ -125,7 +125,14 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the engine is put toget
 
 ## Compatibility notes
 
-* Mods that call OpenGL directly go through metal189's GL compatibility layer,
-  which covers what vanilla and Forge use; mods with custom GL shaders or exotic
-  GL features may not render correctly.
-* OptiFine is not supported (metal189 replaces it).
+* Mods that call OpenGL directly go through metal189's GL layer, which covers what
+  vanilla and Forge use, plus common direct calls (wide lines, constant blend
+  colours, framebuffers). Mods with custom GLSL shaders may not render correctly.
+* Mods that render the world a second time into their own framebuffer (picture-in-
+  picture cameras, mirrors) work; those extra views use the vanilla-exact renderer
+  so they cannot disturb the main view's temporal effects.
+* Input is LWJGL-exact, including macOS's Ctrl+left click = right click; if
+  mcmouser (which removes that) is installed, metal189 follows it. The behaviour is
+  also a setting.
+* OptiFine is not supported (metal189 replaces it); with both installed, metal189
+  stays off and says so on the main menu.

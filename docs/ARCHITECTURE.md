@@ -108,6 +108,24 @@ PbrAtlas.java with the block atlas' layout.
   it from the section's vertex data (texture, vertex colour, lightmap, sun with a
   shadow ray).
 
+## Auxiliary world segments
+
+`Phases.worldBegin` marks a world render as the main view only when it targets
+Minecraft's own framebuffer. Other `renderWorldPass` calls (mods' picture-in-picture
+cameras, mirrors) are recorded as `PH_WORLD_BEGIN_AUX` segments: the engine draws
+them with the baseline executor and the advanced pipeline neither collects nor
+filters them, also when they are nested inside the main segment. This keeps the
+main view's G-buffer sizes and temporal histories (TAA, GI, clouds) stable.
+
+## Baseline details worth knowing
+
+* Lines wider than 1 px (`glLineWidth`, e.g. the 2 px block outline) are expanded
+  into quads by `ff_line_vertex`, widened along the minor axis like GL's
+  non-antialiased lines; this matches Apple's GL pixel for pixel.
+* Texture sampling parameters are per-draw state (vanilla toggles mipmapping on the
+  block atlas between layers), GL_CLAMP is border clamp, alpha test uses 8-bit fixed
+  point, fog is per vertex, quads split along v1-v3: all as Apple's GL does.
+
 ## Settings
 
 User settings live in `config/metal189.properties` (metal189.config.Config) and are
