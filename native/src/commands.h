@@ -89,6 +89,7 @@ struct EnvCmd {
     int32_t inFluid;      // 0 none, 1 water, 2 lava
     float renderDistance;
     float rotationX;
+    int32_t handLight;    // light level of the player's held item (dynamic light), 0-15
 };
 struct TerrainEntry { uint32_t section; float x, y, z; };
 

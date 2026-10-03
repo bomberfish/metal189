@@ -99,7 +99,26 @@ public final class Phases {
                 : cam.isInsideOfMaterial(net.minecraft.block.material.Material.lava) ? 2 : 0);
         Mem.putFloat(q + 56, mc.gameSettings.renderDistanceChunks * 16f);
         Mem.putFloat(q + 60, ActiveRenderInfo.getRotationX());
+        Mem.putInt(q + 64, handLight(mc));
         // 64 words total: 16 mv + 16 proj + 6 pos + 16 params + pad
+    }
+
+    /** Light level carried by the player (held light sources, or burning), like OptiFine's dynamic lights. */
+    private static int handLight(Minecraft mc) {
+        net.minecraft.entity.player.EntityPlayer p = mc.thePlayer;
+        if (p == null) return 0;
+        int level = p.isBurning() ? 15 : 0;
+        net.minecraft.item.ItemStack held = p.getHeldItem();
+        if (held != null && held.getItem() != null) {
+            net.minecraft.item.Item item = held.getItem();
+            if (item instanceof net.minecraft.item.ItemBlock) level = Math.max(level, ((net.minecraft.item.ItemBlock) item).getBlock().getLightValue());
+            else if (item == net.minecraft.init.Items.lava_bucket) level = Math.max(level, 15);
+            else if (item == net.minecraft.init.Items.blaze_rod) level = Math.max(level, 10);
+            else if (item == net.minecraft.init.Items.glowstone_dust || item == net.minecraft.init.Items.blaze_powder
+                    || item == net.minecraft.init.Items.magma_cream) level = Math.max(level, 8);
+            else if (item == net.minecraft.init.Items.nether_star) level = Math.max(level, 12);
+        }
+        return level;
     }
 
     private static void putPos(long p, double v) {

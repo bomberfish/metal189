@@ -1,0 +1,21 @@
+sleep 3
+world lookflat 42 flat
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /time set 18000
+cmd /weather clear
+cmd /tp @p -300.5 5 -293.5 200 25
+sleep 4
+cmd /kill @e[type=!Player]
+cmd /fill -312 4 -312 -288 12 -288 air
+cmd /fill -306 4 -302 -295 6 -302 stonebrick
+slot 0
+cmd /replaceitem entity @p slot.hotbar.0 stone
+sleep 3
+capture CAPTURE_A
+cmd /replaceitem entity @p slot.hotbar.0 torch
+sleep 3
+capture CAPTURE_B
+quit

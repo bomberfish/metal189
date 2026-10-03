@@ -1052,6 +1052,20 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
         }
         color += refl * (F0 * env.x + env.y);
     }
+    // dynamic light from the player's held item: vanilla falloff (one level per block);
+    // ray-traced visibility when RT shadows are on, otherwise it passes walls like OptiFine's
+    if (fr.post.z > 0.5) {
+        float dcam = length(eye);
+        float lvl = saturate((fr.post.z - dcam) / 15.0);
+        if (lvl > 0.0) {
+            float vis = 1.0;
+            if (ac_rt && (fr.flags.x & ADV_RT_SHADOW) && dcam > 1.0) {
+                float3 o = world + fr.rtCam.xyz + nWorld * 0.02;
+                vis = rtOccluded(tlas, rtInst, atlas, pointS, o, normalize(-world), dcam - 0.8) ? 0.0 : 1.0;
+            }
+            blockL = max(blockL, lvl * vis * (0.6 + 0.4 * saturate(dot(n, v))));
+        }
+    }
     // block light fades in daylight (vanilla's lightmap is closer to max(sky, block) than a sum)
     float daySky = skyLight * skyLight * fr.sunDirWorld.w;
     color += albedo * fr.blockLight.rgb * pow(blockL, fr.blockLight.a) * ao * (1.0 - 0.75 * daySky);

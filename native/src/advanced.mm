@@ -467,7 +467,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
     fr.fogColor = simd_make_float4(w.fogColor[0], w.fogColor[1], w.fogColor[2], 1);
     float shadowRadius = g_shadowDistance;
     fr.params = simd_make_float4(env.timeSeconds, rain, g_exposure, shadowRadius);
-    fr.post = simd_make_float4(g_bloomStrength, 0, 0, 0);
+    fr.post = simd_make_float4(g_bloomStrength, 0, (float)env.handLight, 0);
     fr.screen = simd_make_float4(W, H, 1.0f / W, 1.0f / H);
     fr.camera = simd_make_float4(env.camFracX + (float)(env.camBlockX & 1023), env.camFracY + (float)(env.camBlockY & 1023),
                                  env.camFracZ + (float)(env.camBlockZ & 1023), env.starBrightness);
