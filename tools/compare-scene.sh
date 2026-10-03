@@ -9,7 +9,7 @@ mkdir -p "$OUT"
 mk() { sed "s#CAPTURE_\([A-Z]\)#$OUT/$1_\1.png#g" "$SCENE" > "$OUT/script_$1.txt"; }
 mk gl; mk mt
 "$ROOT/tools/run-client.sh" --gl -Dmetal189.test="$OUT/script_gl.txt" > "$OUT/gl.log" 2>&1
-"$ROOT/tools/run-client.sh" -Dmetal189.test="$OUT/script_mt.txt" > "$OUT/mt.log" 2>&1
+"$ROOT/tools/run-client.sh" -Dmetal189.shaders=false -Dmetal189.test="$OUT/script_mt.txt" > "$OUT/mt.log" 2>&1
 for f in "$OUT"/gl_*.png; do
   b=$(basename "$f" .png); k=${b#gl_}
   [ -f "$OUT/mt_$k.png" ] || { echo "$k: missing metal capture"; continue; }

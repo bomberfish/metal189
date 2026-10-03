@@ -56,3 +56,61 @@ buffers. Drawing, culling, sorting and shadow rendering are done by the engine.
 * Offscreen render targets store rows in GL order (row 0 = bottom), so texture
   coordinates written for GL keep working. Only the drawable is Metal-oriented.
 * GL clip-space z [-1,1] is remapped to Metal [0,1] in the vertex stage.
+
+## Advanced pipeline (native/src/advanced.mm, native/shaders/adv.metal)
+
+The world segment of the command stream (between the WORLD_BEGIN and WORLD_END
+phase markers) is scanned twice. The first scan collects what the engine renders
+itself: terrain layer lists, opaque entity/block-entity draws (QUADS in the
+entity phase without blending), the environment record and the target. The second
+scan replays everything else (hand, particles, weather, GUI-in-world) with the
+baseline executor on top of the result, skipping sky draws, vanilla clouds and
+consumed entity draws.
+
+Pass order per frame:
+
+1. **RT scene** (optional): pending section BLAS builds, TLAS rebuild if needed.
+2. **Shadow map**: every resident section within reach (not only the visible
+   ones) plus collected entities, orthographic projection snapped to texels.
+3. **G-buffer**: albedo+AO, normal+emission, light (block/sky/material/roughness),
+   exact linear depth, LabPBR specular; Halton-jittered for TAA.
+4. **Sky-view LUT** (single-scattering atmosphere, mipmapped for ambient) and the
+   **cloud map** (direction-space raymarch of the cloud layer, checkerboarded and
+   temporally accumulated).
+5. **Deferred lighting**: Cook-Torrance sun/moon light with PCF or ray-traced
+   shadows, cloud shadows, split-sum sky reflection, sky ambient, block light,
+   emission, fog/haze; sky pixels get atmosphere + clouds + discs + stars.
+6. **Translucent terrain** (water, glass, ice) forward-shaded over copies of the
+   opaque scene: refraction, absorption, SSR or ray-traced reflections.
+7. **Light shafts** (half-res shadow-map raymarch) added to HDR.
+8. **TAA** resolve, **auto exposure** (compute), **bloom**, **tonemap** (ACES, CAS
+   sharpening, vignette) into Minecraft's framebuffer.
+
+Materials come from Materials.java (per block-state id tables uploaded once; the
+state id is stamped into the high bytes of each terrain vertex's lightmap shorts)
+and, when a resource pack provides them, from LabPBR atlases built in
+PbrAtlas.java with the block atlas' layout.
+
+## Ray tracing (native/src/raytrace.mm)
+
+* One primitive acceleration structure per terrain section with a triangle
+  geometry per render layer (solid layer opaque; cutout layers alpha-tested in the
+  shaders' intersection-query loops). Built when a section is uploaded, closest
+  first, under a per-frame budget; the BLAS keeps the vertex buffers it was built
+  from so hit shading stays consistent until the rebuild.
+* The TLAS lives in ray-tracing space (world coordinates relative to an origin
+  that follows the camera in 128-block steps) and is rebuilt only when sections
+  change or the origin moves, into a ring slot no in-flight frame can be reading.
+* Allocations are kept resident through an MTLResidencySet (macOS 15+), with
+  `useResources` as the fallback.
+* Shaders use inline `intersection_query` (no intersection function tables): shadow
+  rays accept any hit; reflection rays take the closest alpha-tested hit and shade
+  it from the section's vertex data (texture, vertex colour, lightmap, sun with a
+  shadow ray).
+
+## Settings
+
+User settings live in `config/metal189.properties` (metal189.config.Config) and are
+applied through world/Pipeline.java, which turns them into the native feature bits
+and runtime parameters. `-Dmetal189.shaders` and `-Dmetal189.shaderFeatures`
+override the file (tests).
