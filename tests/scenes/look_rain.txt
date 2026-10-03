@@ -1,0 +1,25 @@
+sleep 3
+world flat2 42 flat
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /time set 5000
+cmd /weather clear
+cmd /tp @p -300.5 6 -293.5 200 15
+sleep 4
+cmd /kill @e[type=!Player]
+cmd /fill -312 4 -312 -288 12 -288 air
+cmd /fill -312 3 -312 -288 3 -288 stone
+cmd /fill -306 3 -300 -294 3 -296 cobblestone
+cmd /fill -306 4 -302 -295 6 -302 stonebrick
+cmd /fill -301 4 -302 -301 6 -302 iron_block
+cmd /fill -300 4 -302 -300 6 -302 gold_block
+cmd /fill -308 4 -306 -308 9 -306 log
+cmd /fill -310 8 -308 -306 10 -304 leaves
+sleep 3
+capture CAPTURE_A
+cmd /weather rain
+sleep 8
+capture CAPTURE_B
+quit

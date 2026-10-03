@@ -718,7 +718,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         profRender(rp, "lighting", true);
         id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
         e.label = @"lighting";
-        bool rtLight = (features & ADV_RT_SHADOW) != 0;
+        bool rtLight = (features & (ADV_RT_SHADOW | ADV_RT_REFL)) != 0;
         [e setRenderPipelineState:S.lightPso[rtLight ? 1 : 0]];
         [e setFragmentBytes:&fr length:sizeof fr atIndex:1];
         [e setFragmentTexture:S.t.albedo atIndex:0];
@@ -733,6 +733,8 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [e setFragmentTexture:cloudMap atIndex:8];
         [e setFragmentTexture:S.cloudNoise atIndex:9];
         [e setFragmentTexture:S.t.spec atIndex:10];
+        // last frame's resolved image (screen-space reflections on smooth surfaces)
+        [e setFragmentTexture:taaOn ? S.t.taa[S.taaIndex ^ 1] : S.t.hdr atIndex:11];
         [e setFragmentSamplerState:S.repeatLinear atIndex:3];
         if (rtLight) {
             TexEntry* atlas = texture(w.atlasTex);

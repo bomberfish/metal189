@@ -797,6 +797,14 @@ static float3 rtShade(constant AdvFrame& fr, instance_acceleration_structure tla
     return c;
 }
 
+static float3 ssr(constant AdvFrame& fr, depth2d<float> depthTex, float3 eyePos, float3 rdView);
+
+static inline float2 hash22(float2 p) {
+    float3 p3 = fract(float3(p.xyx) * float3(0.1031, 0.1030, 0.0973));
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.xx + p3.yz) * p3.zy);
+}
+
 fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                                constant AdvFrame& fr [[buffer(1)]],
                                texture2d<float> gAlbedo [[texture(0)]],
@@ -809,6 +817,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                                texture2d<float> cloudMap [[texture(8)]],
                                texture3d<float> cloudNoise [[texture(9)]],
                                texture2d<float> gSpec [[texture(10)]],
+                               texture2d<float> history [[texture(11)]],
                                sampler cmp [[sampler(0)]], sampler lin [[sampler(1)]],
                                sampler rep [[sampler(3)]],
                                instance_acceleration_structure tlas [[buffer(10), function_constant(ac_rt)]],
@@ -851,6 +860,19 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     } else if (material == 4) {
         metal = 0.85;
         F0 = mix(float3(0.04), albedo, metal);
+    }
+    // rain: exposed surfaces get wet (porous ones darken), puddles form on open ground
+    if (fr.params.y > 0.01 && fr.flags.y == 0 && !isFoliage(material) && material != 2 && material != 7) {
+        float exposed = smoothstep(0.8, 0.97, skyLight);
+        float up = smoothstep(0.6, 0.95, nWorld.y);
+        float3 wa = world + fr.camera.xyz;
+        float puddle = up * smoothstep(0.45, 0.62, cloudNoise.sample(rep, float3(wa.xz / 80.0, 0.37)).g);
+        float wet = fr.params.y * exposed;
+        float porous = spm.z > 0.5 && spm.y < 0.26 ? spm.y * 4.0 : 0.6;
+        albedo *= mix(1.0, 0.55, wet * porous * (1.0 - puddle * 0.5));
+        rough = mix(rough, rough * 0.55, wet);
+        rough = mix(rough, 0.03, wet * puddle);
+        F0 = max(F0, float3(0.02 * wet));
     }
     float3 color = float3(0);
     float3 lightDir = fr.sunDirView.w > 0.0 ? fr.sunDirView.xyz : fr.moonDirView.xyz;
@@ -905,7 +927,46 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
         envCol *= mix(1.0, 0.3, saturate(-Rw.y * 2.5));
         float3 skyVis = float3(skyLight * skyLight * ao * fr.ambient.a);
         color += albedo * (1.0 - metal) * skyAmbient(fr, skyLut, lin, nWorld) * skyVis;
-        color += envCol * (F0 * env.x + env.y) * skyVis;
+        float3 refl = envCol * skyVis;
+        // smooth surfaces: traced reflections (RT closest hit, or screen space into last frame's resolve)
+        float smoothW = 1.0 - smoothstep(0.12, 0.4, rough);
+        if (smoothW > 0.0) {
+            float3 Rr = R;
+            if (fr.taa.w > 0.5 && rough > 0.05) {
+                // one GGX sample per pixel and frame; TAA integrates the lobe
+                float2 xi = hash22(in.position.xy + float(fr.flags.z % 256u) * float2(17.13, 7.31));
+                float ag = rough * rough;
+                float phi = 6.2831853 * xi.x;
+                float ct = sqrt((1.0 - xi.y) / (1.0 + (ag * ag - 1.0) * xi.y)), st = sqrt(1.0 - ct * ct);
+                float3 up = abs(n.z) < 0.999 ? float3(0, 0, 1) : float3(1, 0, 0);
+                float3 tx = normalize(cross(up, n)), ty = cross(n, tx);
+                float3 hv = normalize(tx * (st * cos(phi)) + ty * (st * sin(phi)) + n * ct);
+                Rr = reflect(-v, hv);
+                if (dot(Rr, n) <= 0.0) Rr = R;
+            }
+            float3 Rrw = normalize((fr.invView * float4(Rr, 0)).xyz);
+            float3 traced = refl;
+            bool hitAny = false;
+            if (ac_rt && (fr.flags.x & ADV_RT_REFL)) {
+                float3 o = world + fr.rtCam.xyz + nWorld * (0.01 + length(eye) * 0.0002);
+                RtHit rh = rtClosest(tlas, rtInst, atlas, pointS, o, Rrw, 256.0);
+                if (rh.hit) {
+                    traced = rtShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, rh, o, Rrw, smoothW > 0.5);
+                    float hd = length(Rrw * rh.t + world);
+                    float hf = saturate((hd - fr.fog.x) / max(fr.fog.y - fr.fog.x, 1.0));
+                    traced = mix(traced, skyBase(fr, skyLut, lin, Rrw), hf * hf);
+                    hitAny = true;
+                }
+            } else if (fr.taa.w > 0.5) {
+                float3 hit = ssr(fr, depth, eye, Rr);
+                if (hit.z > 0.0) {
+                    traced = mix(refl, history.sample(lin, hit.xy).rgb, hit.z);
+                    hitAny = true;
+                }
+            }
+            if (hitAny) refl = mix(refl, traced, smoothW);
+        }
+        color += refl * (F0 * env.x + env.y);
     }
     // block light fades in daylight (vanilla's lightmap is closer to max(sky, block) than a sum)
     float daySky = skyLight * skyLight * fr.sunDirWorld.w;
