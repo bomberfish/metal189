@@ -1,0 +1,8 @@
+[{
+  "modid": "metal189",
+  "name": "metal189",
+  "description": "Native Metal rendering engine for Minecraft 1.8.9 on macOS.",
+  "version": "${version}",
+  "mcversion": "1.8.9",
+  "authorList": ["BomberFish"]
+}]

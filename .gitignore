@@ -1,0 +1,10 @@
+.gradle/
+build/
+out/
+run/
+*.iml
+.idea/
+.DS_Store
+native/build/
+/captures/
+ref/
