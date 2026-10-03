@@ -42,6 +42,7 @@ struct AdvFrame {
 #define ADV_RT_REFL   (1u << 7)
 #define ADV_TAA       (1u << 8)
 #define ADV_CLOUDS    (1u << 9)
+#define ADV_VOLUMETRIC (1u << 10)
 
 // Per-item data for G-buffer/shadow draws of captured (non-terrain) geometry.
 struct AdvItem {

@@ -53,7 +53,7 @@ namespace {
 
 struct Targets {
     int w = 0, h = 0;
-    id<MTLTexture> albedo, normal, light, linZ, hdr, sceneColor, sceneDepth, taa[2];
+    id<MTLTexture> albedo, normal, light, linZ, hdr, sceneColor, sceneDepth, taa[2], vol;
     std::vector<id<MTLTexture>> bloom;
 };
 
@@ -63,6 +63,7 @@ struct State {
     id<MTLRenderPipelineState> lightPso[2], waterPso[2], tonemapPso, bloomDown, bloomUp, skyLutPso, taaPso, cloudsPso;
     // volumetric clouds
     id<MTLComputePipelineState> cloudNoiseKernel;
+    id<MTLRenderPipelineState> volPso, volCompPso;
     id<MTLTexture> cloudNoise, cloudMap[2];
     id<MTLSamplerState> repeatLinear;
     bool cloudNoiseReady = false, cloudHistory = false;
@@ -179,6 +180,19 @@ bool initState() {
         S.repeatLinear = [device() newSamplerStateWithDescriptor:rs];
     }
 
+    MTLRenderPipelineDescriptor* vd = [MTLRenderPipelineDescriptor new];
+    vd.vertexFunction = fn(@"fullscreen_vertex");
+    vd.fragmentFunction = fn(@"volumetric_fragment");
+    vd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+    S.volPso = pso(vd);
+    vd.fragmentFunction = fn(@"volcomp_fragment");
+    vd.colorAttachments[0].blendingEnabled = YES;
+    vd.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+    vd.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOne;
+    vd.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorZero;
+    vd.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+    S.volCompPso = pso(vd);
+
     MTLRenderPipelineDescriptor* ta = [MTLRenderPipelineDescriptor new];
     ta.vertexFunction = fn(@"fullscreen_vertex");
     ta.fragmentFunction = fn(@"taa_fragment");
@@ -276,6 +290,7 @@ void ensureTargets(int w, int h) {
     S.t.hdr = rt(MTLPixelFormatRGBA16Float, w, h, @"hdr");
     S.t.taa[0] = rt(MTLPixelFormatRGBA16Float, w, h, @"taa0");
     S.t.taa[1] = rt(MTLPixelFormatRGBA16Float, w, h, @"taa1");
+    S.t.vol = rt(MTLPixelFormatRGBA16Float, (w + 1) / 2, (h + 1) / 2, @"volumetric");
     S.historyValid = false;
     S.t.sceneColor = rt(MTLPixelFormatRGBA16Float, w, h, @"sceneColor");
     S.t.sceneDepth = rt(MTLPixelFormatDepth32Float, w, h, @"sceneDepth");
@@ -453,6 +468,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         S.historyValid = taaOn;
     }
     if (env.dimension != 0 || !S.cloudsPso || !S.cloudNoiseKernel) features &= ~ADV_CLOUDS;
+    if (!(features & ADV_SHADOWS) || !S.volPso) features &= ~ADV_VOLUMETRIC;
     bool cloudsOn = (features & ADV_CLOUDS) != 0;
     fr.post.y = cloudsOn && S.cloudHistory && fr.taa.w > 0.5f ? 1.0f : 0.0f; // teleports reset the cloud history too
     if (!taaOn) fr.post.y = cloudsOn && S.cloudHistory ? 1.0f : 0.0f;
@@ -485,7 +501,9 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         // Every loaded section near the camera casts shadows, not just the visible ones
         // (with ray-traced shadows the map only holds dynamic geometry).
         float reach = shadowRadius + 24.0f;
-        for (int layer = 0; layer < ((features & ADV_RT_SHADOW) ? 0 : 3); layer++) {
+        // (volumetric light still needs terrain in the map)
+        bool terrainInMap = !(features & ADV_RT_SHADOW) || (features & ADV_VOLUMETRIC);
+        for (int layer = 0; layer < (terrainInMap ? 3 : 0); layer++) {
             bool alpha = layer > 0;
             [e setRenderPipelineState:S.shadowTerrain[(alpha ? 1 : 0) | (g_waving ? 2 : 0)]];
             const uint32_t* sp = w.layerSampler[layer];
@@ -764,6 +782,39 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             [e drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:quads * 6 indexType:MTLIndexTypeUInt32
                          indexBuffer:quadIndices(quads) indexBufferOffset:0];
         }
+        [e endEncoding];
+    }
+
+    // ---- volumetric light (half resolution, added to HDR) ----
+    if (features & ADV_VOLUMETRIC) {
+        MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = S.t.vol;
+        rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        profRender(rp, "volumetric", true);
+        id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+        e.label = @"volumetric";
+        [e setRenderPipelineState:S.volPso];
+        [e setFragmentBytes:&fr length:sizeof fr atIndex:1];
+        [e setFragmentTexture:depth atIndex:0];
+        [e setFragmentTexture:S.t.linZ atIndex:1];
+        [e setFragmentTexture:S.shadowMap atIndex:2];
+        [e setFragmentTexture:S.cloudNoise atIndex:3];
+        [e setFragmentSamplerState:S.shadowCmp atIndex:0];
+        [e setFragmentSamplerState:S.repeatLinear atIndex:1];
+        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [e endEncoding];
+        MTLRenderPassDescriptor* cp = [MTLRenderPassDescriptor renderPassDescriptor];
+        cp.colorAttachments[0].texture = S.t.hdr;
+        cp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        cp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        profRender(cp, "volumetric composite", true);
+        e = [cb renderCommandEncoderWithDescriptor:cp];
+        e.label = @"volumetric composite";
+        [e setRenderPipelineState:S.volCompPso];
+        [e setFragmentTexture:S.t.vol atIndex:0];
+        [e setFragmentSamplerState:S.linearClamp atIndex:0];
+        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [e endEncoding];
     }
 

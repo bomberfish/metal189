@@ -1026,6 +1026,52 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
 }
 
 // ---------------------------------------------------------------------------
+// volumetric light: sun in-scattering through the shadow map (half resolution)
+
+fragment float4 volumetric_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
+                                    depth2d<float> depth [[texture(0)]], texture2d<float> gLinZ [[texture(1)]],
+                                    depth2d<float> shadowMap [[texture(2)]], texture3d<float> cloudNoise [[texture(3)]],
+                                    sampler cmp [[sampler(0)]], sampler rep [[sampler(1)]]) {
+    uint2 fp = min(uint2(in.position.xy * 2.0), uint2(fr.screen.xy) - 1);
+    float d = depth.read(fp);
+    float2 ndc = float2((float(fp.x) + 1.0) * fr.screen.z * 2.0 - 1.0, (float(fp.y) + 1.0) * fr.screen.w * 2.0 - 1.0) - fr.jitter.xy;
+    float4 pf = fr.invProj * float4(ndc, 1.0, 1.0);
+    float3 rd = pf.xyz / pf.w;
+    float3 dirEye = normalize(rd);
+    const float maxDist = 128.0;
+    float dist = d >= 1.0 ? maxDist : min(length(rd * (gLinZ.read(fp).r / -rd.z)), maxDist);
+    bool sunUp = fr.sunDirWorld.w > 0.0;
+    float3 L = sunUp ? fr.sunDirWorld.xyz : -fr.sunDirWorld.xyz;
+    float3 lightCol = sunUp ? fr.sunColor.rgb : fr.moonColor.rgb;
+    float3 dirWorld = normalize((fr.invView * float4(dirEye, 0.0)).xyz);
+    float mu = dot(dirWorld, L);
+    float phase = mix(hg(mu, 0.85), hg(mu, 0.3), 0.35);
+    // haze density: thin in clear weather, thicker in rain and towards dawn/dusk
+    float sigma = mix(0.0016, 0.006, fr.params.y) * (1.0 + 0.8 * (1.0 - smoothstep(0.05, 0.4, L.y)));
+    const int N = 16;
+    float dt = dist / N;
+    float jit = fract(hash12(in.position.xy) + float(fr.flags.z % 64u) * 0.618034);
+    float vis = 0.0, T = 1.0;
+    for (int i = 0; i < N; i++) {
+        float3 pEye = dirEye * ((i + jit) * dt);
+        float3 world = (fr.invView * float4(pEye, 1.0)).xyz;
+        float4 sc = fr.shadowViewProj * float4(world, 1.0);
+        float3 sn = sc.xyz / sc.w;
+        float2 uv = float2(sn.x * 0.5 + 0.5, 0.5 - sn.y * 0.5);
+        float v = (any(uv < 0.0) || any(uv > 1.0)) ? 1.0 : shadowMap.sample_compare(cmp, uv, sn.z - 0.0005);
+        vis += v * T * dt;
+        T *= exp(-sigma * dt);
+    }
+    float clouds = (fr.flags.x & ADV_CLOUDS) ? cloudShadow(fr, cloudNoise, rep, fr.camera.xyz + dirWorld * dist * 0.5, L) : 1.0;
+    float3 scatter = lightCol * phase * sigma * vis * clouds * 2.4;
+    return float4(scatter, 1.0);
+}
+
+fragment float4 volcomp_fragment(FullscreenOut in [[stage_in]], texture2d<float> vol [[texture(0)]], sampler lin [[sampler(0)]]) {
+    return float4(vol.sample(lin, in.uv).rgb, 0.0);
+}
+
+// ---------------------------------------------------------------------------
 // temporal anti-aliasing
 
 static inline float3 rgbToYCoCg(float3 c) {
