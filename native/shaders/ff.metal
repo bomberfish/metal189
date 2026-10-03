@@ -16,8 +16,7 @@ struct FFOut {
     float4 colorFlat [[flat, function_constant(fc_flat)]];
     float4 tex0;      // projective
     float2 tex1;
-    float fogCoord;
-    float3 eyePos;
+    float fogFactor;   // per-vertex fog factor (clamped), as GL implementations compute it
 };
 
 // ---------------------------------------------------------------------------
@@ -121,8 +120,17 @@ vertex FFOut ff_vertex(uint vid [[vertex_id]],
     o.tex0 = u.texMatrix0 * t0;
     float4 tc1 = u.texMatrix1 * t1;
     o.tex1 = tc1.xy / tc1.w;
-    o.eyePos = eye.xyz;
-    o.fogCoord = abs(eye.z);
+    if (f & FF_FOG) {
+        float dist = (f & FF_FOG_RADIAL) ? length(eye.xyz) : abs(eye.z);
+        float ff;
+        uint mode = u.flags.z;
+        if (mode == 0) ff = (u.fogParams.y - dist) * u.fogParams.w;
+        else if (mode == 1) ff = exp(-u.fogParams.z * dist);
+        else { float d = u.fogParams.z * dist; ff = exp(-d * d); }
+        o.fogFactor = saturate(ff);
+    } else {
+        o.fogFactor = 1.0;
+    }
     return o;
 }
 
@@ -259,15 +267,7 @@ fragment FFFragOut ff_fragment(FFOut in [[stage_in]],
     if (fc_alphaTest) {
         if (!alphaPass(u.flags.w, c.a, u.alpha.x)) discard_fragment();
     }
-    if (f & FF_FOG) {
-        float dist = (f & FF_FOG_RADIAL) ? length(in.eyePos) : in.fogCoord;
-        float ff;
-        uint mode = u.flags.z;
-        if (mode == 0) ff = (u.fogParams.y - dist) * u.fogParams.w;
-        else if (mode == 1) ff = exp(-u.fogParams.z * dist);
-        else { float d = u.fogParams.z * dist; ff = exp(-d * d); }
-        c.rgb = mix(u.fogColor.rgb, c.rgb, saturate(ff));
-    }
+    if (f & FF_FOG) c.rgb = mix(u.fogColor.rgb, c.rgb, in.fogFactor);
     FFFragOut o;
     if (fc_logicOp) o.color = logicOp(u.alpha.y, c, dst);
     else o.color = c;

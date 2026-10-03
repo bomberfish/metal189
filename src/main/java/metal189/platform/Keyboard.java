@@ -15,7 +15,7 @@ public final class Keyboard {
     public static final int EVENT_SIZE = 18;
 
     // ---- org.lwjgl.input.Keyboard ----
-    static boolean created;
+    static boolean created = metal189.core.Settings.DISABLED;
     private static boolean repeat_enabled;
     private static final byte[] keyDownBuffer = new byte[KEYBOARD_SIZE];
     private static final ByteBuffer readBuffer = ByteBuffer.allocate(900);

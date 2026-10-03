@@ -43,6 +43,17 @@ public final class TestDriver {
 
     public static boolean active() { return active; }
 
+    private static String pendingCapture;
+
+    /** Reference mode: captures are taken from the GL framebuffer before the swap. */
+    public static void beforeSwap() {
+        if (pendingCapture == null) return;
+        String path = pendingCapture;
+        pendingCapture = null;
+        boolean ok = Capture.glFramebuffer(path);
+        Native.LOG.info("metal189-test capture {} -> {}", path, ok ? "ok" : "FAILED");
+    }
+
     /** Called after every presented frame. */
     public static void onFrame() {
         if (!active) return;
@@ -81,7 +92,12 @@ public final class TestDriver {
                 if (mc.theWorld == null || mc.thePlayer == null || mc.renderGlobal == null) { pc--; return false; }
                 return true;
             case "capture": {
-                boolean ok = Native.capture(0, a[1]);
+                if (metal189.core.Settings.DISABLED) {
+                    pendingCapture = a[1]; // taken from the next frame, before its swap
+                    waitFrames = 1;
+                    return false;
+                }
+                boolean ok = Capture.metalFramebuffer(a[1]);
                 Native.LOG.info("metal189-test capture {} -> {}", a[1], ok ? "ok" : "FAILED");
                 return true;
             }

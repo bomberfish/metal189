@@ -10,7 +10,15 @@ import net.minecraftforge.fml.relauncher.IFMLLoadingPlugin;
 public class Metal189Plugin implements IFMLLoadingPlugin {
     @Override
     public String[] getASMTransformerClass() {
-        if (Settings.DISABLED) return new String[0];
+        if (Settings.DISABLED) {
+            // Vanilla OpenGL rendering; only input and the test driver are hooked.
+            if (metal189.test.TestDriver.active()) {
+                metal189.engine.Native.load();
+                metal189.engine.Native.refModeInstall();
+                return new String[] {"metal189.core.ReferenceTransformer"};
+            }
+            return new String[0];
+        }
         return new String[] {"metal189.core.Metal189Transformer"};
     }
 

@@ -7,6 +7,8 @@ namespace m189 {
 void texGetImage(int id, int level, int format, int type, void* dst, size_t size);
 void readPixels(int fbo, int x, int y, int w, int h, int format, int type, void* dst, size_t size);
 bool captureToPng(int which, const char* path);
+void refModeInstall();
+void setOption(int key, int value);
 }
 
 using namespace m189;
@@ -110,6 +112,8 @@ static jboolean JNICALL n_capture(JNIEnv* env, jclass, jint which, jstring path)
         return ok;
     }
 }
+static void JNICALL n_refModeInstall(JNIEnv*, jclass) { refModeInstall(); }
+static void JNICALL n_setOption(JNIEnv*, jclass, jint k, jint v) { setOption(k, v); }
 static void JNICALL n_renderbufferStorage(JNIEnv*, jclass, jint id, jint fmt, jint w, jint h) { @autoreleasepool { renderbufferStorage(id, fmt, w, h); } }
 
 static JNINativeMethod kMethods[] = {
@@ -143,6 +147,8 @@ static JNINativeMethod kMethods[] = {
     {(char*)"meshDelete", (char*)"(I)V", (void*)n_meshDelete},
     {(char*)"renderbufferStorage", (char*)"(IIII)V", (void*)n_renderbufferStorage},
     {(char*)"capture", (char*)"(ILjava/lang/String;)Z", (void*)n_capture},
+    {(char*)"refModeInstall", (char*)"()V", (void*)n_refModeInstall},
+    {(char*)"setOption", (char*)"(II)V", (void*)n_setOption},
 };
 
 // The Java side calls System.load on this library and then Native.register(),

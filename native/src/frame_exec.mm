@@ -12,6 +12,16 @@
 
 namespace m189 {
 
+// Runtime options (set from Java, see metal189.engine.Native.setOption).
+int g_optQuadDiagonal = 1; // 1: split quads along v1-v3 like Apple's GL, 0: along v0-v2
+
+void setOption(int key, int value) {
+    switch (key) {
+        case 1: g_optQuadDiagonal = value; break;
+        default: break;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // persistent GL state mirror
 
@@ -307,6 +317,7 @@ static void writeIndices(uint32_t* o, uint32_t prim, uint32_t n, uint32_t b, boo
             for (uint32_t q = 0; q + 3 < n; q += 4) {
                 uint32_t v0 = b + q, v1 = v0 + 1, v2 = v0 + 2, v3 = v0 + 3;
                 if (flat) { *o++ = v3; *o++ = v0; *o++ = v1; *o++ = v3; *o++ = v1; *o++ = v2; }
+                else if (g_optQuadDiagonal) { *o++ = v0; *o++ = v1; *o++ = v3; *o++ = v1; *o++ = v2; *o++ = v3; }
                 else { *o++ = v0; *o++ = v1; *o++ = v2; *o++ = v0; *o++ = v2; *o++ = v3; }
             }
             break;
@@ -754,7 +765,7 @@ static void drawMesh(Exec& x, const DrawMeshCmd& d) {
     }
     bool flat = g.raster.flat != 0;
     PrimClass pc = primClass(d.prim);
-    if (d.prim == 7 && !flat) {
+    if (d.prim == 7 && !flat && !g_optQuadDiagonal) {
         id<MTLBuffer> qi = quadIndices(d.count / 4);
         [x.enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:n indexType:MTLIndexTypeUInt32 indexBuffer:qi indexBufferOffset:0];
         return;

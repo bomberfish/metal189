@@ -90,6 +90,8 @@ public final class Native {
     public static native void meshDelete(int id);
     public static native void renderbufferStorage(int id, int internalFormat, int w, int h);
     public static native boolean capture(int which, String path);
+    public static native void refModeInstall();
+    public static native void setOption(int key, int value);
 
     // ---- window / input ----
     public static native boolean windowCreate(int w, int h, String title, int flags);

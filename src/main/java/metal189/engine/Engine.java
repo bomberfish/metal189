@@ -33,6 +33,7 @@ public final class Engine {
             Mem.free(a);
         }
         initialized = true;
+        Native.setOption(1, Integer.getInteger("metal189.quadDiagonal", 1));
         Native.LOG.info("Metal device: {}", Native.deviceName());
     }
 

@@ -16,7 +16,7 @@ public final class Mouse {
     private Mouse() {}
 
     // ---- org.lwjgl.input.Mouse ----
-    static boolean created;
+    static boolean created = Settings.DISABLED; // reference mode: LWJGL's Display owns the window
     private static boolean isGrabbed;
     private static int x, y, absolute_x, absolute_y, dx, dy, dwheel;
     private static int grab_x, grab_y;
@@ -145,8 +145,8 @@ public final class Mouse {
             absolute_x = x = c1;
             absolute_y = y = c2;
         }
-        x = Math.min(Display.getWidth() - 1, Math.max(0, x));
-        y = Math.min(Display.getHeight() - 1, Math.max(0, y));
+        x = Math.min(width() - 1, Math.max(0, x));
+        y = Math.min(height() - 1, Math.max(0, y));
         dwheel += w;
         readBuffer.compact();
         copyEvents(readBuffer);
@@ -174,8 +174,8 @@ public final class Mouse {
             last_event_raw_x = nx;
             last_event_raw_y = ny;
         }
-        event_x = Math.min(Display.getWidth() - 1, Math.max(0, event_x));
-        event_y = Math.min(Display.getHeight() - 1, Math.max(0, event_y));
+        event_x = Math.min(width() - 1, Math.max(0, event_x));
+        event_y = Math.min(height() - 1, Math.max(0, event_y));
         event_dwheel = readBuffer.getInt();
         event_nanos = readBuffer.getLong();
         return true;
@@ -212,6 +212,9 @@ public final class Mouse {
             grab_y = ny;
         }
     }
+
+    private static int width() { return Settings.DISABLED ? org.lwjgl.opengl.Display.getWidth() : Display.getWidth(); }
+    private static int height() { return Settings.DISABLED ? org.lwjgl.opengl.Display.getHeight() : Display.getHeight(); }
 
     public static int getEventButton() { return eventButton; }
     public static boolean getEventButtonState() { return eventState; }

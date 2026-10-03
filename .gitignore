@@ -8,3 +8,5 @@ run/
 native/build/
 /captures/
 ref/
+.vscode/
+.venv/

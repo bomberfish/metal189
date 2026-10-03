@@ -10,7 +10,7 @@ public final class GLContext {
     private GLContext() {}
 
     /** Whether vanilla should use NV radial fog distance (matches what Apple's GL reports). */
-    public static boolean radialFog = Boolean.parseBoolean(System.getProperty("metal189.radialFog", "false"));
+    public static boolean radialFog = Boolean.parseBoolean(System.getProperty("metal189.radialFog", "true"));
 
     public static ContextCapabilities getCapabilities() { return null; }
     public static void useContext(Object context) {}
