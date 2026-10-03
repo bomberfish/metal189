@@ -259,6 +259,16 @@ public final class TestDriver {
                 // same path as the toggle keybind (saves config/metal189.properties)
                 metal189.world.Pipeline.toggle();
                 return true;
+            case "lightat": {
+                // lightat X Y Z : client-side block/sky light values (renderer-independent state)
+                if (mc.theWorld != null) {
+                    net.minecraft.util.BlockPos bp = new net.minecraft.util.BlockPos(Integer.parseInt(a[1]), Integer.parseInt(a[2]), Integer.parseInt(a[3]));
+                    Native.LOG.info("metal189-test lightat {}: block {} sky {}", bp,
+                            mc.theWorld.getLightFor(net.minecraft.world.EnumSkyBlock.BLOCK, bp),
+                            mc.theWorld.getLightFor(net.minecraft.world.EnumSkyBlock.SKY, bp));
+                }
+                return true;
+            }
             case "info":
                 if (mc.thePlayer != null) {
                     net.minecraft.entity.Entity v = mc.getRenderViewEntity();

@@ -1,0 +1,37 @@
+sleep 3
+world special1 99 flat
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /gamerule doFireTick false
+cmd /time set 6000
+cmd /weather clear
+cmd /tp @p 0.5 5 6.5 180 15
+sleep 4
+cmd /kill @e[type=!Player]
+cmd /fill -8 4 -8 8 10 4 air
+cmd /fill -8 3 -8 8 3 4 stone
+cmd /fill -7 3 -6 -5 3 -4 iron_block
+cmd /setblock -6 4 -5 beacon
+cmd /setblock -2 4 -4 standing_sign 0 replace {Text1:"{\"text\":\"metal189\"}",Text2:"{\"text\":\"sign text\",\"color\":\"red\"}",Text3:"{\"text\":\"line 3\",\"bold\":true}"}
+cmd /fill 1 3 -5 3 3 -3 end_portal
+cmd /setblock 5 4 -4 fire
+cmd /setblock 5 3 -4 netherrack
+cmd /setblock 6 4 -5 standing_banner 8 replace {Base:4,Patterns:[{Pattern:"cr",Color:15}]}
+cmd /setblock 0 4 -7 enchanting_table
+cmd /setblock -3 4 -7 lit_furnace 3
+cmd /fill -6 4 -8 -6 6 -8 obsidian
+cmd /setblock -6 7 -8 obsidian
+cmd /setblock -5 4 -8 portal
+cmd /summon ArmorStand 3 4 -6 {Rotation:[180f,0f],ShowArms:1,Equipment:[{id:diamond_sword,tag:{ench:[{id:16,lvl:1}]}},{id:diamond_boots,tag:{ench:[{id:0,lvl:1}]}},{id:diamond_leggings,tag:{ench:[{id:0,lvl:1}]}},{id:diamond_chestplate,tag:{ench:[{id:0,lvl:1}]}},{id:diamond_helmet,tag:{ench:[{id:0,lvl:1}]}}]}
+sleep 4
+capture CAPTURE_A
+cmd /time set 18000
+sleep 2
+lightat 0 4 -1
+lightat 0 4 1
+lightat 0 4 3
+lightat 0 4 5
+capture CAPTURE_B
+quit
