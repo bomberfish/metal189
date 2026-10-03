@@ -1,0 +1,16 @@
+sleep 3
+world ref1 1234567
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /time set 5000
+cmd /tp @p 64 96 -32 135 12
+sleep 8
+pip on
+sleep 4
+capture CAPTURE_A
+spin 0.5 100000
+sleep 2
+capture CAPTURE_B
+fps 5 pip_adv
+quit

@@ -426,6 +426,8 @@ struct Exec {
     bool lastTerrain = false;
     bool lastOk = false;
     bool advReplay = false;  // replaying a world segment already rendered by the advanced pipeline
+    int auxDepth = 0;        // inside auxiliary world segments (rendered with the baseline, no filtering)
+    bool advReplaySaved = false;
     // batch of merged arena draws
     bool batchOpen = false;
     PrimClass batchClass = PC_TRI;
@@ -1103,10 +1105,23 @@ static void advCollect(Exec& x, CmdReader rd, AdvWorld& w, TargetCmd& target, bo
     GLMirror m = g;
     uint32_t phase = PH_WORLD_BEGIN;
     bool sampledLayer[4] = {false, false, false, false};
+    int auxDepth = 0;   // auxiliary world segments nested in this one are not collected
     while (const CmdHeader* h = rd.next()) {
+        if (auxDepth > 0) {
+            if (h->op == OP_PHASE) {
+                uint32_t ph = payload<uint32_t>(h);
+                if (ph == PH_WORLD_BEGIN_AUX) auxDepth++;
+                else if (ph == PH_WORLD_END) auxDepth--;
+            }
+            if (h->op != OP_TERRAIN && h->op != OP_ENV && h->op != OP_DRAW && h->op != OP_DRAW_MESH && h->op != OP_PHASE &&
+                h->op != OP_TARGET)
+                applyState(m, h);   // keep the GL mirror in sync with what the replay will see
+            continue;
+        }
         switch (h->op) {
             case OP_PHASE:
                 phase = payload<uint32_t>(h);
+                if (phase == PH_WORLD_BEGIN_AUX) { auxDepth = 1; break; }
                 if (phase == PH_WORLD_END) return;
                 break;
             case OP_ENV: w.env = payload<EnvCmd>(h); w.hasEnv = true; w.view = loadMatrix(w.env.view); w.proj = loadMatrix(w.env.proj); break;
@@ -1251,8 +1266,15 @@ void executeFrame(id<MTLCommandBuffer> cb, const uint8_t* cmds, size_t len) {
             case OP_PHASE:
                 flushBatch(x);
                 g_phase = payload<uint32_t>(h);
-                if (g_phase == PH_WORLD_BEGIN && advancedEnabled()) advRenderWorld(x, rd);
-                if (g_phase == PH_WORLD_END) x.advReplay = false;
+                if (g_phase == PH_WORLD_BEGIN_AUX) {
+                    if (x.auxDepth++ == 0) { x.advReplaySaved = x.advReplay; x.advReplay = false; }
+                    break;
+                }
+                if (g_phase == PH_WORLD_BEGIN && advancedEnabled() && x.auxDepth == 0) advRenderWorld(x, rd);
+                if (g_phase == PH_WORLD_END) {
+                    if (x.auxDepth > 0) { if (--x.auxDepth == 0) x.advReplay = x.advReplaySaved; }
+                    else x.advReplay = false;
+                }
                 break;
             case OP_ENV: g_env = payload<EnvCmd>(h); g_envValid = true; break;
             case OP_TERRAIN: if (!x.advReplay) drawTerrain(x, h); break;

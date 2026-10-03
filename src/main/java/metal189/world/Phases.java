@@ -23,7 +23,7 @@ public final class Phases {
     // Mirrors native/src/commands.h (Phase enum).
     public static final int UI = 0, WORLD_BEGIN = 1, SKY = 2, CLOUDS = 3, TERRAIN = 4, ENTITIES = 5, OUTLINE = 6,
             DESTROY = 7, LIT_PARTICLES = 8, PARTICLES = 9, WEATHER = 10, WORLD_BORDER = 11, ENTITIES_TRANSLUCENT = 12,
-            RENDER_LAST = 13, HAND = 14, WORLD_END = 15;
+            RENDER_LAST = 13, HAND = 14, WORLD_END = 15, WORLD_BEGIN_AUX = 16;
 
     public static int current = UI;
 
@@ -38,7 +38,18 @@ public final class Phases {
     public static void worldBegin() {
         Pipeline.ensureApplied();
         metal189.terrain.Terrain.drainPending();
-        begin(WORLD_BEGIN);
+        // Only the world render into Minecraft's own framebuffer is the main view; extra
+        // renderWorldPass calls into other framebuffers (mods' picture-in-picture cameras,
+        // mirrors) are recorded as auxiliary segments, which the engine draws with the
+        // baseline renderer so they cannot disturb the main view's temporal history.
+        begin(isMainTarget() ? WORLD_BEGIN : WORLD_BEGIN_AUX);
+    }
+
+    private static boolean isMainTarget() {
+        Minecraft mc = Minecraft.getMinecraft();
+        net.minecraft.client.shader.Framebuffer fb = mc.getFramebuffer();
+        int main = fb != null && net.minecraft.client.renderer.OpenGlHelper.isFramebufferEnabled() ? fb.framebufferObject : 0;
+        return metal189.gl.Targets.drawFbo == main;
     }
     public static void worldEnd() { begin(WORLD_END); begin(UI); }
     public static void sky() { begin(SKY); }

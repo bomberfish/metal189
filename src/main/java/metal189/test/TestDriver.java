@@ -56,6 +56,7 @@ public final class TestDriver {
 
     private static int hurtTicks;
     private static boolean leavingDimension;
+    private static Pip pip;
     private static net.minecraft.server.MinecraftServer quitServer;
     private static int quitWait;
     private static float spinRate;
@@ -255,6 +256,17 @@ public final class TestDriver {
                 // like F3+A
                 if (mc.renderGlobal != null) mc.renderGlobal.loadRenderers();
                 return true;
+            case "pip":
+                // pip on|off : like foidclient's remote view, render a second world pass into a
+                // small framebuffer every frame and draw it in the corner
+                if ("on".equals(a[1]) && pip == null) {
+                    pip = new Pip();
+                    net.minecraftforge.fml.common.FMLCommonHandler.instance().bus().register(pip);
+                } else if ("off".equals(a[1]) && pip != null) {
+                    net.minecraftforge.fml.common.FMLCommonHandler.instance().bus().unregister(pip);
+                    pip = null;
+                }
+                return true;
             case "toggle":
                 // same path as the toggle keybind (saves config/metal189.properties)
                 metal189.world.Pipeline.toggle();
@@ -356,5 +368,71 @@ public final class TestDriver {
 
         @Override
         public void removeStalePortalLocations(long time) {}
+    }
+
+    /** Secondary world render into its own framebuffer (exercises auxiliary world segments). */
+    public static final class Pip {
+        private net.minecraft.client.shader.Framebuffer fb;
+        private java.lang.reflect.Method pass;
+        private boolean inside;
+
+        @net.minecraftforge.fml.common.eventhandler.SubscribeEvent
+        public void onRenderTick(net.minecraftforge.fml.common.gameevent.TickEvent.RenderTickEvent e) {
+            Minecraft mc = Minecraft.getMinecraft();
+            if (e.phase != net.minecraftforge.fml.common.gameevent.TickEvent.Phase.END || inside || mc.theWorld == null) return;
+            int w = mc.displayWidth / 3, h = mc.displayHeight / 3;
+            try {
+                if (pass == null) {
+                    for (java.lang.reflect.Method m : net.minecraft.client.renderer.EntityRenderer.class.getDeclaredMethods())
+                        if ((m.getName().equals("renderWorldPass") || m.getName().equals("func_175068_a")) && m.getParameterTypes().length == 3) pass = m;
+                    pass.setAccessible(true);
+                }
+                if (fb == null || fb.framebufferWidth != w || fb.framebufferHeight != h) {
+                    if (fb != null) fb.deleteFramebuffer();
+                    fb = new net.minecraft.client.shader.Framebuffer(w, h, true);
+                }
+                inside = true;
+                int dw = mc.displayWidth, dh = mc.displayHeight;
+                fb.bindFramebuffer(true);
+                mc.displayWidth = w;
+                mc.displayHeight = h;
+                try {
+                    pass.invoke(mc.entityRenderer, 2, e.renderTickTime, System.nanoTime() + 1000000L);
+                } finally {
+                    mc.displayWidth = dw;
+                    mc.displayHeight = dh;
+                    inside = false;
+                }
+                mc.getFramebuffer().bindFramebuffer(true);
+                // draw the picture in the top-right corner
+                net.minecraft.client.renderer.GlStateManager.matrixMode(org.lwjgl.opengl.GL11.GL_PROJECTION);
+                net.minecraft.client.renderer.GlStateManager.loadIdentity();
+                net.minecraft.client.renderer.GlStateManager.ortho(0, dw, dh, 0, 1000, 3000);
+                net.minecraft.client.renderer.GlStateManager.matrixMode(org.lwjgl.opengl.GL11.GL_MODELVIEW);
+                net.minecraft.client.renderer.GlStateManager.loadIdentity();
+                net.minecraft.client.renderer.GlStateManager.translate(0, 0, -2000);
+                net.minecraft.client.renderer.GlStateManager.disableDepth();
+                net.minecraft.client.renderer.GlStateManager.disableLighting();
+                net.minecraft.client.renderer.GlStateManager.disableFog();
+                net.minecraft.client.renderer.GlStateManager.disableAlpha();
+                net.minecraft.client.renderer.GlStateManager.disableBlend();
+                net.minecraft.client.renderer.GlStateManager.enableTexture2D();
+                net.minecraft.client.renderer.GlStateManager.color(1, 1, 1, 1);
+                fb.bindFramebufferTexture();
+                net.minecraft.client.renderer.Tessellator t = net.minecraft.client.renderer.Tessellator.getInstance();
+                net.minecraft.client.renderer.WorldRenderer r = t.getWorldRenderer();
+                double x0 = dw - w - 8, y0 = 8, x1 = dw - 8, y1 = 8 + h;
+                r.begin(7, net.minecraft.client.renderer.vertex.DefaultVertexFormats.POSITION_TEX);
+                r.pos(x0, y1, 0).tex(0, 0).endVertex();
+                r.pos(x1, y1, 0).tex(1, 0).endVertex();
+                r.pos(x1, y0, 0).tex(1, 1).endVertex();
+                r.pos(x0, y0, 0).tex(0, 1).endVertex();
+                t.draw();
+                fb.unbindFramebufferTexture();
+                net.minecraft.client.renderer.GlStateManager.enableDepth();
+            } catch (Exception ex) {
+                Native.LOG.warn("metal189-test pip: {}", ex.toString());
+            }
+        }
     }
 }

@@ -36,6 +36,7 @@ enum Phase : uint32_t {
     PH_UI = 0, PH_WORLD_BEGIN = 1, PH_SKY = 2, PH_CLOUDS = 3, PH_TERRAIN = 4, PH_ENTITIES = 5, PH_OUTLINE = 6,
     PH_DESTROY = 7, PH_LIT_PARTICLES = 8, PH_PARTICLES = 9, PH_WEATHER = 10, PH_WORLD_BORDER = 11,
     PH_ENTITIES_TRANSLUCENT = 12, PH_RENDER_LAST = 13, PH_HAND = 14, PH_WORLD_END = 15,
+    PH_WORLD_BEGIN_AUX = 16,   // world render into a non-main framebuffer (always baseline)
 };
 
 struct PipeState { uint32_t blend, srcRGB, dstRGB, srcA, dstA, eq, colorMask, logicOn, logicOp; float blendColor[4]; };
