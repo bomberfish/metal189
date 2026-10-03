@@ -1,0 +1,8 @@
+sleep 4
+gui options
+sleep 1
+capture CAPTURE_A
+gui video
+sleep 1
+capture CAPTURE_B
+quit

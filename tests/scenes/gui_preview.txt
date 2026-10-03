@@ -1,0 +1,12 @@
+sleep 3
+world ref1 1234567
+waitWorld
+fly
+config shaders true
+cmd /time set 5000
+cmd /tp @p 64 96 -32 135 12
+sleep 8
+gui metal189
+sleep 2
+capture CAPTURE_A
+quit

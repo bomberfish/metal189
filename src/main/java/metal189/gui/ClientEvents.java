@@ -25,15 +25,36 @@ public final class ClientEvents {
         ClientRegistry.registerKeyBinding(settings);
     }
 
+    private static final int SUPER_SECRET_ID = 8675309, DONE_ID = 200;
+
     @SubscribeEvent
     public void onInitGui(GuiScreenEvent.InitGuiEvent.Post e) {
-        if (e.gui instanceof GuiVideoSettings)
-            e.buttonList.add(new GuiButton(BUTTON_ID, e.gui.width - 105, 5, 100, 20, I18n.format("metal189.gui.button")));
+        String label = I18n.format("metal189.gui.button");
+        if (e.gui instanceof GuiVideoSettings) {
+            // bottom row becomes [Shaders...] [Done], where OptiFine users look for it
+            for (GuiButton b : e.buttonList) {
+                if (b.id == DONE_ID) {
+                    b.xPosition = e.gui.width / 2 + 5;
+                    b.width = 150;
+                }
+            }
+            e.buttonList.add(new GuiButton(BUTTON_ID, e.gui.width / 2 - 155, e.gui.height - 27, 150, 20, label));
+        } else if (e.gui instanceof net.minecraft.client.gui.GuiOptions) {
+            // "Super Secret Settings" cycles GLSL post effects, which metal189 does not run;
+            // its slot in the main Options screen becomes Shaders...
+            for (int i = 0; i < e.buttonList.size(); i++) {
+                GuiButton b = e.buttonList.get(i);
+                if (b.id == SUPER_SECRET_ID) {
+                    e.buttonList.set(i, new GuiButton(BUTTON_ID, b.xPosition, b.yPosition, b.width, b.height, label));
+                    break;
+                }
+            }
+        }
     }
 
     @SubscribeEvent
     public void onAction(GuiScreenEvent.ActionPerformedEvent.Pre e) {
-        if (e.gui instanceof GuiVideoSettings && e.button.id == BUTTON_ID) {
+        if ((e.gui instanceof GuiVideoSettings || e.gui instanceof net.minecraft.client.gui.GuiOptions) && e.button.id == BUTTON_ID) {
             Minecraft.getMinecraft().gameSettings.saveOptions();
             Minecraft.getMinecraft().displayGuiScreen(new GuiMetal189(e.gui));
             e.setCanceled(true);

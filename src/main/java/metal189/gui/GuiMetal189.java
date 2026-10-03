@@ -166,9 +166,19 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
     @Override
     public void onGuiClosed() { Config.save(); }
 
+    /** In a world the menu draws no dirt or dimming, so changes can be previewed live. */
+    private boolean preview() { return mc.theWorld != null; }
+
     @Override
     public void drawScreen(int mouseX, int mouseY, float partialTicks) {
-        drawDefaultBackground();
+        if (preview()) {
+            // only a light panel behind the option column keeps the text readable
+            drawRect(width / 2 - 162, list.top(), width / 2 + 162, list.bottom(), 0x50000000);
+            drawRect(0, 0, width, 30, 0x50000000);
+            drawRect(0, list.bottom(), width, height, 0x50000000);
+        } else {
+            drawDefaultBackground();
+        }
         list.drawScreen(mouseX, mouseY, partialTicks);
         drawCenteredString(fontRendererObj, I18n.format("metal189.gui.title"), width / 2, 8, 0xFFFFFF);
         String dev = Native.deviceName() + (Pipeline.rtSupported() ? " - " + I18n.format("metal189.gui.rtAvailable") : "");
@@ -219,11 +229,39 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
         public void setSelected(int a, int b, int c) {}
     }
 
-    private static final class OptionList extends GuiListExtended {
+    private final class OptionList extends GuiListExtended {
         final List<Row> rows = new ArrayList<Row>();
 
         OptionList(Minecraft mc, int width, int height, int top, int bottom, int slotHeight) {
             super(mc, width, height, top, bottom, slotHeight);
+        }
+
+        int top() { return top; }
+        int bottom() { return bottom; }
+
+        @Override
+        protected void drawContainerBackground(net.minecraft.client.renderer.Tessellator t) {
+            if (!preview()) super.drawContainerBackground(t);
+        }
+
+        @Override
+        protected void overlayBackground(int startY, int endY, int startAlpha, int endAlpha) {
+            if (!preview()) super.overlayBackground(startY, endY, startAlpha, endAlpha);
+        }
+
+        @Override
+        protected void drawSelectionBox(int x, int y, int mouseX, int mouseY) {
+            if (!preview()) {
+                super.drawSelectionBox(x, y, mouseX, mouseY);
+                return;
+            }
+            // without the dirt strips, rows scrolled out of the list area are clipped instead
+            net.minecraft.client.gui.ScaledResolution sr = new net.minecraft.client.gui.ScaledResolution(mc);
+            int f = sr.getScaleFactor();
+            metal189.shim.GL11.glEnable(0x0C11);
+            metal189.shim.GL11.glScissor(0, mc.displayHeight - bottom * f, mc.displayWidth, (bottom - top) * f);
+            super.drawSelectionBox(x, y, mouseX, mouseY);
+            metal189.shim.GL11.glDisable(0x0C11);
         }
 
         @Override
