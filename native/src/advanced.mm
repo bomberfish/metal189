@@ -378,6 +378,30 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
                              indexBuffer:quadIndices(quads) indexBufferOffset:0];
             }
         }
+        // captured opaque geometry (entities, block entities)
+        for (const AdvGeometry& g : w.geometry) {
+            const VertexLayout* L = layout(g.format);
+            TexEntry* tex = texture(g.tex);
+            if (!L || !tex || !tex->tex || g.prim != 7) continue;
+            [e setRenderPipelineState:S.shadowGeneric[g.alphaTest ? 1 : 0]];
+            DrawTransform xf;
+            xf.modelview = g.mv;
+            xf.normal0 = g.normal.columns[0];
+            xf.normal1 = g.normal.columns[1];
+            xf.normal2 = g.normal.columns[2];
+            [e setVertexBytes:&xf length:sizeof xf atIndex:3];
+            [e setVertexBytes:L length:sizeof(VertexLayout) atIndex:2];
+            [e setVertexBytes:&g.item length:sizeof g.item atIndex:4];
+            [e setVertexBytes:&g.texMat length:sizeof g.texMat atIndex:5];
+            [e setFragmentTexture:tex->tex atIndex:0];
+            const uint32_t* sp = g.sampler;
+            [e setFragmentSamplerState:samplerFor((int)sp[0], (int)sp[1], (int)sp[2], (int)sp[3], (int)sp[4],
+                                                  *(const float*)&sp[5], *(const float*)&sp[6], *(const float*)&sp[7]) atIndex:0];
+            [e setVertexBuffer:g.vb offset:g.vbOffset + (size_t)g.firstVertex * L->stride.x atIndex:0];
+            uint32_t quads = g.count / 4;
+            [e drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:quads * 6 indexType:MTLIndexTypeUInt32
+                         indexBuffer:quadIndices(quads) indexBufferOffset:0];
+        }
         [e endEncoding];
     }
 

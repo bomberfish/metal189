@@ -480,7 +480,9 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
         color += lightCol * (albedo * diffuse + spec * saturate(ndl)) * shadow * skyGate;
     }
     color += albedo * skyAmbient(fr, skyLut, lin, nWorld) * (skyLight * skyLight) * ao * fr.ambient.a;
-    color += albedo * fr.blockLight.rgb * pow(blockL, fr.blockLight.a) * ao;
+    // block light fades in daylight (vanilla's lightmap is closer to max(sky, block) than a sum)
+    float daySky = skyLight * skyLight * fr.sunDirWorld.w;
+    color += albedo * fr.blockLight.rgb * pow(blockL, fr.blockLight.a) * ao * (1.0 - 0.75 * daySky);
     color += albedo * nrm.w * 6.0;
     color += albedo * 0.004 * ao;
     if (int(fr.flags.y) == -1) color += albedo * 0.03; // Nether ambient
@@ -596,7 +598,7 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
         // stained glass, ice, slime...: lit translucent surface
         float3 albedo = toLinear(t.rgb * in.color.rgb);
         float3 c = albedo * (lightCol * ndl * shadow * skyGate + skyAmbient(fr, skyLut, lin, nWorld) * in.lm.y * in.lm.y +
-                             fr.blockLight.rgb * pow(in.lm.x, fr.blockLight.a) + 0.004);
+                             fr.blockLight.rgb * pow(in.lm.x, fr.blockLight.a) * (1.0 - 0.75 * in.lm.y * in.lm.y * fr.sunDirWorld.w) + 0.004);
         return float4(c, t.a * in.color.a);
     }
 

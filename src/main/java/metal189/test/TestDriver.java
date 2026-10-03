@@ -204,6 +204,15 @@ public final class TestDriver {
             case "slot":
                 if (mc.thePlayer != null) mc.thePlayer.inventory.currentItem = Integer.parseInt(a[1]);
                 return true;
+            case "info":
+                if (mc.thePlayer != null) {
+                    net.minecraft.entity.Entity v = mc.getRenderViewEntity();
+                    Native.LOG.info("metal189-test info: player {} {} {} yaw {} pitch {} flying {} invisible {} view {} viewIsPlayer {} third {} {}",
+                            mc.thePlayer.posX, mc.thePlayer.posY, mc.thePlayer.posZ, mc.thePlayer.rotationYaw, mc.thePlayer.rotationPitch,
+                            mc.thePlayer.capabilities.isFlying, mc.thePlayer.isInvisible(), v, v == mc.thePlayer,
+                            mc.gameSettings.thirdPersonView, mc.renderGlobal.getDebugInfoEntities());
+                }
+                return true;
             case "fly":
                 // keep the camera where /tp put it (creative flight)
                 if (mc.thePlayer != null) {

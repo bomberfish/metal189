@@ -1017,6 +1017,7 @@ static simd_float4x4 normalMatrix(const simd_float4x4& mv) {
 
 // Opaque captured geometry the advanced pipeline renders itself (G-buffer + shadows).
 static bool advConsumes(const GLMirror& m, uint32_t phase, uint32_t prim) {
+    if (g_optAdvDebug == 98) return false;
     return phase == PH_ENTITIES && prim == 7 && !m.pipe.blend && m.depth.test && m.depth.mask && !m.pipe.logicOn &&
            m.units[0].enabled && m.units[0].tex;
 }

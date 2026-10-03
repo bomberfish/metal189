@@ -1,0 +1,39 @@
+sleep 3
+world flat2 42 flat
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /time set 3000
+cmd /weather clear
+cmd /tp @p 0.5 5 0.5 180 20
+sleep 4
+cmd /kill @e[type=!Player]
+cmd /summon Zombie -3 4 -5 {NoAI:1,Rotation:[0f,0f],Equipment:[{id:iron_sword},{},{},{id:iron_chestplate},{id:iron_helmet}]}
+cmd /summon Skeleton -1.5 4 -5 {NoAI:1,Rotation:[0f,0f],Equipment:[{id:bow},{},{},{},{}]}
+cmd /summon Creeper 0 4 -5 {NoAI:1,Rotation:[0f,0f]}
+cmd /summon Pig 1.5 4 -5 {NoAI:1,Rotation:[90f,0f],Saddle:1}
+cmd /summon Sheep 3 4 -5 {NoAI:1,Rotation:[90f,0f],Color:14}
+cmd /summon Cow -0.5 4 -8 {NoAI:1,Rotation:[90f,0f]}
+cmd /summon Chicken 1.5 4 -7 {NoAI:1,Rotation:[0f,0f]}
+cmd /summon ArmorStand -1 4 -3 {Rotation:[0f,0f],ShowArms:1,Equipment:[{id:diamond_sword,tag:{ench:[{id:16,lvl:1}]}},{id:golden_boots},{id:golden_leggings},{id:golden_chestplate},{id:golden_helmet}]}
+cmd /setblock -4 4 -8 chest 3
+cmd /setblock -3 4 -9 enchanting_table
+cmd /setblock 3 4 -9 standing_banner 8 replace {Base:1}
+cmd /setblock 4 4 -7 beacon
+cmd /setblock -5 4 -6 glowstone
+cmd /summon Item 2 4 -3 {Item:{id:diamond,Count:1}}
+cmd /summon Item 2.6 4 -3.2 {Item:{id:grass,Count:1}}
+sleep 3
+capture CAPTURE_A
+cmd /time set 13200
+sleep 2
+capture CAPTURE_B
+cmd /time set 18000
+sleep 2
+capture CAPTURE_C
+perspective 1
+cmd /time set 3000
+sleep 2
+capture CAPTURE_D
+quit
