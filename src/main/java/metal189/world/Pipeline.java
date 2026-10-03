@@ -49,7 +49,7 @@ public final class Pipeline {
             if (Config.sky) features |= SKY;
             if (Config.water) features |= WATER;
             if (Config.rtShadows) features |= RT_SHADOWS;
-            if (Config.rtReflections) features |= RT_REFLECTIONS;
+            if (Config.rtReflections && Config.reflections != 0) features |= RT_REFLECTIONS;   // Reflections off: none at all
             if (Config.taa) features |= TAA;
             if (Config.clouds) features |= CLOUDS;
             if (Config.volumetrics) features |= VOLUMETRICS;
@@ -76,7 +76,7 @@ public final class Pipeline {
 
     // Continuous settings for the shaders (adv.metal WATER_* / fr.tune), 4 floats per group.
     private static final int TUNING = 64;
-    private static final int WATER_FLAG_BIOME_TINT = 1, WATER_FLAG_CALM_INDOORS = 2, WATER_FLAG_RAIN_RIPPLES = 4, WATER_FLAG_SKY_REFLECT = 8;
+    private static final int WATER_FLAG_BIOME_TINT = 1, WATER_FLAG_CALM_INDOORS = 2, WATER_FLAG_RAIN_RIPPLES = 4;
     private static long tuning;
 
     private static void pushTuning() {
@@ -112,7 +112,7 @@ public final class Pipeline {
         t[16] = Config.underwaterVisibility;
         t[17] = Config.underwaterDistortion / 100f;
         t[18] = (Config.waterBiomeTint ? WATER_FLAG_BIOME_TINT : 0) | (Config.waterCalmIndoors ? WATER_FLAG_CALM_INDOORS : 0)
-                | (Config.waterRainRipples ? WATER_FLAG_RAIN_RIPPLES : 0) | (Config.waterReflections == 0 ? WATER_FLAG_SKY_REFLECT : 0);
+                | (Config.waterRainRipples ? WATER_FLAG_RAIN_RIPPLES : 0);
         t[19] = 1.2f * Config.waterFoamWidth / 100f;
         // lighting: foliage translucency, flags (bit 0: plant shadows)
         t[20] = Config.foliageTranslucency / 100f;
@@ -143,6 +143,8 @@ public final class Pipeline {
         t[45] = Config.sharpening / 100f;
         t[46] = Config.saturation / 100f;
         t[47] = Config.contrast / 100f;
+        // reflections: 0 off, 1 screen-space, 2 world-space (voxel volume)
+        t[48] = Config.reflections;
         for (int i = 0; i < TUNING; i++) metal189.engine.Mem.putFloat(tuning + i * 4L, t[i]);
         Native.advSetTuning(tuning, TUNING);
     }

@@ -8,6 +8,7 @@
 
 #import "advanced.h"
 #import "raytrace.h"
+#import "voxels.h"
 #import "gpu_profiler.h"
 #import "resources.h"
 #include <cmath>
@@ -627,6 +628,18 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         }
         if (rtBuildEntities(cb, draws, ents) && ents.triangles) features |= ADV_RT_ENTITIES;
     }
+    // world-space reflections without ray tracing: keep the voxel volume around the camera current
+    VoxelScene vox;
+    if ((int)(g_tuning[48] + 0.5f) == 2 && !(features & ADV_RT_REFL)) {
+        TexEntry* atlasV = texture(w.atlasTex);
+        if (atlasV && atlasV->tex && voxelsUpdate(cb, camX, camY, camZ, (int)atlasV->tex.width, (int)atlasV->tex.height, vox)) {
+            features |= ADV_WSR;
+            fr.voxel = vox.wrap;
+            fr.voxCam = vox.cam;
+        }
+    } else {
+        voxelsRelease();
+    }
     auto bindEntities = [&](id<MTLRenderCommandEncoder> e) {
         if (!ents.as) return;
         [e setFragmentAccelerationStructure:ents.as atBufferIndex:12];
@@ -1057,6 +1070,15 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [e setFragmentTexture:(features & ADV_RT_GI) ? S.t.giBlur[1] : S.t.light atIndex:13];
         [e setFragmentTexture:(features & ADV_WATER_SHADOW) ? S.waterShadow : depth atIndex:14];
         [e setFragmentTexture:S.waveTex atIndex:15];
+        if (vox.valid) {
+            [e setFragmentTexture:vox.tex atIndex:16];
+            [e setFragmentTexture:vox.occ atIndex:18];
+            [e setFragmentTexture:vox.shape atIndex:19];
+        }
+        {
+            TexEntry* atlasL = texture(w.atlasTex);
+            [e setFragmentTexture:atlasL && atlasL->tex ? atlasL->tex : S.t.albedo atIndex:17];
+        }
         [e setFragmentSamplerState:S.repeatLinear atIndex:3];
         [e setFragmentSamplerState:S.waveSampler atIndex:4];
         if (rtLight) {
@@ -1140,6 +1162,11 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [e setFragmentTexture:S.waveTex atIndex:9];
         [e setFragmentSamplerState:S.waveSampler atIndex:4];
         [e setFragmentTexture:S.t.light atIndex:10];
+        if (vox.valid) {
+            [e setFragmentTexture:vox.tex atIndex:11];
+            [e setFragmentTexture:vox.occ atIndex:12];
+            [e setFragmentTexture:vox.shape atIndex:13];
+        }
         TexEntry* atlas = texture(w.atlasTex);
         if (atlas && atlas->tex) [e setFragmentTexture:atlas->tex atIndex:0];
         const uint32_t* sp = w.layerSampler[3];

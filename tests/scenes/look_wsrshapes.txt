@@ -1,0 +1,63 @@
+# World-space reflections: partial blocks in the voxel volume (B, D: debug view 9) beside the real render (A, C)
+sleep 3
+world lookwsr 42 flat
+waitWorld
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /weather clear
+cmd /time set 4000
+config rtReflections false
+config reflections 2
+cmd /tp @p -590 4 -586 180 12
+sleep 4
+cmd /kill @e[type=!Player]
+cmd /fill -602 4 -600 -578 12 -578 air
+cmd /fill -602 3 -600 -578 3 -578 grass
+cmd /fill -602 4 -596 -578 8 -596 stonebrick
+cmd /setblock -600 4 -590 stone_slab 0
+cmd /setblock -599 4 -590 stone_slab 8
+cmd /setblock -598 4 -590 oak_stairs 0
+cmd /setblock -597 4 -590 oak_stairs 3
+cmd /setblock -596 4 -590 fence
+cmd /fill -595 4 -590 -593 4 -590 fence
+cmd /fill -592 4 -590 -591 4 -590 cobblestone_wall
+cmd /fill -590 4 -590 -589 4 -590 glass_pane
+cmd /setblock -588 4 -590 torch 5
+cmd /setblock -587 4 -590 red_flower 0
+cmd /setblock -586 4 -590 tallgrass 1
+cmd /setblock -585 4 -590 snow_layer 2
+cmd /setblock -584 4 -590 carpet 14
+cmd /setblock -583 4 -590 iron_bars
+cmd /setblock -582 4 -590 sapling 0
+cmd /setblock -581 4 -590 cake
+cmd /setblock -580 4 -590 yellow_flower 0
+cmd /setblock -600 4 -592 wooden_door 1
+cmd /setblock -600 5 -592 wooden_door 8
+cmd /setblock -598 4 -592 trapdoor 4
+cmd /setblock -596 4 -592 double_plant 0
+cmd /setblock -596 5 -592 double_plant 8
+cmd /setblock -594 4 -592 brown_mushroom
+cmd /setblock -592 4 -592 deadbush
+cmd /setblock -590 4 -592 web
+cmd /setblock -588 4 -592 enchanting_table
+cmd /setblock -586 4 -592 bed 0
+cmd /setblock -586 4 -593 bed 8
+cmd /setblock -584 4 -592 rail
+cmd /setblock -582 4 -592 leaves
+cmd /setblock -580 4 -592 glass
+sleep 8
+cmd /tp @p -590 4 -586 180 12
+sleep 4
+capture CAPTURE_A
+advdebug 9
+sleep 1
+capture CAPTURE_B
+advdebug 0
+cmd /tp @p -604 4 -586 215 20
+sleep 4
+capture CAPTURE_C
+advdebug 9
+sleep 1
+capture CAPTURE_D
+advdebug 0
+quit

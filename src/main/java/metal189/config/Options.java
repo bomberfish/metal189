@@ -121,20 +121,25 @@ public final class Options {
      */
     public static final String[] PROFILES = {"low", "medium", "high", "ultra"};
     public static final int DEFAULT_PROFILE = 2;
-    private static final int HW = -1;
+    // HW: on (1) only with hardware ray tracing. LOW_REFL: reflections on Low, world-space (2)
+    // with hardware ray tracing and screen-space (1) without; from Medium up hardware ray
+    // tracing reflects with RT and the others world-space.
+    private static final int HW = -1, LOW_REFL = -2;
     private static final String[] PROFILE_KEYS = {"shadows", "shadowResolution", "shadowDistance", "ssao", "volumetrics",
-            "clouds", "taa", "pom", "pomQuality", "waterFoam", "rtShadows", "rtReflections", "rtAmbientOcclusion",
-            "rtGlobalIllumination", "rtEntities"};
+            "clouds", "taa", "pom", "pomQuality", "waterFoam", "reflections", "rtShadows", "rtReflections",
+            "rtAmbientOcclusion", "rtGlobalIllumination", "rtEntities"};
     private static final int[][] PROFILE_VALUES = {
-        {1, 2048, 64, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0},
-        {1, 2048, 96, 1, 0, 1, 1, 1, 0, 0, 0, HW, 0, 0, 0},
-        {1, 4096, 112, 1, 1, 1, 1, 1, 1, 0, 0, HW, 0, 0, HW},
-        {1, 8192, 160, 1, 1, 1, 1, 1, 2, 0, HW, HW, HW, 0, HW},
+        {1, 2048, 64, 0, 0, 0, 1, 0, 0, 0, LOW_REFL, 0, 0, 0, 0, 0},
+        {1, 2048, 96, 1, 0, 1, 1, 1, 0, 0, 2, 0, HW, 0, 0, 0},
+        {1, 4096, 112, 1, 1, 1, 1, 1, 1, 0, 2, 0, HW, 0, 0, HW},
+        {1, 8192, 160, 1, 1, 1, 1, 1, 2, 0, 2, HW, HW, HW, 0, HW},
     };
 
     private static int profileValue(int p, int i, boolean hwRt) {
         int v = PROFILE_VALUES[p][i];
-        return v == HW ? (hwRt ? 1 : 0) : v;
+        if (v == HW) return hwRt ? 1 : 0;
+        if (v == LOW_REFL) return hwRt ? 2 : 1;
+        return v;
     }
 
     public static void applyProfile(int p, boolean hwRt) {
@@ -216,6 +221,7 @@ public final class Options {
         slider("materials", "pbrNormalStrength", S, 0, 200, 5, "%");
         slider("materials", "pbrSpecularStrength", S, 0, 200, 5, "%");
         slider("materials", "pbrEmissionStrength", S, 0, 300, 5, "%");
+        named("materials", "reflections", S, 3);
         toggle("materials", "pom", S);
         slider("materials", "pomDepth", S, 5, 50, 1, "%");
         named("materials", "pomQuality", S, 4);
@@ -228,7 +234,6 @@ public final class Options {
         slider("water", "waterWaveSpeed", S, 0, 300, 5, "%");
         toggle("water", "waterCalmIndoors", S);
         toggle("water", "waterRainRipples", S);
-        named("water", "waterReflections", S, 2);
         slider("water", "waterReflectivity", S, 2, 25, 1, "%");
         slider("water", "waterSunReflection", S, 0, 300, 5, "%");
         slider("water", "waterRefraction", S, 0, 300, 5, "%");

@@ -1,0 +1,52 @@
+sleep 3
+world lookwsr 42 flat
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /weather clear
+cmd /time set 4000
+config rtReflections false
+config reflections 2
+config waterReflectivity 25
+cmd /tp @p -500 8 -488 180 30
+sleep 4
+cmd /kill @e[type=!Player]
+cmd /fill -522 4 -522 -478 30 -478 air
+cmd /fill -522 3 -522 -478 3 -478 stone
+cmd /fill -515 3 -515 -485 3 -485 water
+cmd /fill -515 2 -515 -485 2 -485 stone
+cmd /fill -515 4 -520 -485 26 -518 stonebrick
+cmd /fill -510 8 -518 -490 22 -518 gold_block
+cmd /fill -506 12 -518 -494 18 -518 lapis_block
+cmd /fill -500 4 -505 -500 26 -505 log
+cmd /fill -507 4 -509 -505 9 -507 brick_block
+cmd /fill -493 4 -510 -493 8 -510 leaves
+cmd /fill -565 4 -522 -525 30 -478 air
+cmd /fill -565 3 -522 -525 3 -478 stone
+cmd /fill -560 3 -515 -530 3 -490 iron_block
+cmd /fill -560 4 -520 -530 20 -518 stonebrick
+cmd /fill -555 6 -518 -535 18 -518 gold_block
+cmd /fill -550 9 -518 -540 15 -518 lapis_block
+resourcepack metal189_test_pbr.zip
+sleep 10
+capture CAPTURE_A
+config reflections 1
+sleep 2
+capture CAPTURE_B
+config reflections 0
+sleep 2
+capture CAPTURE_C
+config reflections 2
+cmd /tp @p -545 6 -500 180 45
+sleep 4
+capture CAPTURE_D
+config reflections 1
+sleep 2
+capture CAPTURE_E
+config reflections 0
+sleep 2
+capture CAPTURE_F
+config reflections 2
+config waterReflectivity 4
+quit

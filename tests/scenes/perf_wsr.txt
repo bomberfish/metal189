@@ -1,0 +1,32 @@
+sleep 3
+world ref1 1234567
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /weather clear
+cmd /time set 4000
+config rtReflections false
+config reflections 1
+cmd /tp @p 104 66 -222 90 6
+sleep 15
+fps 5 ssr1
+config reflections 2
+sleep 2
+fps 5 wsr1
+config reflections 1
+sleep 2
+fps 5 ssr2
+config reflections 2
+sleep 2
+fps 5 wsr2
+config reflections 0
+sleep 2
+fps 5 off1
+config reflections 1
+sleep 2
+fps 5 ssr3
+config reflections 2
+sleep 2
+fps 5 wsr3
+quit

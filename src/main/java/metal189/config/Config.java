@@ -73,7 +73,6 @@ public final class Config {
     public static int underwaterVisibility = 40;  // blocks until the fog hides half the view
     public static boolean underwaterOverlay = true;  // vanilla's water texture over the screen (both renderers)
     public static boolean waterRainRipples = true;
-    public static int waterReflections = 1;           // 0 sky only, 1 screen-space (ray tracing: RT page)
     public static int underwaterDistortion = 100;     // percent
     public static boolean hideUnderwaterParticles = true;   // shaders mode: no vanilla suspended particles in water
 
@@ -83,6 +82,7 @@ public final class Config {
     public static int pbrNormalStrength = 100;    // percent
     public static int pbrSpecularStrength = 100;
     public static int pbrEmissionStrength = 100;
+    public static int reflections = 2;            // 0 off, 1 screen-space, 2 world-space (ray-traced: RT page)
     public static boolean pom = true;             // parallax occlusion mapping
     public static int pomDepth = 20;              // percent of a block
     public static int pomQuality = 1;             // 0 low .. 3 ultra (16..128 steps)

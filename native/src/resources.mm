@@ -319,10 +319,35 @@ Section* section(int sid) {
 
 const std::unordered_map<int, Section>& allSections() { return g_sections; }
 
+// sections by position (blocks / 16)
+static std::unordered_map<uint64_t, int> g_sectionAt;
+
+static uint64_t sectionKey(int sx, int sy, int sz) {
+    return ((uint64_t)(uint32_t)(sx & 0x1FFFFF) << 42) | ((uint64_t)(uint32_t)(sy & 0x1FFFFF) << 21) | (uint64_t)(uint32_t)(sz & 0x1FFFFF);
+}
+
+static void sectionUnplace(int sid, const Section& s) {
+    auto it = g_sectionAt.find(sectionKey(s.ox >> 4, s.oy >> 4, s.oz >> 4));
+    if (it != g_sectionAt.end() && it->second == sid) g_sectionAt.erase(it);
+}
+
+const Section* sectionAt(int sx, int sy, int sz) {
+    auto it = g_sectionAt.find(sectionKey(sx, sy, sz));
+    return it == g_sectionAt.end() ? nullptr : section(it->second);
+}
+
 void sectionUpload(int sid, int layer, const void* data, size_t bytes, uint32_t vertexCount, int ox, int oy, int oz) {
     if (layer < 0 || layer > 3) return;
     if (layer < 3) rtSectionChanged(sid);
+    static uint64_t versions = 0;
     Section& s = g_sections[sid];
+    bool moved = s.version == 0 || s.ox != ox || s.oy != oy || s.oz != oz;
+    if (moved) {
+        if (s.version != 0) sectionUnplace(sid, s);
+        g_sectionAt[sectionKey(ox >> 4, oy >> 4, oz >> 4)] = sid;
+    }
+    // what solid terrain looks like changed (translucent re-sorts as the camera moves do not count)
+    if (layer < 3 || moved) s.version = ++versions;
     s.ox = ox;
     s.oy = oy;
     s.oz = oz;
@@ -338,6 +363,7 @@ void sectionDelete(int sid) {
     rtSectionDeleted(sid);
     auto it = g_sections.find(sid);
     if (it == g_sections.end()) return;
+    sectionUnplace(sid, it->second);
     for (id<MTLBuffer> b : it->second.layers) if (b) g_deferredReleases.push_back(b);
     g_sections.erase(it);
 }

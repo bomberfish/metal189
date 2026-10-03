@@ -937,6 +937,175 @@ kernel void rt_entity_vertices(device const RtEntSource* src [[buffer(0)]],
     out[id] = o;
 }
 
+// ---------------------------------------------------------------------------
+// voxel volume for world-space reflections (voxels.mm): per block, where its texture is in
+// the atlas, its tint and its light, written from the terrain sections' own quads
+
+// ---------------------------------------------------------------------------
+// voxel volume for world-space reflections (voxels.mm), built from the terrain quads
+//
+// vox (RGBA16Uint): xy: sprite origin (atlas texels), z: tint (RGB565, vertex colour without
+// the face shade), w: kind (1 opaque, 2 cutout) | sky light << 2 | block light << 6 |
+// (log2 sprite size - 2) << 10 | VOX_SHAPED | VOX_CROSS | VOX_PLUS.
+// voxShape (RG32Uint, VOX_SHAPED and VOX_PLUS voxels), the block's shape in 1/8 block slices
+// as two parts: x: the box around its faces that stay inside the cell (fence and wall posts):
+// first slices x, y, z, last slices x, y, z (3 bits each) | present << 18 | the octants the
+// other part fills (bit x + 2y + 4z) << 19; y: the box around its faces reaching the cell's
+// sides (slabs, stairs, rails, walls, panes): first x, z, last x, z (3 bits each) | the y
+// slices it fills << 12 (rails keep their gaps) | present << 20. Plants drawn as diagonal
+// crossed planes (VOX_CROSS) and cutouts drawn as planes crossing through the centre
+// (VOX_PLUS: torches, lone panes and bars, crops) are traced as those planes.
+//
+// Per section: voxel_accum_kernel gathers what each block's quads cover into scratch,
+// voxel_resolve_kernel turns that into voxels (and clears the scratch), voxel_occ_kernel
+// marks the 4-block bricks holding anything.
+
+#define VOX_SHAPED (1u << 13)
+#define VOX_CROSS  (1u << 14)
+#define VOX_PLUS   (1u << 15)
+
+struct VoxResolveArgs {
+    int4 slot;     // xyz: the section's slot origin in texels
+    float4 atlas;  // xy: atlas size in texels
+};
+
+kernel void voxel_accum_kernel(device const BlockVertex* verts [[buffer(0)]], constant uint2& info [[buffer(1)]],
+                               device atomic_uint* scratch [[buffer(2)]], uint q [[thread_position_in_grid]]) {
+    if (q >= info.x) return;   // info: quads, layer
+    uint b = q * 4u;
+    float3 p0 = float3(verts[b].pos), p1 = float3(verts[b + 1].pos), p2 = float3(verts[b + 2].pos), p3 = float3(verts[b + 3].pos);
+    float3 nn = cross(p1 - p0, p2 - p0);
+    if (dot(nn, nn) < 1e-12) return;
+    float3 n = normalize(nn), an = abs(n);
+    int3 cell = int3(floor((p0 + p1 + p2 + p3) * 0.25 - n * 0.02));   // the block the face belongs to
+    if (any(cell < 0) || any(cell > 15)) return;
+    device atomic_uint* s = scratch + ((uint(cell.z) * 16u + uint(cell.y)) * 16u + uint(cell.x)) * 4u;
+    // the quad that textures the voxel: sides before tops and bottoms (reflections mostly
+    // see sides), solid before cutout, larger before smaller (a pane's face, not its edge),
+    // then the first drawn (a block's base texture before its overlays); kept as the
+    // maximum of the complement, so 0 is none
+    uint area = 255u - uint(saturate(length(nn)) * 255.0);
+    uint key = (an.y > 0.5 ? 1u << 28 : 0u) | (info.y << 26) | (area << 18) | min(q, (1u << 18) - 1u);
+    atomic_fetch_max_explicit(s + 2, ~key, memory_order_relaxed);
+    if (an.y < 0.2 && an.x > 0.5 && an.z > 0.5) {   // a diagonal plane: plants
+        atomic_fetch_or_explicit(s + 1, 1u << 24, memory_order_relaxed);
+        return;
+    }
+    // what the face bounds, per axis, in 1/16 slices and in halves (along its own axis, the
+    // slice behind it): their union over the block's faces is its shape
+    float3 org = float3(cell);
+    float3 lo = saturate(min(min(p0, p1), min(p2, p3)) - org), hi = saturate(max(max(p0, p1), max(p2, p3)) - org);
+    // a cutout plane through the middle of the cell, across all of it (torches, panes and bars
+    // standing alone, crops): with one across the other axis, the block is a plus of planes
+    if (info.y > 0u && an.y < 0.01) {
+        int k = an.x > 0.5 ? 0 : 2;
+        if (lo[k] > 0.2 && lo[k] < 0.8 && hi[2 - k] - lo[2 - k] > 0.9) atomic_fetch_or_explicit(s + 1, k == 0 ? 1u << 25 : 1u << 26, memory_order_relaxed);
+    }
+    // the 1/8 slices it bounds per axis (along its own axis, the slice behind it), into the
+    // part of the shape that reaches the cell's sides or the part inside it
+    uint m[3], h[3];
+    for (int k = 0; k < 3; k++) {
+        if (hi[k] - lo[k] < 1e-3) {
+            float c = lo[k] - n[k] / 32.0;
+            m[k] = 1u << uint(clamp(floor(c * 8.0), 0.0, 7.0));
+            h[k] = c < 0.5 ? 1u : 2u;
+        } else {
+            uint i0 = uint(clamp(floor(lo[k] * 8.0 + 0.01), 0.0, 7.0));
+            uint i1 = uint(clamp(ceil(hi[k] * 8.0 - 0.01), float(i0 + 1u), 8.0));
+            m[k] = ((1u << i1) - 1u) & ~((1u << i0) - 1u);
+            h[k] = (lo[k] < 0.499 ? 1u : 0u) | (hi[k] > 0.501 ? 2u : 0u);
+        }
+    }
+    uint mm = m[0] | (m[1] << 8) | (m[2] << 16);
+    if (lo.x < 0.01 || hi.x > 0.99 || lo.z < 0.01 || hi.z > 0.99) {
+        uint octs = 0u;
+        for (uint k = 0; k < 8u; k++)
+            if (((h[0] >> (k & 1u)) & (h[1] >> ((k >> 1) & 1u)) & (h[2] >> (k >> 2))) & 1u) octs |= 1u << k;
+        atomic_fetch_or_explicit(s, octs << 24, memory_order_relaxed);
+        atomic_fetch_or_explicit(s + 1, mm, memory_order_relaxed);
+    } else {
+        atomic_fetch_or_explicit(s, mm, memory_order_relaxed);
+    }
+}
+
+kernel void voxel_resolve_kernel(device const BlockVertex* solid [[buffer(0)]], device const BlockVertex* mipped [[buffer(1)]],
+                                 device const BlockVertex* cutout [[buffer(2)]], device uint4* scratch [[buffer(3)]],
+                                 constant VoxResolveArgs& a [[buffer(4)]],
+                                 texture3d<ushort, access::write> vox [[texture(0)]], texture3d<uint, access::write> voxShape [[texture(1)]],
+                                 uint3 gid [[thread_position_in_grid]]) {
+    if (any(gid >= 16u)) return;
+    uint idx = (gid.z * 16u + gid.y) * 16u + gid.x;
+    uint4 s = scratch[idx];
+    scratch[idx] = uint4(0u);   // clean for the next section
+    uint3 tc = uint3(a.slot.xyz) + gid;
+    if (s.z == 0u) {
+        vox.write(ushort4(0), tc);
+        return;
+    }
+    uint key = ~s.z, layer = (key >> 26) & 3u;
+    device const BlockVertex* verts = layer == 0u ? solid : (layer == 1u ? mipped : cutout);
+    uint b = (key & ((1u << 18) - 1u)) * 4u;
+    float3 p0 = float3(verts[b].pos), p1 = float3(verts[b + 1].pos), p2 = float3(verts[b + 2].pos), p3 = float3(verts[b + 3].pos);
+    float3 n = normalize(cross(p1 - p0, p2 - p0)), an = abs(n);
+    // the sprite: its size from how much texture the quad spans over how much face (a torch
+    // or a slab side spans part of its sprite), its origin on that grid
+    float2 t0 = float2(verts[b].uv), t1 = float2(verts[b + 1].uv), t2 = float2(verts[b + 2].uv), t3 = float2(verts[b + 3].uv);
+    float2 tlo = min(min(t0, t1), min(t2, t3)) * a.atlas.xy, text = max(max(t0, t1), max(t2, t3)) * a.atlas.xy - tlo;
+    float3 pext = max(max(p0, p1), max(p2, p3)) - min(min(p0, p1), min(p2, p3));
+    float size = max(text.x, text.y);
+    if (max3(an.x, an.y, an.z) > 0.999) {
+        float2 f = an.y > 0.5 ? pext.xz : (an.z > 0.5 ? pext.xy : pext.zy);   // the face's extent along its u and v
+        float2 r = text / max(f, 1e-3), rs = text / max(f.yx, 1e-3);          // as mapped, or rotated a quarter turn
+        float2 rr = abs(r.x - r.y) <= abs(rs.x - rs.y) ? r : rs;
+        size = f.x > 1e-3 && f.y > 1e-3 ? 0.5 * (rr.x + rr.y) : max(text.x / max(f.x, 1e-3), text.y / max(f.y, 1e-3));
+    }
+    size = exp2(clamp(round(log2(max(size, 4.0))), 2.0, 9.0));
+    float2 origin = floor(tlo / size + 0.01) * size;
+    uint lsize = uint(log2(size)) - 2u;
+    float4 col = (float4(verts[b].color) + float4(verts[b + 1].color) + float4(verts[b + 2].color) + float4(verts[b + 3].color)) * (0.25 / 255.0);
+    float3 tint = saturate(col.rgb / faceShade(n));
+    uint rgb = (uint(tint.r * 31.0 + 0.5) << 11) | (uint(tint.g * 63.0 + 0.5) << 5) | uint(tint.b * 31.0 + 0.5);
+    float2 lm = (float2(ushort2(verts[b].lm) & ushort2(0xFF)) + float2(ushort2(verts[b + 1].lm) & ushort2(0xFF)) +
+                 float2(ushort2(verts[b + 2].lm) & ushort2(0xFF)) + float2(ushort2(verts[b + 3].lm) & ushort2(0xFF))) * (0.25 / 240.0);
+    uint sky = uint(saturate(lm.y) * 15.0 + 0.5), blk = uint(saturate(lm.x) * 15.0 + 0.5);
+    uint kind = layer == 0u ? 1u : 2u, flags = 0u;   // 1 opaque, 2 cutout (alpha-tested at hits)
+    uint3 mA = uint3(s.x, s.x >> 8, s.x >> 16) & 0xFFu, mB = uint3(s.y, s.y >> 8, s.y >> 16) & 0xFFu;
+    uint octs = s.x >> 24;
+    bool hasA = all(mA != 0u), hasB = all(mB != 0u);
+    if (hasA || hasB) {
+        if (octs == 0u) octs = 0xFFu;
+        bool plus = ((s.y >> 25) & 3u) == 3u;
+        if (plus || !hasB || any(mB != 0xFFu) || octs != 0xFFu) {
+            flags = plus ? VOX_PLUS : VOX_SHAPED;
+            if (plus) kind = 2u;
+            uint3 loA = hasA ? uint3(ctz(mA)) : uint3(0u), hiA = hasA ? uint3(31u) - uint3(clz(mA)) : uint3(0u);
+            uint2 loB = hasB ? uint2(ctz(mB.x), ctz(mB.z)) : uint2(0u), hiB = hasB ? uint2(31u) - uint2(clz(mB.x), clz(mB.z)) : uint2(0u);
+            uint r = loA.x | (loA.y << 3) | (loA.z << 6) | (hiA.x << 9) | (hiA.y << 12) | (hiA.z << 15) | (hasA ? 1u << 18 : 0u) | (octs << 19);
+            uint g = loB.x | (loB.y << 3) | (hiB.x << 6) | (hiB.y << 9) | ((hasB ? mB.y : 0u) << 12) | (hasB ? 1u << 20 : 0u);
+            voxShape.write(uint4(r, g, 0u, 0u), tc);
+        }
+    } else if ((s.y >> 24) & 1u) {
+        flags = VOX_CROSS;
+        kind = 2u;
+    } else {
+        vox.write(ushort4(0), tc);
+        return;
+    }
+    vox.write(ushort4(ushort(origin.x + 0.5), ushort(origin.y + 0.5), ushort(rgb), ushort(kind | (sky << 2) | (blk << 6) | (lsize << 10) | flags)), tc);
+}
+
+// Which 4-block bricks of a slot hold any block, so traces cross empty space a brick at a time.
+kernel void voxel_occ_kernel(texture3d<ushort, access::read> vox [[texture(0)]], texture3d<ushort, access::write> occ [[texture(1)]],
+                             constant int4& slot [[buffer(0)]], uint3 gid [[thread_position_in_grid]]) {
+    if (any(gid >= 4u)) return;
+    uint3 base = uint3(slot.xyz) + gid * 4u;
+    uint kinds = 0u;
+    for (uint z = 0; z < 4u; z++)
+        for (uint y = 0; y < 4u; y++)
+            for (uint x = 0; x < 4u; x++) kinds |= uint(vox.read(base + uint3(x, y, z)).w);
+    occ.write(ushort4(ushort((kinds & 3u) != 0u)), base / 4u);
+}
+
 constexpr sampler rtEntSampler(filter::nearest, address::repeat);
 
 static bool rtEntOpaqueAt(device const RtEntVertex* ev, device const RtEntDraw* ed, device const RtEntTex* et,
@@ -1313,7 +1482,6 @@ fragment float4 aoblur_fragment(FullscreenOut in [[stage_in]], constant AdvFrame
 #define WF_BIOME_TINT   1u
 #define WF_CALM_INDOORS 2u
 #define WF_RAIN_RIPPLES 4u
-#define WF_SKY_REFLECT  8u   // reflections: sky only (no screen-space march)
 #define LIGHT_TUNE fr.tune[9]    // x: minimum light
 #define SKY_TUNE   fr.tune[10]   // x: cloud coverage, y: cloud speed, z: haze density, w: star brightness
 #define POST_TUNE  fr.tune[11]   // x: vignette, y: sharpening, z: saturation, w: contrast
@@ -1331,6 +1499,257 @@ static float3 underwaterInscatter(constant AdvFrame& fr, texture2d<float> skyLut
 static inline float underwaterFog(constant AdvFrame& fr, float d) {
     float r = d / max(WATER_UNDER.x, 1.0);
     return 1.0 - exp(-0.6931 * r * r);
+}
+
+#define REFL_TUNE fr.tune[12]   // x: reflections (0 off, 1 screen-space, 2 world-space)
+
+constexpr sampler voxPoint(filter::nearest, mip_filter::linear, address::clamp_to_edge);
+
+struct VoxHit {
+    bool hit;
+    float t;
+    float3 n, p;   // face normal (world), hit point (voxel space)
+    float2 uv;     // on the block's sprite
+    uint4 v;
+    float lod;     // atlas mip level for the ray's footprint there
+};
+
+// Sprite coordinates of a point on a block face (cell-local), as vanilla models map them.
+static float2 voxFaceUv(float3 f, float3 n) {
+    f = clamp(f, 0.0, 0.9999);
+    float3 a = abs(n);
+    if (a.y >= a.x && a.y >= a.z) return n.y > 0.0 ? f.xz : float2(f.x, 1.0 - f.z);
+    if (a.z >= a.x) return float2(n.z > 0.0 ? f.x : 1.0 - f.x, 1.0 - f.y);
+    return float2(n.x > 0.0 ? 1.0 - f.z : f.z, 1.0 - f.y);
+}
+
+static float2 voxAtlasUv(texture2d<float> atlas, uint4 v, float2 uv) {
+    float size = exp2(float(((v.w >> 10) & 7u) + 2u));
+    return (float2(v.xy) + min(uv, 0.9999) * size) / float2(atlas.get_width(), atlas.get_height());
+}
+
+// Atlas mip level for a face seen through a ray footprint `w` blocks wide: the texture
+// would alias (and shimmer under TAA) at full resolution; grazing hits stretch it.
+static float voxLod(uint4 v, float w, float3 n, float3 d) {
+    float size = exp2(float(((v.w >> 10) & 7u) + 2u));
+    return max(log2(w * size / max(abs(dot(n, d)), 0.3)), 0.0);
+}
+
+// Angle one pixel spans (radians): with the distance a ray has come, its footprint.
+static inline float pixelAngle(constant AdvFrame& fr) { return 2.0 * fr.invProj[1][1] * fr.screen.w; }
+
+// Keeps the nearer entry of a ray (o relative to the cell, inv = 1 / direction) into the box
+// lo..hi, from tMin on.
+static inline void voxBox(float3 lo, float3 hi, float3 o, float3 inv, float tMin, thread float& tHit, thread float3& nHit,
+                          thread bool& found) {
+    float3 t0 = (lo - o) * inv, t1 = (hi - o) * inv;
+    float3 tn = min(t0, t1), tf = max(t0, t1);
+    float te = max(max(tn.x, tn.y), tn.z), tx = min(min(tf.x, tf.y), tf.z);
+    float tc = max(te, tMin);
+    if (tc <= tx && tc < tHit) {
+        tHit = tc;
+        int ax = tn.x >= tn.y && tn.x >= tn.z ? 0 : (tn.y >= tn.z ? 1 : 2);
+        nHit = float3(0.0);
+        nHit[ax] = inv[ax] > 0.0 ? -1.0 : 1.0;
+        found = true;
+    }
+}
+
+// Where a ray enters a shaped block between tMin and tMax (voxShape: the inner box, and the
+// box reaching the sides in its y slices and octants).
+static bool voxShapeHit(uint2 sh, float3 o, float3 inv, float tMin, float tMax, thread float& tHit, thread float3& nHit) {
+    bool found = false;
+    tHit = tMax;
+    if ((sh.x >> 18) & 1u)
+        voxBox(float3(uint3(sh.x, sh.x >> 3, sh.x >> 6) & 7u) / 8.0, float3((uint3(sh.x >> 9, sh.x >> 12, sh.x >> 15) & 7u) + 1u) / 8.0,
+               o, inv, tMin, tHit, nHit, found);
+    if ((sh.y >> 20) & 1u) {
+        float2 xr = float2(float(sh.y & 7u), float(((sh.y >> 6) & 7u) + 1u)) / 8.0;
+        float2 zr = float2(float((sh.y >> 3) & 7u), float(((sh.y >> 9) & 7u) + 1u)) / 8.0;
+        uint ym = (sh.y >> 12) & 0xFFu, octs = (sh.x >> 19) & 0xFFu;
+        if (octs == 0xFFu) {
+            while (ym != 0u) {   // each run of filled slices is a box (a fence's rails)
+                uint l = ctz(ym), r = ctz(~(ym >> l));
+                voxBox(float3(xr.x, float(l) / 8.0, zr.x), float3(xr.y, float(l + r) / 8.0, zr.y), o, inv, tMin, tHit, nHit, found);
+                ym &= ~(((1u << r) - 1u) << l);
+            }
+        } else {
+            float2 yr = float2(float(ctz(ym)), float(32u - clz(ym))) / 8.0;
+            for (uint k = 0; k < 8u; k++) {   // stairs: the octants they fill
+                if (((octs >> k) & 1u) == 0u) continue;
+                float3 h = float3(uint3(k, k >> 1, k >> 2) & 1u) * 0.5;
+                float3 lo = max(float3(xr.x, yr.x, zr.x), h), hi = min(float3(xr.y, yr.y, zr.y), h + 0.5);
+                if (all(lo < hi)) voxBox(lo, hi, o, inv, tMin, tHit, nHit, found);
+            }
+        }
+    }
+    return found;
+}
+
+// Height range a shaped block spans (cutout planes run between them).
+static float2 voxShapeHeight(uint2 sh) {
+    float2 y = float2(1.0, 0.0);
+    if ((sh.x >> 18) & 1u) y = float2(float((sh.x >> 3) & 7u), float(((sh.x >> 12) & 7u) + 1u)) / 8.0;
+    uint ym = (sh.y >> 12) & 0xFFu;
+    if (((sh.y >> 20) & 1u) && ym != 0u) y = float2(min(y.x, float(ctz(ym)) / 8.0), max(y.y, float(32u - clz(ym)) / 8.0));
+    return y.x < y.y ? y : float2(0.0, 1.0);
+}
+
+// The nearest alpha-tested hit on a cell's two crossed planes (diagonal: a plant's, from
+// 0.05 to 0.95 along them; otherwise through the centre across the cell, between heights
+// yr). lo: the ray relative to the cell; o: in voxel space.
+static bool voxPlanesHit(texture2d<float> atlas, uint4 v, bool diagonal, float3 o, float3 lo, float3 d, float3 inv,
+                         float tMin, float tMax, float2 yr, float2 cone, thread VoxHit& h) {
+    float2 tp;
+    float3 nA, nB;
+    if (diagonal) {
+        tp = float2((lo.z - lo.x) / (d.x - d.z), (1.0 - lo.x - lo.z) / (d.x + d.z));
+        nA = float3(0.70710678, 0.0, -0.70710678);
+        nB = float3(0.70710678, 0.0, 0.70710678);
+    } else {
+        tp = float2((0.5 - lo.x) * inv.x, (0.5 - lo.z) * inv.z);
+        nA = float3(1.0, 0.0, 0.0);
+        nB = float3(0.0, 0.0, 1.0);
+    }
+    bool swapped = tp.y < tp.x;
+    if (swapped) tp = tp.yx;
+    for (int j = 0; j < 2; j++) {
+        float tq = tp[j];
+        if (!(tq >= tMin && tq <= tMax)) continue;
+        float3 q = lo + d * tq;
+        if (q.y < yr.x || q.y > yr.y) continue;
+        float3 n = (j == 0) != swapped ? nA : nB;
+        n = dot(n, d) > 0.0 ? -n : n;   // facing the ray
+        float2 uv;
+        if (diagonal) {
+            if (q.x < 0.05 || q.x > 0.95) continue;
+            uv = float2((q.x - 0.05) / 0.9, 1.0 - q.y);
+        } else {
+            if (any(q.xz < 0.0) || any(q.xz > 1.0)) continue;
+            uv = voxFaceUv(q, n);
+        }
+        float lod = voxLod(v, cone.x + tq * cone.y, n, d);
+        if (atlas.sample(voxPoint, voxAtlasUv(atlas, v, uv), level(lod)).a >= 0.1) {
+            h.hit = true;
+            h.t = tq;
+            h.n = n;
+            h.p = o + d * tq;
+            h.uv = uv;
+            h.v = v;
+            h.lod = lod;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Ray march through the voxel volume (voxel space: blocks from its min corner): empty
+// 4-block bricks in one step, the others a block at a time. Cutouts (leaves, plants, glass,
+// panes) are alpha-tested where hit; shaped blocks and plants are hit where their shape is.
+// cone: the ray's footprint at o (blocks) and its growth per block.
+static VoxHit voxTrace(constant AdvFrame& fr, texture3d<ushort> vox, texture3d<uint> voxShape, texture3d<ushort> occ,
+                       texture2d<float> atlas, float3 o, float3 d, float tmax, float2 cone) {
+    VoxHit h;
+    h.hit = false;
+    h.t = tmax;
+    int N = fr.voxel.w;
+    uint wrapMask = uint(N - 1);   // N is a power of two
+    float3 inv = 1.0 / select(d, float3(1e-9), abs(d) < 1e-9);
+    float3 ta = -o * inv, tb = (float3(float(N)) - o) * inv;
+    float tEnter = max(max(max(min(ta.x, tb.x), min(ta.y, tb.y)), min(ta.z, tb.z)), 0.0);
+    float tExit = min(min(min(max(ta.x, tb.x), max(ta.y, tb.y)), max(ta.z, tb.z)), tmax);
+    if (tEnter >= tExit) return h;
+    int3 cell = clamp(int3(floor(o + d * (tEnter + 1e-4))), int3(0), int3(N - 1));
+    int3 st = int3(sign(d));
+    float3 tDelta = abs(inv);
+    float3 far01 = select(float3(0.0), float3(1.0), d > 0.0);
+    float3 tNext = (float3(cell) + far01 - o) * inv;
+    float t = tEnter;
+    int axis = -1;
+    int3 brick = int3(-1);
+    bool brickFull = true;
+    for (int i = 0; i < 200; i++) {
+        uint3 tc = (uint3(cell) + uint3(fr.voxel.xyz)) & wrapMask;
+        int3 b = cell >> 2;
+        if (any(b != brick)) {
+            brick = b;
+            brickFull = occ.read(tc >> 2).r != 0u;
+        }
+        if (!brickFull) {
+            // nothing in this brick: on to the cell where the ray leaves it
+            float3 tf = (float3(b * 4) + far01 * 4.0 - o) * inv;
+            int ax = tf.x < tf.y && tf.x < tf.z ? 0 : (tf.y < tf.z ? 1 : 2);
+            t = tf[ax];
+            if (t >= tExit) break;
+            int3 nc = clamp(int3(floor(o + d * t)), b * 4, b * 4 + 3);
+            nc[ax] = st[ax] > 0 ? b[ax] * 4 + 4 : b[ax] * 4 - 1;
+            cell = nc;
+            axis = ax;
+            tNext = (float3(cell) + far01 - o) * inv;
+            if (any(cell < 0) || any(cell >= N)) break;
+            continue;
+        }
+        uint4 v = uint4(vox.read(tc));
+        uint kind = v.w & 3u;
+        if (kind != 0u && axis >= 0) {
+            float tOut = min(min(tNext.x, tNext.y), tNext.z);
+            float3 lo = o - float3(cell);   // the ray relative to the cell
+            if (v.w & (VOX_CROSS | VOX_PLUS)) {
+                float2 yr = float2(0.0, 1.0);
+                if (v.w & VOX_PLUS) yr = voxShapeHeight(voxShape.read(tc).rg);
+                if (voxPlanesHit(atlas, v, (v.w & VOX_CROSS) != 0u, o, lo, d, inv, t, tOut, yr, cone, h)) return h;
+            } else {
+                float th = t;
+                float3 n = float3(0.0);
+                n[axis] = -float(st[axis]);
+                if (!(v.w & VOX_SHAPED) || voxShapeHit(voxShape.read(tc).rg, lo, inv, t, tOut, th, n)) {
+                    float2 uv = voxFaceUv(lo + d * th, n);
+                    float lod = voxLod(v, cone.x + th * cone.y, n, d);
+                    if (kind == 1u || atlas.sample(voxPoint, voxAtlasUv(atlas, v, uv), level(lod)).a >= 0.1) {
+                        h.hit = true;
+                        h.t = th;
+                        h.n = n;
+                        h.p = o + d * th;
+                        h.uv = uv;
+                        h.v = v;
+                        h.lod = lod;
+                        return h;
+                    }
+                }
+            }
+        }
+        if (tNext.x < tNext.y && tNext.x < tNext.z) { axis = 0; t = tNext.x; tNext.x += tDelta.x; cell.x += st.x; }
+        else if (tNext.y < tNext.z) { axis = 1; t = tNext.y; tNext.y += tDelta.y; cell.y += st.y; }
+        else { axis = 2; t = tNext.z; tNext.z += tDelta.z; cell.z += st.z; }
+        if (t >= tExit || any(cell < 0) || any(cell >= N)) break;
+    }
+    return h;
+}
+
+// A voxel hit lit like the deferred pass: its texture and tint, sun with the shadow map,
+// sky light and block light from the light it was built with.
+static float3 voxShade(constant AdvFrame& fr, texture2d<float> atlas, depth2d<float> shadowMap, sampler cmp,
+                       texture2d<float> skyLut, sampler lin, VoxHit h) {
+    float4 tex = atlas.sample(voxPoint, voxAtlasUv(atlas, h.v, h.uv), level(h.lod));
+    uint rgb = h.v.z;
+    float3 tint = float3(float((rgb >> 11) & 31u) / 31.0, float((rgb >> 5) & 63u) / 63.0, float(rgb & 31u) / 31.0);
+    float3 albedo = toLinear(tex.rgb * tint);
+    float sky = float((h.v.w >> 2) & 15u) / 15.0, blk = float((h.v.w >> 6) & 15u) / 15.0;
+    float3 n = h.n;
+    bool sunUp = fr.sunDirWorld.w > 0.0;
+    float3 L = sunUp ? fr.sunDirWorld.xyz : -fr.sunDirWorld.xyz;
+    float3 lightCol = sunUp ? fr.sunColor.rgb : fr.moonColor.rgb;
+    float ndl = saturate(dot(n, L));
+    float3 c = float3(0.0);
+    if (ndl > 0.0 && fr.flags.y == 0) {
+        float vis = (fr.flags.x & ADV_SHADOWS) ? sampleShadow(fr, shadowMap, cmp, h.p - fr.voxCam.xyz, n, ndl) : smoothstep(0.85, 1.0, sky);
+        c += lightCol * albedo * ndl * smoothstep(0.35, 0.9, sky) * vis;
+    }
+    float daySky = sky * sky * fr.sunDirWorld.w;
+    c += albedo * skyAmbient(fr, skyLut, lin, n) * sky * sky * fr.ambient.a;
+    c += albedo * fr.blockLight.rgb * pow(blk, fr.blockLight.a) * (1.0 - 0.75 * daySky);
+    c += albedo * 0.004 * LIGHT_TUNE.x;
+    return c;
 }
 
 static float3 ssr(constant AdvFrame& fr, depth2d<float> depthTex, float3 eyePos, float3 rdView, float jitter);
@@ -1366,6 +1785,8 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                                texture2d<float> giTex [[texture(13)]],
                                depth2d<float> waterShadow [[texture(14)]],
                                texture2d<float> waveTex [[texture(15)]],
+                               texture3d<ushort> vox [[texture(16)]], texture2d<float> voxAtlas [[texture(17)]],
+                               texture3d<ushort> voxOcc [[texture(18)]], texture3d<uint> voxShape [[texture(19)]],
                                sampler cmp [[sampler(0)]], sampler lin [[sampler(1)]],
                                sampler rep [[sampler(3)]], sampler wrep [[sampler(4)]],
                                instance_acceleration_structure tlas [[buffer(10), function_constant(ac_rt)]],
@@ -1384,6 +1805,14 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     float3 rd = pf.xyz / pf.w;
     float3 eye = d >= 1.0 ? rd : rd * (gLinZ.read(px).r / -rd.z);
     float3 dirWorld = normalize((fr.invView * float4(eye, 0)).xyz);
+    if (fr.flags.w == 9u) {
+        // debug: the voxel volume world-space reflections trace, seen from the camera
+        if (!(fr.flags.x & ADV_WSR)) return float4(1.0, 0.0, 1.0, 1.0);
+        // from the eye (camera-relative positions are relative to the view entity's feet)
+        float3 eyeVox = fr.voxCam.xyz + (fr.invView * float4(0.0, 0.0, 0.0, 1.0)).xyz;
+        VoxHit vh = voxTrace(fr, vox, voxShape, voxOcc, voxAtlas, eyeVox, dirWorld, 128.0, float2(0.0, pixelAngle(fr)));
+        return float4(vh.hit ? voxShade(fr, voxAtlas, shadowMap, cmp, skyLut, lin, vh) : skyBase(fr, skyLut, lin, dirWorld), 1.0);
+    }
     if (d >= 1.0) {
         float3 sky = skyRadiance(fr, skyLut, lin, dirWorld, cloudMap);
         if (fr.fog.w > 1.5) sky = toLinear(fr.fogColor.rgb) * 2.0;
@@ -1512,10 +1941,12 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
             color += albedo * (1.0 - metal) * skyAmbient(fr, skyLut, lin, nWorld) * skyVis;
         if (waterPath > 0.0)
             color += albedo * (1.0 - metal) * underwaterInscatter(fr, skyLut, lin) * exp(-WATER_ABSORB.xyz * waterPath * 0.5) * 0.6 * ao;
-        float3 refl = envCol * skyVis;
+        // reflections off: no mirror image, but metals keep an even sheen of the sky light
+        bool reflOn = REFL_TUNE.x > 0.5 || (ac_rt && (fr.flags.x & ADV_RT_REFL));
+        float3 refl = reflOn ? envCol * skyVis : skyAmbient(fr, skyLut, lin, nWorld) * skyVis;
         // smooth surfaces: traced reflections (RT closest hit, or screen space into last frame's resolve)
         float smoothW = 1.0 - smoothstep(0.12, 0.4, rough);
-        if (smoothW > 0.0) {
+        if (smoothW > 0.0 && reflOn) {
             float3 Rr = R;
             if (fr.taa.w > 0.5 && rough > 0.05) {
                 // one GGX sample per pixel and frame; TAA integrates the lobe
@@ -1546,12 +1977,25 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                     traced = mix(traced, skyBase(fr, skyLut, lin, Rrw), hf * hf);
                     hitAny = true;
                 }
-            } else if (fr.taa.w > 0.5) {
-                float3 hit = ssr(fr, depth, eye, Rr, fract(hash12(in.position.xy) + float(fr.flags.z % 64u) * 0.618034));
-                if (hit.z > 0.0) {
-                    traced = mix(refl, history.sample(lin, hit.xy).rgb, hit.z);
-                    hitAny = true;
+            } else if (REFL_TUNE.x > 0.5) {
+                // screen space (into last frame's resolve, so with TAA only) where the screen
+                // shows what is reflected; world space fills in the rest from the voxel volume
+                float3 hit = float3(0.0);
+                if (fr.taa.w > 0.5) hit = ssr(fr, depth, eye, Rr, fract(hash12(in.position.xy) + float(fr.flags.z % 64u) * 0.618034));
+                float3 back = refl;
+                if (hit.z < 0.99 && (fr.flags.x & ADV_WSR)) {
+                    VoxHit vh = voxTrace(fr, vox, voxShape, voxOcc, voxAtlas, world + fr.voxCam.xyz + nWorld * 0.03, Rrw, 128.0,
+                                         float2(length(eye), 1.0) * pixelAngle(fr));
+                    if (vh.hit) {
+                        back = voxShade(fr, voxAtlas, shadowMap, cmp, skyLut, lin, vh);
+                        float hd = length(Rrw * vh.t + world);
+                        float hf = saturate((hd - fr.fog.x) / max(fr.fog.y - fr.fog.x, 1.0));
+                        back = mix(back, skyBase(fr, skyLut, lin, Rrw), hf * hf);
+                        hitAny = true;
+                    }
                 }
+                traced = hit.z > 0.0 ? mix(back, history.sample(lin, hit.xy).rgb, hit.z) : back;
+                hitAny = hitAny || hit.z > 0.0;
             }
             if (hitAny) refl = mix(refl, traced, smoothW);
         }
@@ -1580,7 +2024,8 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     if (int(fr.flags.y) == 1) color += albedo * float3(0.045, 0.038, 0.06); // the End's dim violet ambient
 
     // debug views: 1 no fog, 2 albedo, 3 normals, 4 white albedo lighting, 5 shadow term, 6 RT shadow,
-    // 7 sunlight's path through water (yellow shallow, red deep), 8 lightmap (red sky, green block)
+    // 7 sunlight's path through water (yellow shallow, red deep), 8 lightmap (red sky, green block),
+    // 9 (above) the voxel volume of world-space reflections
     uint dbg = fr.flags.w;
     if (dbg == 1) return float4(color, 1.0);
     if (dbg == 2) return float4(albedo, 1.0);
@@ -1833,6 +2278,8 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
                                texture2d<float> sceneColor [[texture(6)]], depth2d<float> sceneDepth [[texture(7)]],
                                texture2d<float> waveTex [[texture(9)]], sampler wrep [[sampler(4)]],
                                texture2d<float> gLight [[texture(10)]],
+                               texture3d<ushort> vox [[texture(11)]], texture3d<ushort> voxOcc [[texture(12)]],
+                               texture3d<uint> voxShape [[texture(13)]],
                                instance_acceleration_structure tlas [[buffer(10), function_constant(ac_rt)]],
                                device const RtInstance* rtInst [[buffer(11), function_constant(ac_rt)]],
                                primitive_acceleration_structure entAs [[buffer(12), function_constant(ac_rt)]],
@@ -1971,6 +2418,8 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
     float F0 = WATER_SURFACE.x;
     float fres = F0 + (1.0 - F0) * pow(1.0 - saturate(cosV), 5.0);
     fres *= 1.0 - foam;
+    bool reflOn = REFL_TUNE.x > 0.5 || (ac_rt && (fr.flags.x & ADV_RT_REFL));
+    if (!reflOn) fres = 0.0;   // reflections off
     // the sky (no sun disk: the glint below is the sun's reflection); under cover, a dim
     // copy of the water's own colour instead of a sky it cannot see
     float skyVis = max(smoothstep(0.6, 0.95, in.lm.y), shadow * shadow * 0.3);
@@ -1997,14 +2446,26 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
             refl = mix(hc, skyBase(fr, skyLut, lin, R), hf * hf);
             hitT = 1.0;
         }
-    } else if (fres > 0.02 && !(wflags & WF_SKY_REFLECT)) {
+    } else if (fres > 0.02) {
         // screen-space: the march follows a normal 80% of the way to the waves (fewer broken hits)
-        float3 Rs = reflect(dirWorld, normalize(mix(nWorld, nw, 0.8)));
+        float3 Rs = normalize(reflect(dirWorld, normalize(mix(nWorld, nw, 0.8))));
         Rs.y = max(Rs.y, 0.003);
         float3 hit = ssr(fr, sceneDepth, in.eye + nvFlat * (0.02 + dist * 0.004), normalize((fr.view * float4(Rs, 0)).xyz), jitter);
         if (hit.z > 0.0) {
             refl = mix(refl, sceneColor.sample(lin, hit.xy).rgb, hit.z);
             hitT = hit.z;
+        }
+        if (hit.z < 0.99 && (fr.flags.x & ADV_WSR)) {
+            // world space: off-screen terrain from the voxel volume where screen space has
+            // nothing (along the screen-space ray, so the two agree where they meet)
+            VoxHit vh = voxTrace(fr, vox, voxShape, voxOcc, atlas, in.world + fr.voxCam.xyz + nWorld * 0.02, Rs, 128.0, float2(dist, 1.0) * pixelAngle(fr));
+            if (vh.hit) {
+                float3 hc = voxShade(fr, atlas, shadowMap, cmp, skyLut, lin, vh);
+                float hd = length(vh.t * Rs + in.world);
+                float hf = saturate((hd - fr.fog.x) / max(fr.fog.y - fr.fog.x, 1.0));
+                refl = mix(mix(hc, skyBase(fr, skyLut, lin, Rs), hf * hf), refl, hit.z);
+                hitT = 1.0;
+            }
         }
     }
     float3 c = mix(below, refl, fres);
