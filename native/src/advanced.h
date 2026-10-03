@@ -57,7 +57,7 @@ void advancedSetParam(int key, int value);
 // LabPBR material atlases (texture ids, 0 = none) laid out like the block atlas.
 void advancedSetPbr(int normalTex, int specularTex);
 // Continuous user settings (Pipeline.java TUNE_*), copied into AdvFrame every frame.
-constexpr int kTuningValues = 64;
+constexpr int kTuningValues = 96;
 void advancedSetTuning(const float* values, int count);
 
 // Lighting inputs of the last advanced frame, for draws the baseline executor replays on

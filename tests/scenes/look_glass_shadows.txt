@@ -1,0 +1,37 @@
+# Coloured shadows: a room roofed with stained glass of several colours (stacked red over
+# blue in one corner), noon (A, B: shadows off) and morning through a window wall (C)
+sleep 3
+world lookglass 42 flat
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /weather clear
+cmd /time set 6000
+config rtReflections false
+config glassShadows true
+cmd /tp @p -900 5 -890 180 10
+sleep 4
+cmd /kill @e[type=!Player]
+cmd /fill -916 4 -916 -884 16 -884 air
+cmd /fill -916 3 -916 -884 3 -884 quartz_block
+cmd /fill -910 4 -910 -910 9 -896 stonebrick
+cmd /fill -896 4 -910 -896 9 -896 stained_glass 3
+cmd /fill -910 4 -910 -896 9 -910 stonebrick
+cmd /fill -909 10 -909 -905 10 -897 stained_glass 14
+cmd /fill -904 10 -909 -900 10 -897 stained_glass 4
+cmd /fill -899 10 -909 -897 10 -897 stained_glass 5
+cmd /fill -899 11 -909 -897 11 -905 stained_glass 11
+cmd /tp @p -903 5 -892 180 25
+sleep 8
+capture CAPTURE_A
+config glassShadows false
+sleep 3
+capture CAPTURE_B
+config glassShadows true
+cmd /time set 1500
+cmd /tp @p -903 5 -892 190 20
+sleep 5
+capture CAPTURE_C
+cmd /time set 6000
+quit

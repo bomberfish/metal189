@@ -75,7 +75,7 @@ public final class Pipeline {
     }
 
     // Continuous settings for the shaders (adv.metal WATER_* / fr.tune), 4 floats per group.
-    private static final int TUNING = 64;
+    private static final int TUNING = 96;
     private static final int WATER_FLAG_BIOME_TINT = 1, WATER_FLAG_CALM_INDOORS = 2, WATER_FLAG_RAIN_RIPPLES = 4;
     private static long tuning;
 
@@ -158,6 +158,7 @@ public final class Pipeline {
         t[60] = Config.globalIllumination;
         t[61] = Config.globalIlluminationStrength / 100f;
         t[62] = 1 << Config.globalIlluminationQuality;
+        t[63] = Config.glassShadows ? 1 : 0;
         for (int i = 0; i < TUNING; i++) metal189.engine.Mem.putFloat(tuning + i * 4L, t[i]);
         Native.advSetTuning(tuning, TUNING);
     }

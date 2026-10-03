@@ -31,7 +31,7 @@ struct AdvFrame {
     m189_float4x4 prevViewProj;  // previous frame's proj * view (GL clip, unjittered)
     m189_float4 taa;             // xyz: camera position minus previous camera position, w: history valid
     m189_float4 moon;            // x: illuminated fraction (phase), y: lit side (+1 waxing, -1 waning)
-    m189_float4 tune[16];        // user settings (Pipeline.java TUNE_*), see the TUNE_ accessors below
+    m189_float4 tune[24];        // user settings (Pipeline.java TUNE_*), see the TUNE_ accessors below
     m189_int4 voxel;             // world-space reflection volume: xyz origin mod N (texel wrap), w N
     m189_float4 voxCam;          // xyz: camera position relative to the volume's min corner (blocks)
 };
@@ -55,6 +55,7 @@ struct AdvFrame {
 #define ADV_WATER_SHADOW (1u << 16) // engine-set: the water shadow map (water surfaces in light space) is valid
 #define ADV_WSR          (1u << 17) // engine-set: the voxel volume for world-space reflections is bound
 #define ADV_WSGI         (1u << 18) // engine-set: global illumination from the voxel volume (giTex)
+#define ADV_GLASS_SHADOW (1u << 19) // engine-set: the glass shadow map (tinted translucents in light space) is valid
 
 // Per-item data for G-buffer/shadow draws of captured (non-terrain) geometry.
 struct AdvItem {

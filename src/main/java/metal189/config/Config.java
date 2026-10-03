@@ -41,7 +41,8 @@ public final class Config {
     public static boolean rtEntities = true;
     /** Shaders mode: the first-person player casts a shadow (and appears in ray tracing). */
     public static boolean playerShadow = true;
-    public static boolean plantShadows = true;        // grass, flowers and crops cast shadows
+    public static boolean plantShadows = true;
+    public static boolean glassShadows = true;          // stained glass colours the light through it        // grass, flowers and crops cast shadows
     public static int sunBrightness = 100;            // percent (sun and moon)
     public static int skyLightBrightness = 100;
     public static int blockLightBrightness = 100;

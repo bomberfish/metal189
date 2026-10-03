@@ -206,6 +206,7 @@ public final class Options {
         numbers("lighting", "shadowDistance", S, " blocks", Config.SHADOW_DISTANCES);
         toggle("lighting", "playerShadow", S);
         toggle("lighting", "plantShadows", S);
+        toggle("lighting", "glassShadows", S);
         slider("lighting", "foliageTranslucency", S, 0, 200, 5, "%");
         toggle("lighting", "ssao", S);
         toggle("lighting", "waving", S);

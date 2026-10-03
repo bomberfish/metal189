@@ -370,6 +370,52 @@ fragment void shadow_water_fragment(WaterShadowOut in [[stage_in]]) {
     if (in.material != 2) discard_fragment();
 }
 
+// Stained glass, ice, slime and the like in light space (the glass shadow map) for coloured
+// shadows: the nearest such surface towards the light (min-blended depth) and the light that
+// passes all of them along that line (multiply-blended), so stacked panes mix their colours.
+struct GlassShadowOut {
+    float4 position [[position]];
+    float2 uv;
+    float4 color;
+    uint material [[flat]];
+};
+
+struct GlassShadowTargets {
+    float depth [[color(0)]];
+    float4 transmit [[color(1)]];
+};
+
+vertex GlassShadowOut shadow_glass_vertex(uint vid [[vertex_id]],
+                                          device const BlockVertex* verts [[buffer(0)]],
+                                          constant AdvFrame& fr [[buffer(1)]],
+                                          constant float4& sectionWorld [[buffer(4)]],
+                                          device const uchar* materials [[buffer(5)]]) {
+    BlockVertex v = verts[vid];
+    ushort2 lmRaw = ushort2(v.lm);
+    uint state = uint(lmRaw.x >> 8) | (uint(lmRaw.y >> 8) << 8);
+    GlassShadowOut o;
+    o.position = fr.shadowViewProj * float4(float3(v.pos) + sectionWorld.xyz, 1.0);
+    o.uv = float2(v.uv);
+    o.color = float4(v.color) * (1.0 / 255.0);
+    o.material = materials[state];
+    return o;
+}
+
+fragment GlassShadowTargets shadow_glass_fragment(GlassShadowOut in [[stage_in]], texture2d<float> atlas [[texture(0)]],
+                                                  sampler s [[sampler(0)]]) {
+    if (in.material == 2) discard_fragment();   // water has its own map
+    float4 t = atlas.sample(s, in.uv, level(0)) * in.color;
+    if (t.a < 0.02) discard_fragment();
+    GlassShadowTargets o;
+    o.depth = in.position.z;
+    // coloured glass passes its own colour, saturated (it absorbs the rest), dark glass less of
+    // everything; each face takes the square root, so a block (two faces) tints once
+    float peak = max(max(t.r, t.g), max(t.b, 1e-3));
+    float3 T = pow(t.rgb / peak, 1.5) * mix(1.0, peak, 0.6);
+    o.transmit = float4(sqrt(mix(float3(1.0), T, saturate(t.a * 2.5))), 1.0);
+    return o;
+}
+
 vertex ShadowOut shadow_terrain_vertex(uint vid [[vertex_id]],
                                        device const BlockVertex* verts [[buffer(0)]],
                                        constant AdvFrame& fr [[buffer(1)]],
@@ -806,6 +852,18 @@ static float sampleShadow(constant AdvFrame& fr, depth2d<float> shadowMap, sampl
         for (int x = -1; x <= 2; x++)
             sum += shadowMap.sample_compare(cmp, uv + (float2(x, y) - 0.5) * texel, ndc.z - bias);
     return sum / 16.0;
+}
+
+// Light reaching `world` (camera-relative) through tinted glass and the like (the glass shadow
+// map): their colour if any lies between it and the sun, white otherwise.
+static float3 glassTransmit(constant AdvFrame& fr, texture2d<float> glassDepth, texture2d<float> glassColor, float3 world) {
+    if (!(fr.flags.x & ADV_GLASS_SHADOW)) return float3(1.0);
+    float4 sc = fr.shadowViewProj * float4(world, 1.0);
+    float2 uv = float2(sc.x * 0.5 + 0.5, 0.5 - sc.y * 0.5);
+    if (any(uv < 0.0) || any(uv >= 1.0) || sc.z > 1.0) return float3(1.0);
+    uint2 p = uint2(uv * float2(glassDepth.get_width(), glassDepth.get_height()));
+    if (sc.z <= glassDepth.read(p).r + 0.1 / 512.0) return float3(1.0);   // in front of the glass (or on it)
+    return glassColor.read(p).rgb;
 }
 
 // ---------------------------------------------------------------------------
@@ -1769,7 +1827,7 @@ static VoxHit voxTrace(constant AdvFrame& fr, texture3d<ushort> vox, texture3d<u
 // A voxel hit lit like the deferred pass: its texture and tint, sun with the shadow map,
 // sky light and block light from the light it was built with.
 static float3 voxShade(constant AdvFrame& fr, texture2d<float> atlas, depth2d<float> shadowMap, sampler cmp,
-                       texture2d<float> skyLut, sampler lin, VoxHit h) {
+                       texture2d<float> skyLut, sampler lin, VoxHit h, texture2d<float> glassDepth, texture2d<float> glassColor) {
     float4 tex = atlas.sample(voxPoint, voxAtlasUv(atlas, h.v, h.uv), level(h.lod));
     uint rgb = h.v.z;
     float3 tint = float3(float((rgb >> 11) & 31u) / 31.0, float((rgb >> 5) & 63u) / 63.0, float(rgb & 31u) / 31.0);
@@ -1783,7 +1841,7 @@ static float3 voxShade(constant AdvFrame& fr, texture2d<float> atlas, depth2d<fl
     float3 c = float3(0.0);
     if (ndl > 0.0 && fr.flags.y == 0) {
         float vis = (fr.flags.x & ADV_SHADOWS) ? sampleShadow(fr, shadowMap, cmp, h.p - fr.voxCam.xyz, n, ndl) : smoothstep(0.85, 1.0, sky);
-        c += lightCol * albedo * ndl * smoothstep(0.35, 0.9, sky) * vis;
+        c += lightCol * albedo * ndl * smoothstep(0.35, 0.9, sky) * vis * glassTransmit(fr, glassDepth, glassColor, h.p - fr.voxCam.xyz + n * 0.02);
     }
     float daySky = sky * sky * fr.sunDirWorld.w;
     c += albedo * skyAmbient(fr, skyLut, lin, n) * sky * sky * fr.ambient.a;
@@ -1803,6 +1861,7 @@ fragment float4 gi_voxel_fragment(FullscreenOut in [[stage_in]], constant AdvFra
                                   texture2d<float> atlas [[texture(7)]],
                                   texture3d<ushort> vox [[texture(16)]], texture3d<ushort> voxOcc [[texture(18)]],
                                   texture3d<uint> voxShape [[texture(19)]], texture3d<ushort> voxOccSlot [[texture(20)]],
+                                  texture2d<float> glassDepth [[texture(21)]], texture2d<float> glassColor [[texture(22)]],
                                   sampler cmp [[sampler(0)]], sampler lin [[sampler(1)]]) {
     uint2 fp = min(uint2(in.position.xy) * 2u + 1u, uint2(fr.screen.xy) - 1u);
     float d = depth.read(fp);
@@ -1829,7 +1888,7 @@ fragment float4 gi_voxel_fragment(FullscreenOut in [[stage_in]], constant AdvFra
         // diffuse light needs no texture detail: a wide footprint picks coarse mips
         VoxHit h = voxTrace(fr, vox, voxShape, voxOcc, voxOccSlot, atlas, p, dir, len, float2(0.5, 0.1));
         if (h.hit) {
-            sum += voxShade(fr, atlas, shadowMap, cmp, skyLut, lin, h) * GI_TUNE.y;
+            sum += voxShade(fr, atlas, shadowMap, cmp, skyLut, lin, h, glassDepth, glassColor) * GI_TUNE.y;
         } else {
             float3 skyC = (fr.flags.y != 0 ? toLinear(fr.fogColor.rgb) * 0.3 : skyBase(fr, skyLut, lin, dir)) * fr.ambient.a;
             float3 tf = (select(float3(0.0), float3(N), dir > 0.0) - p) / select(dir, float3(1e-9), abs(dir) < 1e-9);
@@ -1877,6 +1936,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                                texture3d<ushort> voxOcc [[texture(18)]], texture3d<uint> voxShape [[texture(19)]],
                                texture3d<ushort> voxOccSlot [[texture(20)]],
                                device atomic_uint* voxStats [[buffer(21)]],
+                               texture2d<float> glassDepth [[texture(21)]], texture2d<float> glassColor [[texture(22)]],
                                sampler cmp [[sampler(0)]], sampler lin [[sampler(1)]],
                                sampler rep [[sampler(3)]], sampler wrep [[sampler(4)]],
                                instance_acceleration_structure tlas [[buffer(10), function_constant(ac_rt)]],
@@ -1901,7 +1961,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
         // from the eye (camera-relative positions are relative to the view entity's feet)
         float3 eyeVox = fr.voxCam.xyz + (fr.invView * float4(0.0, 0.0, 0.0, 1.0)).xyz;
         VoxHit vh = voxTrace(fr, vox, voxShape, voxOcc, voxOccSlot, voxAtlas, eyeVox, dirWorld, 128.0, float2(0.0, pixelAngle(fr)));
-        return float4(vh.hit ? voxShade(fr, voxAtlas, shadowMap, cmp, skyLut, lin, vh) : skyBase(fr, skyLut, lin, dirWorld), 1.0);
+        return float4(vh.hit ? voxShade(fr, voxAtlas, shadowMap, cmp, skyLut, lin, vh, glassDepth, glassColor) : skyBase(fr, skyLut, lin, dirWorld), 1.0);
     }
     if (d >= 1.0) {
         float3 sky = skyRadiance(fr, skyLut, lin, dirWorld, cloudMap);
@@ -1963,6 +2023,11 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                        waterCaustics(fr, waveTex, wrep, entry.xz, wpX, wpY, waterPath);
         }
     }
+    // light through stained glass on its way here takes its colour: all the sunlight, and the
+    // sky light in part (glass towards the sun mostly means a glass roof or window overhead)
+    float3 glassT = glassTransmit(fr, glassDepth, glassColor, world + nWorld * 0.02);
+    waterSun *= glassT;
+    float3 skyTint = mix(float3(1.0), glassT, 0.7);
     float3 color = float3(0);
     float3 lightDir = fr.sunDirView.w > 0.0 ? fr.sunDirView.xyz : fr.moonDirView.xyz;
     float3 lightCol = fr.sunDirView.w > 0.0 ? fr.sunColor.rgb : fr.moonColor.rgb;
@@ -2032,9 +2097,9 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                 envCol = mix(skyRadiance(fr, skyLut, lin, Rh, cloudMap, false), envCol, smoothstep(0.02, 0.25, rough));
         }
         envCol *= mix(1.0, 0.3, saturate(-Rw.y * 2.5));
-        float3 skyVis = float3(skyLight * skyLight * ao * fr.ambient.a);
+        float3 skyVis = skyLight * skyLight * ao * fr.ambient.a * skyTint;
         if (fr.flags.x & (ADV_RT_GI | ADV_WSGI))
-            color += albedo * (1.0 - metal) * giTex.sample(lin, in.uv).rgb * ao;   // traced sky light + bounce
+            color += albedo * (1.0 - metal) * giTex.sample(lin, in.uv).rgb * ao * skyTint;   // traced sky light + bounce
         else
             color += albedo * (1.0 - metal) * skyAmbient(fr, skyLut, lin, nWorld) * skyVis;
         if (waterPath > 0.0)
@@ -2092,7 +2157,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                             atomic_fetch_add_explicit(&voxStats[1], 1u, memory_order_relaxed);
                         }
                         if (vh.hit) {
-                            traced = voxShade(fr, voxAtlas, shadowMap, cmp, skyLut, lin, vh);
+                            traced = voxShade(fr, voxAtlas, shadowMap, cmp, skyLut, lin, vh, glassDepth, glassColor);
                             float hd = length(Rrw * vh.t + world);
                             float hf = saturate((hd - fr.fog.x) / max(fr.fog.y - fr.fog.x, 1.0));
                             traced = mix(traced, skyBase(fr, skyLut, lin, Rrw), hf * hf);
@@ -2131,7 +2196,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     // debug views: 1 no fog, 2 albedo, 3 normals, 4 white albedo lighting, 5 shadow term, 6 RT shadow,
     // 7 sunlight's path through water (yellow shallow, red deep), 8 lightmap (red sky, green block),
     // 9 (above) the voxel volume of world-space reflections; 10 renders normally and logs the
-    // world-space reflection steps per ray
+    // world-space reflection steps per ray; 12 the light let through stained glass
     uint dbg = fr.flags.w;
     if (dbg == 1) return float4(color, 1.0);
     if (dbg == 2) return float4(albedo, 1.0);
@@ -2141,6 +2206,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     if (dbg == 6) return float4(float3(rtShadow), 1.0);
     if (dbg == 7) return float4(waterPath > 0.0 ? float3(1.0, 1.0 - saturate(waterPath / 16.0), 0.2) : float3(0.0), 1.0);
     if (dbg == 8) return float4(skyLight, blockL, 0.0, 1.0);    // G-buffer lightmap: red sky, green block
+    if (dbg == 12) return float4(glassTransmit(fr, glassDepth, glassColor, world + nWorld * 0.02), 1.0);   // light through glass
 
     float dist = length(eye);
     if (fr.fog.w > 1.5) {
@@ -2386,6 +2452,7 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
                                texture2d<float> gLight [[texture(10)]],
                                texture3d<ushort> vox [[texture(11)]], texture3d<ushort> voxOcc [[texture(12)]],
                                texture3d<uint> voxShape [[texture(13)]], texture3d<ushort> voxOccSlot [[texture(14)]],
+                               texture2d<float> glassDepth [[texture(15)]], texture2d<float> glassColor [[texture(16)]],
                                instance_acceleration_structure tlas [[buffer(10), function_constant(ac_rt)]],
                                device const RtInstance* rtInst [[buffer(11), function_constant(ac_rt)]],
                                primitive_acceleration_structure entAs [[buffer(12), function_constant(ac_rt)]],
@@ -2405,6 +2472,7 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
     float3 Lw = sunUp ? fr.sunDirWorld.xyz : -fr.sunDirWorld.xyz;
     float ndl = saturate(dot(n, lightDir));
     float shadow = (fr.flags.x & ADV_SHADOWS) ? sampleShadow(fr, shadowMap, cmp, in.world, nWorld, ndl) : 1.0;
+    lightCol *= glassTransmit(fr, glassDepth, glassColor, in.world + nWorld * 0.02);   // through stained glass
     float skyGate = smoothstep(0.35, 0.9, in.lm.y);
     float2 px = in.position.xy;
     uint2 ipx = uint2(px);
@@ -2571,7 +2639,7 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
             // nothing (along the screen-space ray, so the two agree where they meet)
             VoxHit vh = voxTrace(fr, vox, voxShape, voxOcc, voxOccSlot, atlas, in.world + fr.voxCam.xyz + nWorld * 0.02, Rs, REFL_TUNE2.z, float2(dist, 1.0) * pixelAngle(fr));
             if (vh.hit) {
-                float3 hc = voxShade(fr, atlas, shadowMap, cmp, skyLut, lin, vh);
+                float3 hc = voxShade(fr, atlas, shadowMap, cmp, skyLut, lin, vh, glassDepth, glassColor);
                 float hd = length(vh.t * Rs + in.world);
                 float hf = saturate((hd - fr.fog.x) / max(fr.fog.y - fr.fog.x, 1.0));
                 refl = mix(mix(hc, skyBase(fr, skyLut, lin, Rs), hf * hf), refl, hit.z);
@@ -2609,6 +2677,7 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
 fragment float4 volumetric_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
                                     depth2d<float> depth [[texture(0)]], texture2d<float> gLinZ [[texture(1)]],
                                     depth2d<float> shadowMap [[texture(2)]], texture3d<float> cloudNoise [[texture(3)]],
+                                    texture2d<float> glassDepth [[texture(4)]], texture2d<float> glassColor [[texture(5)]],
                                     sampler cmp [[sampler(0)]], sampler rep [[sampler(1)]]) {
     uint2 fp = min(uint2(in.position.xy * 2.0), uint2(fr.screen.xy) - 1);
     float d = depth.read(fp);
@@ -2629,7 +2698,8 @@ fragment float4 volumetric_fragment(FullscreenOut in [[stage_in]], constant AdvF
     const int N = 16;
     float dt = dist / N;
     float jit = fract(hash12(in.position.xy) + float(fr.flags.z % 64u) * 0.618034);
-    float vis = 0.0, T = 1.0;
+    float3 vis = float3(0.0);
+    float T = 1.0;
     for (int i = 0; i < N; i++) {
         float3 pEye = dirEye * ((i + jit) * dt);
         float3 world = (fr.invView * float4(pEye, 1.0)).xyz;
@@ -2637,7 +2707,8 @@ fragment float4 volumetric_fragment(FullscreenOut in [[stage_in]], constant AdvF
         float3 sn = sc.xyz / sc.w;
         float2 uv = float2(sn.x * 0.5 + 0.5, 0.5 - sn.y * 0.5);
         float v = (any(uv < 0.0) || any(uv > 1.0)) ? 1.0 : shadowMap.sample_compare(cmp, uv, sn.z - 0.0005);
-        vis += v * T * dt;
+        // light shafts through stained glass take its colour
+        vis += v * glassTransmit(fr, glassDepth, glassColor, world) * T * dt;
         T *= exp(-sigma * dt);
     }
     float clouds = (fr.flags.x & ADV_CLOUDS) ? cloudShadow(fr, cloudNoise, rep, fr.camera.xyz + dirWorld * dist * 0.5, L) : 1.0;

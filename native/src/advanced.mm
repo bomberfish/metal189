@@ -77,8 +77,10 @@ struct Targets {
 
 struct State {
     bool init = false;
-    id<MTLRenderPipelineState> gTerrain[4], gGeneric[2], shadowTerrain[4], shadowGeneric[2], shadowWater;
+    id<MTLRenderPipelineState> gTerrain[4], gGeneric[2], shadowTerrain[4], shadowGeneric[2], shadowWater, shadowGlass;
     id<MTLTexture> waterShadow;          // water surfaces in light space (half the shadow map's resolution)
+    id<MTLTexture> glassDepth, glassColor;   // tinted translucents in light space: nearest depth, light let through
+    int glassRes = 0;
     int waterShadowRes = 0;
     id<MTLRenderPipelineState> lightPso[2], waterPso[2], tonemapPso, bloomDown, bloomUp, skyLutPso, taaPso, cloudsPso;
     // volumetric clouds
@@ -166,6 +168,20 @@ bool initState() {
         sd.fragmentFunction = fn(@"shadow_water_fragment");
         sd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
         S.shadowWater = pso(sd);
+    }
+    {
+        // coloured shadows: nearest translucent depth (min) and the light passing them all (multiplied)
+        MTLRenderPipelineDescriptor* sd = [MTLRenderPipelineDescriptor new];
+        sd.vertexFunction = fn(@"shadow_glass_vertex");
+        sd.fragmentFunction = fn(@"shadow_glass_fragment");
+        sd.colorAttachments[0].pixelFormat = MTLPixelFormatR32Float;
+        sd.colorAttachments[0].blendingEnabled = YES;
+        sd.colorAttachments[0].rgbBlendOperation = sd.colorAttachments[0].alphaBlendOperation = MTLBlendOperationMin;
+        sd.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        sd.colorAttachments[1].blendingEnabled = YES;
+        sd.colorAttachments[1].sourceRGBBlendFactor = sd.colorAttachments[1].sourceAlphaBlendFactor = MTLBlendFactorDestinationColor;
+        sd.colorAttachments[1].destinationRGBBlendFactor = sd.colorAttachments[1].destinationAlphaBlendFactor = MTLBlendFactorZero;
+        S.shadowGlass = pso(sd);
     }
     for (int i = 0; i < 2; i++) {
         S.gGeneric[i] = pso(gbufDesc(fn(@"gbuf_generic_vertex", i), fn(@"gbuf_generic_fragment", i)));
@@ -425,6 +441,19 @@ void ensureWaterShadow(int res) {
     S.waterShadow = [device() newTextureWithDescriptor:d];
     S.waterShadow.label = @"water shadow";
     S.waterShadowRes = res;
+}
+
+void ensureGlassShadow(int res) {
+    if (S.glassDepth && S.glassRes == res) return;
+    MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float width:res height:res mipmapped:NO];
+    d.storageMode = MTLStorageModePrivate;
+    d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    S.glassDepth = [device() newTextureWithDescriptor:d];
+    S.glassDepth.label = @"glass shadow depth";
+    d.pixelFormat = MTLPixelFormatRGBA8Unorm;
+    S.glassColor = [device() newTextureWithDescriptor:d];
+    S.glassColor.label = @"glass shadow colour";
+    S.glassRes = res;
 }
 
 void ensureShadowMap(int res) {
@@ -797,6 +826,46 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             features |= ADV_WATER_SHADOW;
             fr.flags.x = features;
         }
+
+        // ---- glass shadow map: stained glass and other tinted translucents colour the light ----
+        TexEntry* atlasG = texture(w.atlasTex);
+        if (g_tuning[63] > 0.5f && S.shadowGlass && atlasG && atlasG->tex) {
+            ensureGlassShadow(std::max(512, shadowRes / 2));
+            MTLRenderPassDescriptor* gp = [MTLRenderPassDescriptor renderPassDescriptor];
+            gp.colorAttachments[0].texture = S.glassDepth;
+            gp.colorAttachments[0].loadAction = MTLLoadActionClear;
+            gp.colorAttachments[0].clearColor = MTLClearColorMake(1, 1, 1, 1);
+            gp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            gp.colorAttachments[1].texture = S.glassColor;
+            gp.colorAttachments[1].loadAction = MTLLoadActionClear;
+            gp.colorAttachments[1].clearColor = MTLClearColorMake(1, 1, 1, 1);
+            gp.colorAttachments[1].storeAction = MTLStoreActionStore;
+            profRender(gp, "glass shadow");
+            id<MTLRenderCommandEncoder> ge = [cb renderCommandEncoderWithDescriptor:gp];
+            ge.label = @"glass shadow";
+            [ge setRenderPipelineState:S.shadowGlass];
+            [ge setCullMode:MTLCullModeNone];
+            [ge setVertexBytes:&fr length:sizeof fr atIndex:1];
+            [ge setVertexBuffer:g_materials offset:0 atIndex:5];
+            [ge setFragmentTexture:atlasG->tex atIndex:0];
+            [ge setFragmentSamplerState:S.pointClamp atIndex:0];
+            for (const auto& kv : allSections()) {
+                const Section* s = &kv.second;
+                if (!s->layers[3]) continue;
+                float tx = (float)(s->ox - camX), ty = (float)(s->oy - camY), tz = (float)(s->oz - camZ);
+                if (fabsf(tx + 8) > cullReach || fabsf(tz + 8) > cullReach) continue;
+                if (outsideShadowBox(tx, ty, tz)) continue;
+                simd_float4 off = simd_make_float4(tx, ty, tz, 0);
+                [ge setVertexBytes:&off length:sizeof off atIndex:4];
+                [ge setVertexBuffer:s->layers[3] offset:0 atIndex:0];
+                uint32_t quads = s->vertices[3] / 4;
+                [ge drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:quads * 6 indexType:MTLIndexTypeUInt32
+                              indexBuffer:quadIndices(quads) indexBufferOffset:0];
+            }
+            [ge endEncoding];
+            features |= ADV_GLASS_SHADOW;
+            fr.flags.x = features;
+        }
     }
 
     // ---- G-buffer ----
@@ -987,6 +1056,8 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             [e setFragmentTexture:vox.occ atIndex:18];
             [e setFragmentTexture:vox.shape atIndex:19];
             [e setFragmentTexture:vox.occSlot atIndex:20];
+            [e setFragmentTexture:(features & ADV_GLASS_SHADOW) ? S.glassDepth : S.t.linZ atIndex:21];
+            [e setFragmentTexture:(features & ADV_GLASS_SHADOW) ? S.glassColor : S.t.linZ atIndex:22];
         }
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [e endEncoding];
@@ -1112,6 +1183,8 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             }
             [e setFragmentBuffer:stats offset:0 atIndex:21];
         }
+        [e setFragmentTexture:(features & ADV_GLASS_SHADOW) ? S.glassDepth : S.t.linZ atIndex:21];
+        [e setFragmentTexture:(features & ADV_GLASS_SHADOW) ? S.glassColor : S.t.linZ atIndex:22];
         {
             TexEntry* atlasL = texture(w.atlasTex);
             [e setFragmentTexture:atlasL && atlasL->tex ? atlasL->tex : S.t.albedo atIndex:17];
@@ -1205,6 +1278,8 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             [e setFragmentTexture:vox.shape atIndex:13];
             [e setFragmentTexture:vox.occSlot atIndex:14];
         }
+        [e setFragmentTexture:(features & ADV_GLASS_SHADOW) ? S.glassDepth : S.t.linZ atIndex:15];
+        [e setFragmentTexture:(features & ADV_GLASS_SHADOW) ? S.glassColor : S.t.linZ atIndex:16];
         TexEntry* atlas = texture(w.atlasTex);
         if (atlas && atlas->tex) [e setFragmentTexture:atlas->tex atIndex:0];
         const uint32_t* sp = w.layerSampler[3];
@@ -1241,6 +1316,8 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [e setFragmentTexture:S.t.linZ atIndex:1];
         [e setFragmentTexture:S.shadowMap atIndex:2];
         [e setFragmentTexture:S.cloudNoise atIndex:3];
+        [e setFragmentTexture:(features & ADV_GLASS_SHADOW) ? S.glassDepth : S.t.linZ atIndex:4];
+        [e setFragmentTexture:(features & ADV_GLASS_SHADOW) ? S.glassColor : S.t.linZ atIndex:5];
         [e setFragmentSamplerState:S.shadowCmp atIndex:0];
         [e setFragmentSamplerState:S.repeatLinear atIndex:1];
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
