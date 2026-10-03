@@ -7,6 +7,7 @@
 #import "engine.h"
 #import "commands.h"
 #import "resources.h"
+#import "advanced.h"
 #include <unordered_map>
 #include <cstring>
 
@@ -413,6 +414,7 @@ struct Exec {
     int lastFormat = -1;
     bool lastTerrain = false;
     bool lastOk = false;
+    bool advReplay = false;  // replaying a world segment already rendered by the advanced pipeline
     // batch of merged arena draws
     bool batchOpen = false;
     PrimClass batchClass = PC_TRI;
@@ -1011,6 +1013,146 @@ static simd_float4x4 normalMatrix(const simd_float4x4& mv) {
 
 } // namespace
 
+// Opaque captured geometry the advanced pipeline renders itself (G-buffer + shadows).
+static bool advConsumes(const GLMirror& m, uint32_t phase, uint32_t prim) {
+    return phase == PH_ENTITIES && prim == 7 && !m.pipe.blend && m.depth.test && m.depth.mask && !m.pipe.logicOn &&
+           m.units[0].enabled && m.units[0].tex;
+}
+
+static void applyState(GLMirror& m, const CmdHeader* h) {
+    switch (h->op) {
+        case OP_STATE_PIPE: m.pipe = payload<PipeState>(h); break;
+        case OP_STATE_DEPTH: m.depth = payload<DepthState>(h); break;
+        case OP_STATE_RASTER: m.raster = payload<RasterState>(h); break;
+        case OP_STATE_FRAG: m.frag = payload<FragState>(h); break;
+        case OP_STATE_UNITS: memcpy(m.units, h + 1, sizeof m.units); break;
+        case OP_STATE_TEXGEN: m.texgen = payload<TexGenState>(h); break;
+        case OP_STATE_LIGHT: m.light = payload<LightState>(h); break;
+        case OP_STATE_ATTRIB: m.attrib = payload<AttribState>(h); break;
+        case OP_STATE_VIEWPORT: m.vp = payload<ViewportState>(h); break;
+        case OP_MATRIX: {
+            const uint32_t which = *(const uint32_t*)(h + 1);
+            simd_float4x4 mm = loadMatrix((const float*)(h + 1) + 1);
+            if (which == 0) { m.mv = mm; m.normal = normalMatrix(mm); }
+            else if (which == 1) m.proj = mm;
+            else if (which - 2 < 3) m.tex[which - 2] = mm;
+            break;
+        }
+        default: break;
+    }
+}
+
+// Scans the world segment (up to WORLD_END) and collects what the advanced
+// pipeline renders: terrain lists, opaque captured geometry, environment and
+// the world's render target.
+static void advCollect(Exec& x, CmdReader rd, AdvWorld& w, TargetCmd& target, bool& haveTarget) {
+    GLMirror m = g;
+    uint32_t phase = PH_WORLD_BEGIN;
+    bool sampledLayer[4] = {false, false, false, false};
+    while (const CmdHeader* h = rd.next()) {
+        switch (h->op) {
+            case OP_PHASE:
+                phase = payload<uint32_t>(h);
+                if (phase == PH_WORLD_END) return;
+                break;
+            case OP_ENV: w.env = payload<EnvCmd>(h); w.hasEnv = true; w.view = loadMatrix(w.env.view); w.proj = loadMatrix(w.env.proj); break;
+            case OP_TARGET:
+                if (w.terrain[0].empty()) { target = payload<TargetCmd>(h); haveTarget = true; }
+                break;
+            case OP_TERRAIN: {
+                const TerrainCmd& t = payload<TerrainCmd>(h);
+                if (t.layer > 3) break;
+                const TerrainEntry* e = (const TerrainEntry*)((const uint8_t*)(h + 1) + sizeof(TerrainCmd));
+                for (uint32_t i = 0; i < t.count; i++) w.terrain[t.layer].push_back({e[i].section, e[i].x, e[i].y, e[i].z});
+                if (!sampledLayer[t.layer]) {
+                    sampledLayer[t.layer] = true;
+                    w.atlasTex = (int)m.units[0].tex;
+                    const UnitState& u = m.units[0];
+                    uint32_t* sp = w.layerSampler[t.layer];
+                    sp[0] = u.minFilter; sp[1] = u.magFilter; sp[2] = u.wrapS; sp[3] = u.wrapT; sp[4] = u.maxLevel;
+                    memcpy(&sp[5], &u.minLod, 4); memcpy(&sp[6], &u.maxLod, 4); memcpy(&sp[7], &u.aniso, 4);
+                    if (t.layer == 0) {
+                        w.fogStart = m.frag.fogStart;
+                        w.fogEnd = m.frag.fogEnd;
+                        memcpy(w.fogColor, m.frag.fogColor, sizeof w.fogColor);
+                    }
+                }
+                break;
+            }
+            case OP_DRAW: case OP_DRAW_MESH: {
+                uint32_t prim = h->op == OP_DRAW ? payload<DrawCmd>(h).prim : payload<DrawMeshCmd>(h).prim;
+                if (!advConsumes(m, phase, prim)) break;
+                AdvGeometry gm{};
+                if (h->op == OP_DRAW) {
+                    const DrawCmd& d = payload<DrawCmd>(h);
+                    const VertexLayout* L = layout((int)d.format);
+                    if (!L || L->stride.x == 0 || d.chunk >= x.fr->arenas.size()) break;
+                    gm.vb = x.fr->arenas[d.chunk];
+                    gm.vbOffset = 0;
+                    gm.firstVertex = d.offset / L->stride.x;
+                    gm.format = (int)d.format;
+                    gm.count = d.count;
+                } else {
+                    const DrawMeshCmd& d = payload<DrawMeshCmd>(h);
+                    gm.vb = mesh((int)d.mesh);
+                    if (!gm.vb) break;
+                    gm.vbOffset = d.offset;
+                    gm.format = (int)d.format;
+                    gm.count = d.count;
+                }
+                gm.prim = prim;
+                gm.mv = m.mv;
+                gm.normal = m.normal;
+                gm.texMat = m.tex[0];
+                gm.tex = (int)m.units[0].tex;
+                const UnitState& u = m.units[0];
+                gm.sampler[0] = u.minFilter; gm.sampler[1] = u.magFilter; gm.sampler[2] = u.wrapS; gm.sampler[3] = u.wrapT;
+                gm.sampler[4] = u.maxLevel;
+                memcpy(&gm.sampler[5], &u.minLod, 4); memcpy(&gm.sampler[6], &u.maxLod, 4); memcpy(&gm.sampler[7], &u.aniso, 4);
+                gm.alphaTest = m.frag.alphaTest && m.frag.alphaFunc != 0x207;
+                gm.alphaRef = m.frag.alphaRef;
+                gm.cull = m.raster.cull;
+                gm.cullFace = m.raster.cullFace;
+                gm.frontFace = m.raster.frontFace;
+                gm.item.color = v4(m.attrib.color);
+                gm.item.normal = simd_make_float4(m.attrib.normal[0], m.attrib.normal[1], m.attrib.normal[2], 0);
+                gm.item.lightmap = simd_make_float4(m.attrib.tex1[0], m.attrib.tex1[1], 0, 0);
+                gm.item.alpha = simd_make_float4(m.frag.alphaRef, (float)(m.frag.alphaFunc - 0x200), 0, 7);
+                w.geometry.push_back(gm);
+                break;
+            }
+            default:
+                applyState(m, h);
+                break;
+        }
+    }
+}
+
+static void advRenderWorld(Exec& x, CmdReader rd) {
+    AdvWorld w;
+    // The world normally renders into whatever is bound at WORLD_BEGIN (Minecraft's framebuffer).
+    TargetCmd target{x.cur.fbo, x.cur.colorId, x.cur.depthId};
+    bool haveTarget = x.cur.valid;
+    advCollect(x, rd, w, target, haveTarget);
+    if (!w.hasEnv || !haveTarget || w.terrain[0].empty()) return;
+    id<MTLTexture> color = nil, depth = nil;
+    if (target.fbo == 0) {
+        ensureScreenTargets();
+        color = engine().screenColor;
+        depth = engine().screenDepth;
+    } else {
+        TexEntry* c = texture((int)target.colorTex);
+        color = c ? c->tex : nil;
+        if (target.depth & 0x40000000) { TexEntry* r = renderbuffer(target.depth & 0x3FFFFFFF); depth = r ? r->tex : nil; }
+        else if (target.depth) { TexEntry* d = texture((int)target.depth); depth = d ? d->tex : nil; }
+    }
+    if (!color || !depth) return;
+    endPass(x);
+    advancedRender(x.cb, w, color, depth);
+    x.advReplay = true;
+    if (target.fbo == 0) engine().screenDirty = true;
+}
+
 void executeFrame(id<MTLCommandBuffer> cb, const uint8_t* cmds, size_t len) {
     Exec x;
     x.cb = cb;
@@ -1037,13 +1179,27 @@ void executeFrame(id<MTLCommandBuffer> cb, const uint8_t* cmds, size_t len) {
                 break;
             }
             case OP_TARGET: flushBatch(x); resolveTarget(x, payload<TargetCmd>(h)); x.stateDirty = true; break;
-            case OP_CLEAR: doClear(x, payload<ClearCmd>(h)); break;
-            case OP_DRAW: drawArena(x, payload<DrawCmd>(h)); break;
-            case OP_DRAW_MESH: drawMesh(x, payload<DrawMeshCmd>(h)); break;
+            case OP_CLEAR:
+                if (x.advReplay && (g_phase == PH_WORLD_BEGIN || g_phase == PH_SKY)) break;
+                doClear(x, payload<ClearCmd>(h));
+                break;
+            case OP_DRAW:
+                if (x.advReplay && (g_phase == PH_SKY || advConsumes(g, g_phase, payload<DrawCmd>(h).prim))) break;
+                drawArena(x, payload<DrawCmd>(h));
+                break;
+            case OP_DRAW_MESH:
+                if (x.advReplay && (g_phase == PH_SKY || advConsumes(g, g_phase, payload<DrawMeshCmd>(h).prim))) break;
+                drawMesh(x, payload<DrawMeshCmd>(h));
+                break;
             case OP_COPY_TEX: copyTex(x, payload<CopyTexCmd>(h)); break;
-            case OP_PHASE: flushBatch(x); g_phase = payload<uint32_t>(h); break;
+            case OP_PHASE:
+                flushBatch(x);
+                g_phase = payload<uint32_t>(h);
+                if (g_phase == PH_WORLD_BEGIN && advancedEnabled()) advRenderWorld(x, rd);
+                if (g_phase == PH_WORLD_END) x.advReplay = false;
+                break;
             case OP_ENV: g_env = payload<EnvCmd>(h); g_envValid = true; break;
-            case OP_TERRAIN: drawTerrain(x, h); break;
+            case OP_TERRAIN: if (!x.advReplay) drawTerrain(x, h); break;
             default: break;
         }
     }

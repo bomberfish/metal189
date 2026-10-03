@@ -35,7 +35,10 @@ public final class Phases {
         Mem.putInt(p, phase);
     }
 
-    public static void worldBegin() { begin(WORLD_BEGIN); }
+    public static void worldBegin() {
+        Pipeline.ensureApplied();
+        begin(WORLD_BEGIN);
+    }
     public static void worldEnd() { begin(WORLD_END); begin(UI); }
     public static void sky() { begin(SKY); }
     public static void clouds() { begin(CLOUDS); }

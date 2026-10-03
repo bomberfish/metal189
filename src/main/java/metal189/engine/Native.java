@@ -94,6 +94,9 @@ public final class Native {
     public static native void setOption(int key, int value);
     public static native void sectionUpload(int id, int layer, long data, int bytes, int vertexCount);
     public static native void sectionDelete(int id);
+    public static native void advSetEnabled(boolean on);
+    public static native void advSetFeatures(int flags);
+    public static native void advSetTables(long materials, long emissions);
 
     // ---- window / input ----
     public static native boolean windowCreate(int w, int h, String title, int flags);

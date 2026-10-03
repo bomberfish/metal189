@@ -2,6 +2,7 @@
 
 #import "engine.h"
 #import "resources.h"
+#import "advanced.h"
 
 namespace m189 {
 void texGetImage(int id, int level, int format, int type, void* dst, size_t size);
@@ -118,6 +119,11 @@ static void JNICALL n_sectionUpload(JNIEnv*, jclass, jint id, jint layer, jlong 
     @autoreleasepool { sectionUpload(id, layer, ptr(data), (size_t)bytes, (uint32_t)count); }
 }
 static void JNICALL n_sectionDelete(JNIEnv*, jclass, jint id) { sectionDelete(id); }
+static void JNICALL n_advSetEnabled(JNIEnv*, jclass, jboolean on) { advancedSetEnabled(on); }
+static void JNICALL n_advSetFeatures(JNIEnv*, jclass, jint f) { advancedSetFeatures((uint32_t)f); }
+static void JNICALL n_advSetTables(JNIEnv*, jclass, jlong mat, jlong emi) {
+    @autoreleasepool { advancedSetTables((const uint8_t*)ptr(mat), (const uint8_t*)ptr(emi)); }
+}
 static void JNICALL n_renderbufferStorage(JNIEnv*, jclass, jint id, jint fmt, jint w, jint h) { @autoreleasepool { renderbufferStorage(id, fmt, w, h); } }
 
 static JNINativeMethod kMethods[] = {
@@ -155,6 +161,9 @@ static JNINativeMethod kMethods[] = {
     {(char*)"setOption", (char*)"(II)V", (void*)n_setOption},
     {(char*)"sectionUpload", (char*)"(IIJII)V", (void*)n_sectionUpload},
     {(char*)"sectionDelete", (char*)"(I)V", (void*)n_sectionDelete},
+    {(char*)"advSetEnabled", (char*)"(Z)V", (void*)n_advSetEnabled},
+    {(char*)"advSetFeatures", (char*)"(I)V", (void*)n_advSetFeatures},
+    {(char*)"advSetTables", (char*)"(JJ)V", (void*)n_advSetTables},
 };
 
 // The Java side calls System.load on this library and then Native.register(),
