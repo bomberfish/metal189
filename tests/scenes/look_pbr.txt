@@ -1,0 +1,32 @@
+sleep 3
+world flat2 42 flat
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /time set 1800
+cmd /weather clear
+cmd /tp @p -300.5 6 -293.5 200 15
+sleep 4
+cmd /kill @e[type=!Player]
+cmd /fill -312 4 -312 -288 12 -288 air
+cmd /fill -312 3 -312 -288 3 -288 stone
+cmd /fill -306 3 -300 -294 3 -296 sand
+cmd /fill -306 4 -302 -306 6 -302 stone
+cmd /fill -305 4 -302 -305 6 -302 cobblestone
+cmd /fill -304 4 -302 -304 6 -302 stonebrick
+cmd /fill -303 4 -302 -303 6 -302 planks
+cmd /fill -302 4 -302 -302 6 -302 brick_block
+cmd /fill -301 4 -302 -301 6 -302 iron_block
+cmd /fill -300 4 -302 -300 6 -302 gold_block
+cmd /fill -299 4 -302 -299 6 -302 diamond_block
+cmd /fill -298 4 -302 -298 6 -302 quartz_block
+cmd /fill -297 4 -302 -297 6 -302 obsidian
+cmd /fill -296 4 -302 -296 6 -302 log
+cmd /fill -295 4 -302 -295 6 -302 gravel
+sleep 3
+capture CAPTURE_A
+resourcepack metal189_test_pbr.zip
+sleep 6
+capture CAPTURE_B
+quit

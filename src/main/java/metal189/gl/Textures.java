@@ -49,6 +49,17 @@ public final class Textures {
 
     public static boolean isTexture(int id) { return textures.containsKey(id); }
 
+    /** Size of a level as last specified by texImage2D (0 if unknown). */
+    public static int width(int id, int level) {
+        Tex t = textures.get(id);
+        return t == null || level < 0 || level >= 16 ? 0 : t.w[level];
+    }
+
+    public static int height(int id, int level) {
+        Tex t = textures.get(id);
+        return t == null || level < 0 || level >= 16 ? 0 : t.h[level];
+    }
+
     public static void bind(int target, int id) {
         if (target != GL_TEXTURE_2D) return;
         if (id != 0 && !textures.containsKey(id)) textures.put(id, new Tex(id)); // bind creates the name

@@ -98,6 +98,7 @@ public final class Native {
     public static native void advSetFeatures(int flags);
     public static native void advSetTables(long materials, long emissions);
     public static native boolean rtSupported();
+    public static native void advSetPbr(int normalTex, int specularTex);
 
     // ---- window / input ----
     public static native boolean windowCreate(int w, int h, String title, int flags);

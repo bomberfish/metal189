@@ -55,6 +55,7 @@ struct GBufferOut {
     float4 normal [[color(1)]];   // xyz: eye-space normal, w: emission
     float4 light  [[color(2)]];   // x: block light, y: sky light, z: material/255, w: roughness
     float linZ    [[color(3)]];   // eye-space depth (-z), exact position reconstruction
+    float4 spec   [[color(4)]];   // LabPBR: x F0 / metal id, y porosity/SSS, z 1 if the surface has material data
 };
 
 // ---------------------------------------------------------------------------
@@ -70,6 +71,8 @@ struct GTerrainOut {
     uint material [[flat]];
     float emission [[flat]];
     float eyeZ;
+    float3 tangentView [[flat]];    // d(position)/du of the quad, eye space
+    float3 bitangentView [[flat]];  // d(position)/dv
 };
 
 static float3 quadNormal(device const BlockVertex* verts, uint vid) {
@@ -125,11 +128,26 @@ vertex GTerrainOut gbuf_terrain_vertex(uint vid [[vertex_id]],
     o.material = mat;
     o.emission = float(emissions[state]) * (1.0 / 255.0);
     o.eyeZ = -eye.z;
+    // tangent frame from the quad's positions and atlas coordinates (normal mapping)
+    {
+        uint b = vid & ~3u;
+        float3 p0 = float3(verts[b].pos), p1 = float3(verts[b + 1].pos), p2 = float3(verts[b + 2].pos);
+        float2 t0 = float2(verts[b].uv), t1 = float2(verts[b + 1].uv), t2 = float2(verts[b + 2].uv);
+        float3 e1 = p1 - p0, e2 = p2 - p0;
+        float2 d1 = t1 - t0, d2 = t2 - t0;
+        float det = d1.x * d2.y - d1.y * d2.x;
+        float r = fabs(det) > 1e-12 ? 1.0 / det : 0.0;
+        float3 T = (e1 * d2.y - e2 * d1.y) * r, B = (e2 * d1.x - e1 * d2.x) * r;
+        o.tangentView = (sectionMV * float4(T, 0)).xyz;
+        o.bitangentView = (sectionMV * float4(B, 0)).xyz;
+    }
     return o;
 }
 
 fragment GBufferOut gbuf_terrain_fragment(GTerrainOut in [[stage_in]], bool front [[front_facing]],
-                                          texture2d<float> atlas [[texture(0)]], sampler s [[sampler(0)]]) {
+                                          constant AdvFrame& fr [[buffer(1)]],
+                                          texture2d<float> atlas [[texture(0)]], sampler s [[sampler(0)]],
+                                          texture2d<float> nAtlas [[texture(1)]], texture2d<float> sAtlas [[texture(2)]]) {
     float4 t = atlas.sample(s, in.uv);
     if (ac_alphaTest && t.a * in.color.a < 0.1) discard_fragment();
     GBufferOut o;
@@ -139,8 +157,29 @@ fragment GBufferOut gbuf_terrain_fragment(GTerrainOut in [[stage_in]], bool fron
     o.albedo = float4(saturate(c), ao);
     float3 n = front ? in.normalView : -in.normalView;
     float emission = in.emission * smoothstep(0.35, 0.9, dot(t.rgb, float3(0.299, 0.587, 0.114)));
-    o.normal = float4(n, emission);
     float rough = in.material == 4 ? 0.3 : in.material == 2 ? 0.05 : 0.85;
+    o.spec = float4(0);
+    if (fr.flags.x & ADV_PBR) {
+        // LabPBR: _n = normal xy (OpenGL convention, +y up the texture), AO, height;
+        //         _s = smoothness, F0 (>= 230: metal), porosity/SSS, emission (255 = none)
+        float4 nm = nAtlas.sample(s, in.uv);
+        float2 xy = nm.rg * 2.0 - 1.0;
+        float3 ts = float3(xy, sqrt(saturate(1.0 - dot(xy, xy))));
+        float lt = length(in.tangentView), lb = length(in.bitangentView);
+        if (lt > 1e-8 && lb > 1e-8) {
+            float3 T = in.tangentView / lt, B = in.bitangentView / lb;
+            if (!front) { T = -T; B = -B; }
+            n = normalize(T * ts.x - B * ts.y + n * ts.z);
+        }
+        o.albedo.a *= nm.b;
+        float4 sp = sAtlas.sample(s, in.uv);
+        if (any(sp > 0.0)) {
+            rough = (1.0 - sp.r) * (1.0 - sp.r);
+            o.spec = float4(sp.g, sp.b, 1.0, 0.0);
+            if (sp.a < 254.5 / 255.0) emission = max(emission, sp.a);
+        }
+    }
+    o.normal = float4(n, emission);
     o.light = float4(in.lm.x, in.lm.y, float(in.material) / 255.0, rough);
     o.linZ = in.eyeZ;
     return o;
@@ -218,6 +257,7 @@ fragment GBufferOut gbuf_generic_fragment(GGenericOut in [[stage_in]], bool fron
     o.normal = float4(n, item.alpha.z);
     o.light = float4(in.lm.x, in.lm.y, item.alpha.w / 255.0, 0.7);
     o.linZ = in.eyeZ;
+    o.spec = float4(0);
     return o;
 }
 
@@ -768,6 +808,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                                texture2d<float> gLinZ [[texture(6)]],
                                texture2d<float> cloudMap [[texture(8)]],
                                texture3d<float> cloudNoise [[texture(9)]],
+                               texture2d<float> gSpec [[texture(10)]],
                                sampler cmp [[sampler(0)]], sampler lin [[sampler(1)]],
                                sampler rep [[sampler(3)]],
                                instance_acceleration_structure tlas [[buffer(10), function_constant(ac_rt)]],
@@ -800,6 +841,17 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     uint material = uint(lgt.z * 255.0 + 0.5);
     float skyLight = lgt.y, blockL = lgt.x, rough = lgt.w;
 
+    // material response: LabPBR data when present, otherwise per-material defaults
+    float4 spm = gSpec.read(px);
+    float metal = 0.0;
+    float3 F0 = float3(0.04);
+    if (spm.z > 0.5) {
+        if (spm.x >= 229.5 / 255.0) { metal = 1.0; F0 = albedo; }
+        else F0 = float3(spm.x);
+    } else if (material == 4) {
+        metal = 0.85;
+        F0 = mix(float3(0.04), albedo, metal);
+    }
     float3 color = float3(0);
     float3 lightDir = fr.sunDirView.w > 0.0 ? fr.sunDirView.xyz : fr.moonDirView.xyz;
     float3 lightCol = fr.sunDirView.w > 0.0 ? fr.sunColor.rgb : fr.moonColor.rgb;
@@ -820,19 +872,41 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
             if (fr.flags.x & ADV_SHADOWS) shadow *= sampleShadow(fr, shadowMap, cmp, world, nWorld, saturate(ndl));
         } else if (fr.flags.x & ADV_SHADOWS) shadow = sampleShadow(fr, shadowMap, cmp, world, nWorld, saturate(ndl));
         float skyGate = smoothstep(0.35, 0.9, skyLight); // no direct light deep inside caves
-        float3 h = normalize(lightDir + v);
-        float a2 = max(rough * rough, 0.002);
-        a2 *= a2;
-        float nh = saturate(dot(n, h));
-        float dd = nh * nh * (a2 - 1.0) + 1.0;
-        float spec = a2 / (3.14159 * dd * dd) * 0.04 * (1.0 - rough);
         if (fr.flags.x & ADV_CLOUDS) {
             float3 Lw = fr.sunDirView.w > 0.0 ? fr.sunDirWorld.xyz : -fr.sunDirWorld.xyz;
             shadow *= cloudShadow(fr, cloudNoise, rep, world + fr.camera.xyz, Lw);
         }
-        color += lightCol * (albedo * diffuse + spec * saturate(ndl)) * shadow * skyGate;
+        // Cook-Torrance: GGX distribution, Smith-Schlick visibility, Schlick Fresnel
+        float nl = saturate(ndl), nv = saturate(dot(n, v)) + 1e-4;
+        float3 h = normalize(lightDir + v);
+        float nh = saturate(dot(n, h)), vh = saturate(dot(v, h));
+        float a = max(rough * rough, 0.002), a2 = a * a;
+        float dd = nh * nh * (a2 - 1.0) + 1.0;
+        float D = a2 / (3.14159 * dd * dd);
+        float k = (rough + 1.0) * (rough + 1.0) * 0.125;
+        float G = (nl / (nl * (1.0 - k) + k)) * (nv / (nv * (1.0 - k) + k));
+        float3 F = F0 + (1.0 - F0) * pow(1.0 - vh, 5.0);
+        // lightCol is scaled so that Lambert is albedo * N.L; the specular lobe gets the matching pi
+        float3 specular = 3.14159 * D * G * F / (4.0 * nv);
+        color += lightCol * (albedo * diffuse * (1.0 - F) * (1.0 - metal) + specular * nl) * shadow * skyGate;
     }
-    color += albedo * skyAmbient(fr, skyLut, lin, nWorld) * (skyLight * skyLight) * ao * fr.ambient.a;
+    // sky light: diffuse irradiance + split-sum specular reflection (Lazarov's environment BRDF fit)
+    {
+        float nv = saturate(dot(n, v));
+        float4 c0 = float4(-1.0, -0.0275, -0.572, 0.022), c1 = float4(1.0, 0.0425, 1.04, -0.04);
+        float4 r4 = rough * c0 + c1;
+        float a004 = min(r4.x * r4.x, exp2(-9.28 * nv)) * r4.x + r4.y;
+        float2 env = float2(-1.04, 1.04) * a004 + r4.zw;
+        float3 R = reflect(-v, n);
+        float3 Rw = normalize((fr.invView * float4(R, 0)).xyz);
+        // reflected sky; below the horizon, a darkened horizon stands in for the ground
+        float3 envCol = fr.flags.y != 0 ? toLinear(fr.fogColor.rgb) * 0.3
+                                       : skyLut.sample(lin, lutUv(normalize(float3(Rw.x, max(Rw.y, 0.02), Rw.z))), level(rough * 6.0)).rgb;
+        envCol *= mix(1.0, 0.3, saturate(-Rw.y * 2.5));
+        float3 skyVis = float3(skyLight * skyLight * ao * fr.ambient.a);
+        color += albedo * (1.0 - metal) * skyAmbient(fr, skyLut, lin, nWorld) * skyVis;
+        color += envCol * (F0 * env.x + env.y) * skyVis;
+    }
     // block light fades in daylight (vanilla's lightmap is closer to max(sky, block) than a sum)
     float daySky = skyLight * skyLight * fr.sunDirWorld.w;
     color += albedo * fr.blockLight.rgb * pow(blockL, fr.blockLight.a) * ao * (1.0 - 0.75 * daySky);

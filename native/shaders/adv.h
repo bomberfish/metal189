@@ -44,6 +44,7 @@ struct AdvFrame {
 #define ADV_CLOUDS    (1u << 9)
 #define ADV_VOLUMETRIC (1u << 10)
 #define ADV_AUTOEXP   (1u << 11)
+#define ADV_PBR       (1u << 12)   // LabPBR material atlases bound
 
 // Per-item data for G-buffer/shadow draws of captured (non-terrain) geometry.
 struct AdvItem {

@@ -206,6 +206,19 @@ public final class TestDriver {
             case "slot":
                 if (mc.thePlayer != null) mc.thePlayer.inventory.currentItem = Integer.parseInt(a[1]);
                 return true;
+            case "resourcepack": {
+                // resourcepack NAME|none : select one pack and reload (options are not saved)
+                net.minecraft.client.resources.ResourcePackRepository repo = mc.getResourcePackRepository();
+                repo.updateRepositoryEntriesAll();
+                java.util.List<net.minecraft.client.resources.ResourcePackRepository.Entry> sel =
+                        new java.util.ArrayList<net.minecraft.client.resources.ResourcePackRepository.Entry>();
+                for (net.minecraft.client.resources.ResourcePackRepository.Entry e : repo.getRepositoryEntriesAll())
+                    if (e.getResourcePackName().equals(a[1])) sel.add(e);
+                if (sel.isEmpty() && !"none".equals(a[1])) Native.LOG.warn("metal189-test: no resource pack {}", a[1]);
+                repo.setRepositories(sel);
+                mc.refreshResources();
+                return true;
+            }
             case "toggle":
                 // same path as the toggle keybind (saves config/metal189.properties)
                 metal189.world.Pipeline.toggle();

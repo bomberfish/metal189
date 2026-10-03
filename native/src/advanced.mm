@@ -28,6 +28,12 @@ static float g_shadowDistance = 112.0f;
 static float g_exposure = 1.0f;
 static float g_bloomStrength = 1.0f;
 static bool g_waving = true;
+static int g_pbrNormal = 0, g_pbrSpecular = 0;
+
+void advancedSetPbr(int normalTex, int specularTex) {
+    g_pbrNormal = normalTex;
+    g_pbrSpecular = specularTex;
+}
 
 void advancedSetParam(int key, int value) {
     switch (key) {
@@ -54,7 +60,7 @@ namespace {
 
 struct Targets {
     int w = 0, h = 0;
-    id<MTLTexture> albedo, normal, light, linZ, hdr, sceneColor, sceneDepth, taa[2], vol;
+    id<MTLTexture> albedo, normal, light, linZ, spec, hdr, sceneColor, sceneDepth, taa[2], vol;
     std::vector<id<MTLTexture>> bloom;
 };
 
@@ -115,6 +121,7 @@ MTLRenderPipelineDescriptor* gbufDesc(id<MTLFunction> v, id<MTLFunction> f) {
     d.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Float;
     d.colorAttachments[2].pixelFormat = MTLPixelFormatRGBA8Unorm;
     d.colorAttachments[3].pixelFormat = MTLPixelFormatR32Float;
+    d.colorAttachments[4].pixelFormat = MTLPixelFormatRGBA8Unorm;
     d.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
     return d;
 }
@@ -298,6 +305,7 @@ void ensureTargets(int w, int h) {
     S.t.normal = rt(MTLPixelFormatRGBA16Float, w, h, @"gNormal");
     S.t.light = rt(MTLPixelFormatRGBA8Unorm, w, h, @"gLight");
     S.t.linZ = rt(MTLPixelFormatR32Float, w, h, @"gLinZ");
+    S.t.spec = rt(MTLPixelFormatRGBA8Unorm, w, h, @"gSpec");
     S.t.hdr = rt(MTLPixelFormatRGBA16Float, w, h, @"hdr");
     S.t.taa[0] = rt(MTLPixelFormatRGBA16Float, w, h, @"taa0");
     S.t.taa[1] = rt(MTLPixelFormatRGBA16Float, w, h, @"taa1");
@@ -481,6 +489,10 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
     if (env.dimension != 0 || !S.cloudsPso || !S.cloudNoiseKernel) features &= ~ADV_CLOUDS;
     if (!(features & ADV_SHADOWS) || !S.volPso) features &= ~ADV_VOLUMETRIC;
     if (!S.exposureKernel) features &= ~ADV_AUTOEXP;
+    TexEntry* pbrN = g_pbrNormal ? texture(g_pbrNormal) : nullptr;
+    TexEntry* pbrS = g_pbrSpecular ? texture(g_pbrSpecular) : nullptr;
+    if (pbrN && pbrN->tex && pbrS && pbrS->tex) features |= ADV_PBR;
+    else features &= ~ADV_PBR;
     bool cloudsOn = (features & ADV_CLOUDS) != 0;
     fr.post.y = cloudsOn && S.cloudHistory && fr.taa.w > 0.5f ? 1.0f : 0.0f; // teleports reset the cloud history too
     if (!taaOn) fr.post.y = cloudsOn && S.cloudHistory ? 1.0f : 0.0f;
@@ -564,8 +576,8 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
     // ---- G-buffer ----
     {
         MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
-        id<MTLTexture> att[4] = {S.t.albedo, S.t.normal, S.t.light, S.t.linZ};
-        for (int i = 0; i < 4; i++) {
+        id<MTLTexture> att[5] = {S.t.albedo, S.t.normal, S.t.light, S.t.linZ, S.t.spec};
+        for (int i = 0; i < 5; i++) {
             rp.colorAttachments[i].texture = att[i];
             rp.colorAttachments[i].loadAction = MTLLoadActionClear;
             rp.colorAttachments[i].clearColor = MTLClearColorMake(0, 0, 0, 0);
@@ -589,8 +601,12 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [e setVertexBytes:&fr length:sizeof fr atIndex:1];
         [e setVertexBuffer:g_materials offset:0 atIndex:5];
         [e setVertexBuffer:g_emissions offset:0 atIndex:6];
+        [e setFragmentBytes:&fr length:sizeof fr atIndex:1];
         TexEntry* atlas = texture(w.atlasTex);
         if (atlas && atlas->tex) [e setFragmentTexture:atlas->tex atIndex:0];
+        bool pbr = (features & ADV_PBR) != 0;
+        [e setFragmentTexture:pbr ? pbrN->tex : (atlas ? atlas->tex : nil) atIndex:1];
+        [e setFragmentTexture:pbr ? pbrS->tex : (atlas ? atlas->tex : nil) atIndex:2];
         for (int layer = 0; layer < 3; layer++) {
             bool alpha = layer > 0;
             [e setRenderPipelineState:S.gTerrain[(alpha ? 1 : 0) | (g_waving ? 2 : 0)]];
@@ -716,6 +732,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [e setFragmentTexture:S.t.linZ atIndex:6];
         [e setFragmentTexture:cloudMap atIndex:8];
         [e setFragmentTexture:S.cloudNoise atIndex:9];
+        [e setFragmentTexture:S.t.spec atIndex:10];
         [e setFragmentSamplerState:S.repeatLinear atIndex:3];
         if (rtLight) {
             TexEntry* atlas = texture(w.atlasTex);
