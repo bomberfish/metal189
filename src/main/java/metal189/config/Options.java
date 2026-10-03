@@ -115,6 +115,41 @@ public final class Options {
 
     private static final List<Opt> ALL = new ArrayList<Opt>();
 
+    /** Quality profiles: values for the performance-relevant options (others are left alone). */
+    public static final String[] PROFILES = {"low", "medium", "high", "ultra"};
+    private static final String[] PROFILE_KEYS = {"shadows", "shadowResolution", "shadowDistance", "ssao", "volumetrics",
+            "clouds", "taa", "pom", "pomQuality", "rtShadows", "rtReflections", "rtAmbientOcclusion", "rtGlobalIllumination"};
+    private static final int[][] PROFILE_VALUES = {
+        {1, 2048, 64, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0},
+        {1, 2048, 96, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0},
+        {1, 4096, 112, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0},
+        {1, 8192, 160, 1, 1, 1, 1, 1, 2, 1, 1, 1, 0},
+    };
+
+    public static void applyProfile(int p, boolean rt) {
+        for (int i = 0; i < PROFILE_KEYS.length; i++) {
+            Opt o = get(PROFILE_KEYS[i]);
+            int v = PROFILE_VALUES[p][i];
+            if ((o.needs & NEEDS_RT) != 0 && !rt) v = 0;
+            o.set(v);
+        }
+    }
+
+    /** The profile the current settings match, or -1 (custom). */
+    public static int currentProfile(boolean rt) {
+        for (int p = 0; p < PROFILES.length; p++) {
+            boolean match = true;
+            for (int i = 0; i < PROFILE_KEYS.length && match; i++) {
+                Opt o = get(PROFILE_KEYS[i]);
+                int v = PROFILE_VALUES[p][i];
+                if ((o.needs & NEEDS_RT) != 0 && !rt) v = 0;
+                match = o.get() == v;
+            }
+            if (match) return p;
+        }
+        return -1;
+    }
+
     public static List<Opt> all() { return Collections.unmodifiableList(ALL); }
 
     public static List<Opt> page(String page) {
@@ -161,6 +196,12 @@ public final class Options {
         toggle("lighting", "waving", S);
         toggle("lighting", "autoExposure", S);
         slider("lighting", "exposure", S, 25, 400, 5, "%");
+        slider("lighting", "sunBrightness", S, 25, 300, 5, "%");
+        slider("lighting", "skyLightBrightness", S, 25, 300, 5, "%");
+        slider("lighting", "blockLightBrightness", S, 25, 300, 5, "%");
+        slider("lighting", "blockLightWarmth", S, 0, 200, 5, "%");
+        slider("lighting", "minimumLight", S, 0, 400, 10, "%");
+        toggle("lighting", "heldLight", S);
 
         toggle("materials", "pbr", S);
         named("materials", "pbrFormat", S, 2);
@@ -195,10 +236,18 @@ public final class Options {
         toggle("sky", "sky", S);
         toggle("sky", "clouds", S);
         toggle("sky", "volumetrics", S);
+        slider("sky", "cloudCoverage", S, 0, 200, 5, "%");
+        slider("sky", "cloudSpeed", S, 0, 400, 10, "%");
+        slider("sky", "hazeDensity", S, 0, 400, 10, "%");
+        slider("sky", "starBrightness", S, 0, 300, 10, "%");
 
         toggle("post", "taa", S);
         toggle("post", "bloom", S);
         slider("post", "bloomStrength", S, 0, 300, 5, "%");
+        slider("post", "vignette", S, 0, 300, 10, "%");
+        slider("post", "sharpening", S, 0, 300, 10, "%");
+        slider("post", "saturation", S, 0, 200, 5, "%");
+        slider("post", "contrast", S, 50, 150, 5, "%");
 
         toggle("rt", "rtShadows", RT);
         toggle("rt", "rtReflections", RT);

@@ -40,6 +40,20 @@ public final class Config {
     /** Shaders mode: the first-person player casts a shadow (and appears in ray tracing). */
     public static boolean playerShadow = true;
     public static boolean plantShadows = true;        // grass, flowers and crops cast shadows
+    public static int sunBrightness = 100;            // percent (sun and moon)
+    public static int skyLightBrightness = 100;
+    public static int blockLightBrightness = 100;
+    public static int blockLightWarmth = 100;         // 0 neutral white, 100 vanilla-like orange, 200 amber
+    public static int minimumLight = 100;             // the faint light in pitch-dark caves
+    public static boolean heldLight = true;           // light sources in hand light their surroundings
+    public static int cloudCoverage = 100;
+    public static int cloudSpeed = 100;
+    public static int hazeDensity = 100;
+    public static int starBrightness = 100;
+    public static int vignette = 100;
+    public static int sharpening = 100;
+    public static int saturation = 100;
+    public static int contrast = 100;
     public static int foliageTranslucency = 100;      // percent: sunlight shining through leaves and plants
 
     // water (shaders mode)

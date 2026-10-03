@@ -10,15 +10,29 @@ gui metal189
 sleep 2
 capture CAPTURE_A
 gui metal189 lighting
-guihover shadowDistance
 sleep 2
 capture CAPTURE_B
-guihover none
-gui metal189 rt
+gui metal189 materials
+guihover pomQuality
 sleep 2
 capture CAPTURE_C
-gui metal189 post
-guihover bloomStrength
-sleep 2
+guihover none
+gui none
+config saturation 0
+config contrast 130
+sleep 3
 capture CAPTURE_D
+config saturation 100
+config contrast 100
+cmd /time set 18000
+config blockLightWarmth 200
+config blockLightBrightness 200
+cmd /tp @p 78 67 -199 160 30
+sleep 4
+capture CAPTURE_E
+config blockLightWarmth 100
+config blockLightBrightness 100
+gui metal189 post
+sleep 2
+capture CAPTURE_F
 quit

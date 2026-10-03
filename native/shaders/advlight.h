@@ -77,7 +77,7 @@ static float4 fwdLight(constant AdvFrame& fr, float4 rgba, float3 eyePos, float3
     float daySky = sky * sky * fr.sunDirWorld.w;
     c += albedo * fwdSkyAmbient(fr, skyLut, lin, nWorld) * (sky * sky) * fr.ambient.a;
     c += albedo * fr.blockLight.rgb * pow(block, fr.blockLight.a) * (1.0 - 0.75 * daySky);
-    c += albedo * 0.004;
+    c += albedo * 0.004 * fr.tune[9].x;   // minimum light setting
     if (int(fr.flags.y) == -1) c += albedo * 0.03;
     if (int(fr.flags.y) == 1) c += albedo * float3(0.045, 0.038, 0.06);
     bool inWater = fr.fog.w > 0.5 && fr.fog.w < 1.5;
@@ -101,7 +101,10 @@ static float4 fwdLight(constant AdvFrame& fr, float4 rgba, float3 eyePos, float3
     }
     float exposure = fr.params.z * ((fr.flags.x & ADV_AUTOEXP) ? expState[0].x : 1.0);
     c = fwdAces(c * exposure);
+    // grading as in adv.metal grade(): saturation, contrast, vignette (fr.tune[11])
+    float luma = dot(c, float3(0.2126, 0.7152, 0.0722));
+    c = max(mix(float3(luma), c, fr.tune[11].z), 0.0);
+    float3 g = saturate((fwdToGamma(c) - 0.5) * fr.tune[11].w + 0.5);
     float2 q = fragCoord * fr.screen.zw - 0.5;
-    c *= 1.0 - dot(q, q) * 0.35;
-    return float4(fwdToGamma(c), rgba.a);
+    return float4(g * (1.0 - dot(q, q) * 0.35 * fr.tune[11].x), rgba.a);
 }

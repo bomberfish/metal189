@@ -535,13 +535,15 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
     fr.moonDirView = simd_make_float4(normalize3(-sunViewDir), 0);
     fr.sunDirWorld = simd_make_float4(sun, day);
     simd_float3 sunCol = transmittance(simd_make_float3(sun.x, std::max(sun.y, 0.02f), sun.z));
-    fr.sunColor = simd_make_float4(sunCol * 2.5f * day * (1.0f - rain * 0.85f), 1);
+    // user settings (Pipeline.java tune[8]): sun, sky light and block light brightness, block light warmth
+    float sunMul = g_tuning[32], skyMul = g_tuning[33], blockMul = g_tuning[34], warmth = g_tuning[35];
+    fr.sunColor = simd_make_float4(sunCol * 2.5f * day * (1.0f - rain * 0.85f) * sunMul, 1);
     // vanilla's 8 moon phases (0 full ... 4 new): illuminated fraction and lit side
     static const float kMoonLit[8] = {1.0f, 0.75f, 0.5f, 0.25f, 0.0f, 0.25f, 0.5f, 0.75f};
     int phase = ((env.moonPhase % 8) + 8) % 8;
     fr.moon = simd_make_float4(kMoonLit[phase], phase >= 1 && phase <= 4 ? -1.0f : 1.0f, 0, 0);
     fr.moonColor = simd_make_float4(simd_make_float3(0.13f, 0.16f, 0.25f) * night * (1.0f - rain * 0.7f) *
-                                    (0.35f + 0.65f * kMoonLit[phase]), 1);
+                                    (0.35f + 0.65f * kMoonLit[phase]) * sunMul, 1);
     auto lin = [](float c) { return powf(std::max(c, 0.0f), 2.2f); };
     simd_float3 skyV = simd_make_float3(lin(env.skyR), lin(env.skyG), lin(env.skyB));
     simd_float3 fogV = simd_make_float3(lin(w.fogColor[0]), lin(w.fogColor[1]), lin(w.fogColor[2]));
@@ -552,8 +554,11 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
     float skyLum = simd_dot(skyMix, simd_make_float3(0.2126f, 0.7152f, 0.0722f));
     simd_float3 amb = simd_mix(simd_make_float3(skyLum, skyLum, skyLum), skyMix, simd_make_float3(0.45f, 0.45f, 0.45f)) * 0.75f;
     amb += simd_make_float3(0.030f, 0.036f, 0.052f) * night;   // moonlit sky
-    fr.ambient = simd_make_float4(amb, 1.0f);
-    fr.blockLight = simd_make_float4(1.0f * 1.7f, 0.60f * 1.7f, 0.30f * 1.7f, 2.2f);
+    fr.ambient = simd_make_float4(amb, skyMul);   // .a scales sky light wherever it is applied
+    // torch light: neutral white at warmth 0, vanilla-like orange at 1, deeper amber beyond
+    simd_float3 neutral = simd_make_float3(1.2f, 1.2f, 1.2f), warm = simd_make_float3(1.7f, 1.02f, 0.51f);
+    simd_float3 torch = simd_max(neutral + (warm - neutral) * warmth, simd_make_float3(0.05f, 0.05f, 0.05f)) * blockMul;
+    fr.blockLight = simd_make_float4(torch, 2.2f);
     fr.fog = simd_make_float4(w.fogStart, w.fogEnd, rain, (float)env.inFluid);
     fr.fogColor = simd_make_float4(w.fogColor[0], w.fogColor[1], w.fogColor[2], 1);
     float shadowRadius = g_shadowDistance;

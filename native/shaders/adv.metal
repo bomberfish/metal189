@@ -648,10 +648,10 @@ kernel void cloud_noise_kernel(texture3d<float, access::write> out [[texture(0)]
 static float cloudDensity(texture3d<float> noise, sampler rep, float3 p, constant AdvFrame& fr, bool detail) {
     float h = (p.y - kCloudBottom) / (kCloudTop - kCloudBottom);
     if (h <= 0.0 || h >= 1.0) return 0.0;
-    float wind = fr.params.x * 4.0;
+    float wind = fr.params.x * 4.0 * fr.tune[10].y;   // cloud speed setting
     float3 q = float3(p.x + wind, p.y * 1.5, p.z + wind * 0.35) / kCloudPeriod;
     float4 n = noise.sample(rep, q);
-    float coverage = mix(0.44, 0.9, fr.params.y);
+    float coverage = saturate(mix(0.44, 0.9, fr.params.y) * fr.tune[10].x);   // cloud coverage setting
     float profile = smoothstep(0.0, 0.12, h) * smoothstep(1.0, 0.55, h);
     float base = (n.r * 0.55 + n.g * 0.45) * profile;
     float d = saturate(remap(base, 1.0 - coverage, 1.0, 0.0, 1.0) * 1.6);
@@ -773,7 +773,7 @@ static float3 skyRadiance(constant AdvFrame& fr, texture2d<float> skyLut, sample
         float maria = 0.85 + 0.15 * hash12(floor(float2(lx, ly) * 6.0 + 10.0));
         c += float3(0.8, 0.85, 1.0) * moonMask * (lit * 1.5 * maria + 0.03);
     }
-    c += starField(d, fr.camera.w * (1.0 - fr.params.y));
+    c += starField(d, fr.camera.w * (1.0 - fr.params.y) * fr.tune[10].w);
     if ((fr.flags.x & ADV_CLOUDS) && d.y > 0.0) {
         float4 cl = cloudMap.sample(s, cloudMapUv(d));
         c = c * cl.a + cl.rgb;
@@ -1066,7 +1066,7 @@ static float3 rtShade(constant AdvFrame& fr, instance_acceleration_structure tla
     float daySky = lm.y * lm.y * fr.sunDirWorld.w;
     c += albedo * skyAmbient(fr, skyLut, lin, n) * lm.y * lm.y;
     c += albedo * fr.blockLight.rgb * pow(lm.x, fr.blockLight.a) * (1.0 - 0.75 * daySky);
-    c += albedo * 0.004;
+    c += albedo * 0.004 * fr.tune[9].x;
     return c;
 }
 
@@ -1312,6 +1312,9 @@ fragment float4 aoblur_fragment(FullscreenOut in [[stage_in]], constant AdvFrame
 #define WATER_UNDER   fr.tune[4]   // x: underwater visibility (blocks to 50%), y: distortion, z: flags, w: foam width
 #define WF_BIOME_TINT   1u
 #define WF_CALM_INDOORS 2u
+#define LIGHT_TUNE fr.tune[9]    // x: minimum light
+#define SKY_TUNE   fr.tune[10]   // x: cloud coverage, y: cloud speed, z: haze density, w: star brightness
+#define POST_TUNE  fr.tune[11]   // x: vignette, y: sharpening, z: saturation, w: contrast
 
 // Water as a participating medium (user colour and clarity): absorption takes red first,
 // and the light the water scatters back gives deep water its colour.
@@ -1570,7 +1573,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     float daySky = skyLight * skyLight * fr.sunDirWorld.w;
     color += albedo * fr.blockLight.rgb * pow(blockL, fr.blockLight.a) * ao * (1.0 - 0.75 * daySky);
     color += albedo * nrm.w * 6.0;
-    color += albedo * 0.004 * ao;
+    color += albedo * 0.004 * LIGHT_TUNE.x * ao;
     if (int(fr.flags.y) == -1) color += albedo * 0.03; // Nether ambient
     if (int(fr.flags.y) == 1) color += albedo * float3(0.045, 0.038, 0.06); // the End's dim violet ambient
 
@@ -1597,7 +1600,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     } else {
         float fogF = saturate((dist - fr.fog.x) / max(fr.fog.y - fr.fog.x, 1.0));
         fogF *= fogF;
-        float haze = (1.0 - exp(-dist * (0.0012 + fr.params.y * 0.01))) * 0.6;
+        float haze = (1.0 - exp(-dist * (0.0012 + fr.params.y * 0.01) * SKY_TUNE.z)) * 0.6;
         color = mix(color, hazeColor(fr, skyLut, lin, dirWorld), haze);
         color = mix(color, skyBase(fr, skyLut, lin, dirWorld), fogF);
     }
@@ -1991,7 +1994,7 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
     }
 
     float fogF = saturate((dist - fr.fog.x) / max(fr.fog.y - fr.fog.x, 1.0));
-    float haze = (1.0 - exp(-dist * (0.0012 + fr.params.y * 0.01))) * 0.6;
+    float haze = (1.0 - exp(-dist * (0.0012 + fr.params.y * 0.01) * SKY_TUNE.z)) * 0.6;
     c = mix(c, hazeColor(fr, skyLut, lin, dirWorld), haze);
     c = mix(c, skyBase(fr, skyLut, lin, dirWorld), fogF * fogF);
     return float4(c, 1.0);
@@ -2019,7 +2022,7 @@ fragment float4 volumetric_fragment(FullscreenOut in [[stage_in]], constant AdvF
     float mu = dot(dirWorld, L);
     float phase = mix(hg(mu, 0.85), hg(mu, 0.3), 0.35);
     // haze density: thin in clear weather, thicker in rain and towards dawn/dusk
-    float sigma = mix(0.0016, 0.006, fr.params.y) * (1.0 + 0.8 * (1.0 - smoothstep(0.05, 0.4, L.y)));
+    float sigma = mix(0.0016, 0.006, fr.params.y) * (1.0 + 0.8 * (1.0 - smoothstep(0.05, 0.4, L.y))) * SKY_TUNE.z;
     const int N = 16;
     float dt = dist / N;
     float jit = fract(hash12(in.position.xy) + float(fr.flags.z % 64u) * 0.618034);
@@ -2197,6 +2200,17 @@ static float3 aces(float3 x) {
     return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
 }
 
+// Final grading of the tonemapped colour (user settings): saturation, contrast around
+// mid grey, vignette; returns gamma-encoded output. advlight.h mirrors it.
+static float3 grade(constant AdvFrame& fr, float3 c, float2 uv) {
+    float luma = dot(c, float3(0.2126, 0.7152, 0.0722));
+    c = max(mix(float3(luma), c, POST_TUNE.z), 0.0);
+    float3 g = toGamma(c);
+    g = saturate((g - 0.5) * POST_TUNE.w + 0.5);
+    float2 q = uv - 0.5;
+    return g * (1.0 - dot(q, q) * 0.35 * POST_TUNE.x);
+}
+
 fragment float4 tonemap_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
                                  texture2d<float> hdr [[texture(0)]], texture2d<float> bloom [[texture(1)]],
                                  sampler s [[sampler(0)]], device const float4* expState [[buffer(2)]]) {
@@ -2212,12 +2226,9 @@ fragment float4 tonemap_fragment(FullscreenOut in [[stage_in]], constant AdvFram
         float3 e = aces((hdr.read(uint2(clamp(px + int2(1, 0), int2(0), mx))).rgb + b) * exposure);
         float3 so = aces((hdr.read(uint2(clamp(px + int2(0, 1), int2(0), mx))).rgb + b) * exposure);
         float3 mn = min(min(min(n, w_), min(e, so)), c), mxv = max(max(max(n, w_), max(e, so)), c);
-        float3 amp = sqrt(saturate(min(mn, 1.0 - mxv) / max(mxv, 1e-4)));
+        float3 amp = sqrt(saturate(min(mn, 1.0 - mxv) / max(mxv, 1e-4))) * POST_TUNE.y;   // sharpening setting
         float3 wgt = -amp / mix(8.0, 5.0, 0.55);
         c = saturate((c + (n + w_ + e + so) * wgt) / (1.0 + 4.0 * wgt));
     }
-    // subtle vignette
-    float2 q = in.uv - 0.5;
-    c *= 1.0 - dot(q, q) * 0.35;
-    return float4(toGamma(c), 1.0);
+    return float4(grade(fr, c, in.uv), 1.0);
 }

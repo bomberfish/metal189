@@ -165,7 +165,7 @@ public final class Phases {
     /** Light level carried by the player (held light sources, or burning), like OptiFine's dynamic lights. */
     private static int handLight(Minecraft mc) {
         net.minecraft.entity.player.EntityPlayer p = mc.thePlayer;
-        if (p == null) return 0;
+        if (p == null || !metal189.config.Config.heldLight) return 0;
         int level = p.isBurning() ? 15 : 0;
         net.minecraft.item.ItemStack held = p.getHeldItem();
         if (held != null && held.getItem() != null) {

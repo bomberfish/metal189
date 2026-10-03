@@ -32,6 +32,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
     private OptionList list;
     private final Map<GuiButton, Opt> options = new IdentityHashMap<GuiButton, Opt>();
     private final Map<GuiButton, String> links = new IdentityHashMap<GuiButton, String>();
+    private GuiButton profileButton;   // main page: cycles the quality profiles
     private GuiButton hovered;
     private long hoverStart;
     /** Tests: show this option's tooltip as if hovered (the test window never moves the pointer). */
@@ -60,6 +61,8 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
             cells.add(b);
         }
         if (MAIN.equals(page)) {
+            profileButton = new GuiButton(id++, 0, 0, 150, 20, "");
+            cells.add(profileButton);
             if (cells.size() % 2 != 0) cells.add(null);
             for (String p : Options.PAGES) {
                 GuiButton b = new GuiButton(id++, 0, 0, 150, 20, I18n.format("metal189.page." + p) + "...");
@@ -96,6 +99,12 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
     }
 
     private void refresh() {
+        if (profileButton != null) {
+            int p = Options.currentProfile(Pipeline.rtSupported());
+            profileButton.displayString = I18n.format("metal189.gui.profile") + ": "
+                    + I18n.format("metal189.profile." + (p < 0 ? "custom" : Options.PROFILES[p]));
+            profileButton.enabled = Config.shaders;
+        }
         for (Map.Entry<GuiButton, Opt> e : options.entrySet()) {
             GuiButton b = e.getKey();
             Opt o = e.getValue();
@@ -109,6 +118,15 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
 
     private void pressed(GuiButton b, boolean backwards) {
         if (!b.enabled) return;
+        if (b == profileButton) {
+            int n = Options.PROFILES.length, p = Options.currentProfile(Pipeline.rtSupported());
+            p = p < 0 ? (backwards ? n - 1 : 0) : (p + (backwards ? n - 1 : 1)) % n;
+            Options.applyProfile(p, Pipeline.rtSupported());
+            Pipeline.apply();
+            Config.save();
+            refresh();
+            return;
+        }
         String link = links.get(b);
         if (link != null) {
             mc.displayGuiScreen(new GuiMetal189(this, link));
@@ -218,6 +236,14 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
         if (over != hovered) {
             hovered = over;
             hoverStart = System.currentTimeMillis();
+        }
+        if (mouseY >= list.top() && mouseY < list.bottom() && profileButton != null && profileButton.visible && mouseX >= profileButton.xPosition
+                && mouseX < profileButton.xPosition + profileButton.width && mouseY >= profileButton.yPosition
+                && mouseY < profileButton.yPosition + profileButton.height) {
+            if (hovered != profileButton) { hovered = profileButton; hoverStart = System.currentTimeMillis(); }
+            if (System.currentTimeMillis() - hoverStart >= 500)
+                drawHoveringText(fontRendererObj.listFormattedStringToWidth(I18n.format("metal189.gui.profile.desc"), 220), mouseX, mouseY);
+            return;
         }
         if (over == null || System.currentTimeMillis() - hoverStart < 500) return;
         String key = "metal189.opt." + options.get(over).key + ".desc";

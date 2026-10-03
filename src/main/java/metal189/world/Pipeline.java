@@ -124,6 +124,22 @@ public final class Pipeline {
         t[29] = 16 << Math.max(0, Math.min(3, Config.pomQuality));
         t[30] = Config.pomDistance;
         t[31] = Config.pbr ? 1 : 0;
+        // lighting: sun, sky light, block light brightness, block light warmth; minimum light
+        t[32] = Config.sunBrightness / 100f;
+        t[33] = Config.skyLightBrightness / 100f;
+        t[34] = Config.blockLightBrightness / 100f;
+        t[35] = Config.blockLightWarmth / 100f;
+        t[36] = Config.minimumLight / 100f;
+        // sky: cloud coverage and speed, haze, stars
+        t[40] = Config.cloudCoverage / 100f;
+        t[41] = Config.cloudSpeed / 100f;
+        t[42] = Config.hazeDensity / 100f;
+        t[43] = Config.starBrightness / 100f;
+        // post: vignette, sharpening, saturation, contrast
+        t[44] = Config.vignette / 100f;
+        t[45] = Config.sharpening / 100f;
+        t[46] = Config.saturation / 100f;
+        t[47] = Config.contrast / 100f;
         for (int i = 0; i < TUNING; i++) metal189.engine.Mem.putFloat(tuning + i * 4L, t[i]);
         Native.advSetTuning(tuning, TUNING);
     }
