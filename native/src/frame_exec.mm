@@ -52,6 +52,11 @@ struct GLMirror {
 };
 static GLMirror g;
 
+// Latest environment (camera, sun, sky) and the current world phase.
+EnvCmd g_env{};
+bool g_envValid = false;
+uint32_t g_phase = PH_UI;
+
 // ---------------------------------------------------------------------------
 // pipeline / depth-state caches
 
@@ -1036,7 +1041,8 @@ void executeFrame(id<MTLCommandBuffer> cb, const uint8_t* cmds, size_t len) {
             case OP_DRAW: drawArena(x, payload<DrawCmd>(h)); break;
             case OP_DRAW_MESH: drawMesh(x, payload<DrawMeshCmd>(h)); break;
             case OP_COPY_TEX: copyTex(x, payload<CopyTexCmd>(h)); break;
-            case OP_PHASE: break;
+            case OP_PHASE: flushBatch(x); g_phase = payload<uint32_t>(h); break;
+            case OP_ENV: g_env = payload<EnvCmd>(h); g_envValid = true; break;
             case OP_TERRAIN: drawTerrain(x, h); break;
             default: break;
         }

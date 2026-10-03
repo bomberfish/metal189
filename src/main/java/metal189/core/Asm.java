@@ -20,6 +20,66 @@ public final class Asm {
         return null;
     }
 
+    /**
+     * Inside method (mcp/srg, desc), inserts {@code hookOwner.hookName()} before
+     * every call to a method named {@code callMcp}/{@code callSrg}. Hooks may take
+     * a float loaded from {@code floatArgSlot} (or none if slot < 0).
+     */
+    public static ClassPatch beforeCall(final String mcp, final String srg, final String desc,
+                                        final String callMcp, final String callSrg,
+                                        final String hookOwner, final String hookName, final int floatArgSlot) {
+        return new ClassPatch() {
+            public boolean apply(ClassNode cn) {
+                MethodNode m = find(cn, mcp, srg, desc);
+                if (m == null) return false;
+                boolean changed = false;
+                for (org.objectweb.asm.tree.AbstractInsnNode n = m.instructions.getFirst(); n != null; n = n.getNext()) {
+                    if (!(n instanceof MethodInsnNode)) continue;
+                    MethodInsnNode mi = (MethodInsnNode) n;
+                    if (!mi.name.equals(callMcp) && !mi.name.equals(callSrg)) continue;
+                    InsnList l = new InsnList();
+                    if (floatArgSlot >= 0) {
+                        l.add(new VarInsnNode(Opcodes.FLOAD, floatArgSlot));
+                        l.add(new MethodInsnNode(Opcodes.INVOKESTATIC, hookOwner, hookName, "(F)V", false));
+                    } else {
+                        l.add(new MethodInsnNode(Opcodes.INVOKESTATIC, hookOwner, hookName, "()V", false));
+                    }
+                    // Insert before the argument loads of the call: walk back to the receiver load
+                    // is fragile, so the hook runs right before the call instruction; hooks only
+                    // emit stream records and never touch the operand stack.
+                    m.instructions.insertBefore(mi, l);
+                    changed = true;
+                }
+                return changed;
+            }
+
+            public boolean needsFrames() { return false; }
+        };
+    }
+
+    /** Inserts a static no-arg call before every return of a method (and optionally at its head). */
+    public static ClassPatch aroundMethod(final String mcp, final String srg, final String desc,
+                                          final String hookOwner, final String headHook, final String tailHook) {
+        return new ClassPatch() {
+            public boolean apply(ClassNode cn) {
+                MethodNode m = find(cn, mcp, srg, desc);
+                if (m == null) return false;
+                if (headHook != null) m.instructions.insert(new MethodInsnNode(Opcodes.INVOKESTATIC, hookOwner, headHook, "()V", false));
+                if (tailHook != null) {
+                    for (org.objectweb.asm.tree.AbstractInsnNode n = m.instructions.getFirst(); n != null; n = n.getNext()) {
+                        int op = n.getOpcode();
+                        if (op >= Opcodes.IRETURN && op <= Opcodes.RETURN) {
+                            m.instructions.insertBefore(n, new MethodInsnNode(Opcodes.INVOKESTATIC, hookOwner, tailHook, "()V", false));
+                        }
+                    }
+                }
+                return true;
+            }
+
+            public boolean needsFrames() { return false; }
+        };
+    }
+
     /** Applies several patches to the same class. */
     public static ClassPatch chain(final ClassPatch... patches) {
         return new ClassPatch() {

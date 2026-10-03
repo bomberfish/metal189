@@ -29,6 +29,13 @@ enum Op : uint16_t {
     OP_COPY_TEX = 16,
     OP_PHASE = 17,
     OP_TERRAIN = 18,
+    OP_ENV = 19,
+};
+
+enum Phase : uint32_t {
+    PH_UI = 0, PH_WORLD_BEGIN = 1, PH_SKY = 2, PH_CLOUDS = 3, PH_TERRAIN = 4, PH_ENTITIES = 5, PH_OUTLINE = 6,
+    PH_DESTROY = 7, PH_LIT_PARTICLES = 8, PH_PARTICLES = 9, PH_WEATHER = 10, PH_WORLD_BORDER = 11,
+    PH_ENTITIES_TRANSLUCENT = 12, PH_RENDER_LAST = 13, PH_HAND = 14, PH_WORLD_END = 15,
 };
 
 struct PipeState { uint32_t blend, srcRGB, dstRGB, srcA, dstA, eq, colorMask, logicOn, logicOp; };
@@ -70,6 +77,19 @@ struct TargetCmd { uint32_t fbo, colorTex, depth; };
 struct ClearCmd { uint32_t mask; float r, g, b, a, depth; uint32_t stencil; };
 struct CopyTexCmd { uint32_t tex, level; int32_t xoff, yoff, x, y, w, h; };
 struct TerrainCmd { uint32_t layer, format, count; };
+struct EnvCmd {
+    float view[16];       // modelview at terrain setup (camera transform)
+    float proj[16];       // world projection
+    int32_t camBlockX; float camFracX; int32_t camBlockY; float camFracY; int32_t camBlockZ; float camFracZ;
+    float partialTicks, celestialAngle, sunBrightness, starBrightness;
+    float skyR, skyG, skyB;
+    float rain, thunder;
+    int32_t moonPhase, dimension, dayTime;
+    float timeSeconds;
+    int32_t inFluid;      // 0 none, 1 water, 2 lava
+    float renderDistance;
+    float rotationX;
+};
 struct TerrainEntry { uint32_t section; float x, y, z; };
 
 struct CmdHeader {

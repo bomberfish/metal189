@@ -51,6 +51,35 @@ public final class Terrain {
         return Futures.immediateFuture(null);
     }
 
+    private static final ThreadLocal<int[]> blockStart = new ThreadLocal<int[]>() {
+        @Override protected int[] initialValue() { return new int[1]; }
+    };
+
+    /** Head of BlockRendererDispatcher.renderBlock. */
+    public static void beginBlock(WorldRenderer wr) {
+        blockStart.get()[0] = wr.getVertexCount();
+    }
+
+    /**
+     * Before BlockRendererDispatcher.renderBlock returns: stamps the block state
+     * id into the unused high bytes of the lightmap shorts of the vertices the
+     * block produced (light values never exceed 240). The id survives vanilla's
+     * translucent re-sorting because it lives in the vertex itself.
+     */
+    public static void endBlock(WorldRenderer wr, net.minecraft.block.state.IBlockState state) {
+        int start = blockStart.get()[0];
+        int end = wr.getVertexCount();
+        if (end <= start || wr.getVertexFormat() != DefaultVertexFormats.BLOCK) return;
+        int id = net.minecraft.block.Block.getStateId(state);
+        byte lo = (byte) id, hi = (byte) (id >>> 8);
+        long base = Mem.address(wr.getByteBuffer());
+        for (int v = start; v < end; v++) {
+            long a = base + v * 28L + 24;
+            Mem.U.putByte(a + 1, lo);
+            Mem.U.putByte(a + 3, hi);
+        }
+    }
+
     /** Head of RenderChunk.deleteGlResources. */
     public static void delete(RenderChunk rc) {
         Integer id = ids.remove(rc);

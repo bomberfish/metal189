@@ -162,7 +162,9 @@ vertex FFOut terrain_vertex(uint vid [[vertex_id]],
     float4 color = float4(v.color) * (1.0 / 255.0);
     if (fc_flat) o.colorFlat = color; else o.colorSmooth = color;
     o.tex0 = u.texMatrix0 * float4(float2(v.uv), 0.0, 1.0);
-    float4 tc1 = u.texMatrix1 * float4(float2(v.lm), 0.0, 1.0);
+    // high bytes of the lightmap shorts carry the block state id (see Terrain.endBlock)
+    float2 lm = float2(ushort2(v.lm) & ushort2(0xFF));
+    float4 tc1 = u.texMatrix1 * float4(lm, 0.0, 1.0);
     o.tex1 = tc1.xy / tc1.w;
     uint f = u.flags.x;
     if (f & FF_FOG) {
