@@ -1,0 +1,85 @@
+# Reflection settings with the user's PBR packs: rough reflections (A-D), strength (E), highlights (F),
+# rain wetness and puddles (G-I), water distortion (J, K), sky details (L: off; K: on)
+resourcepack Nostalgia PBR 1.2.0.zip | §bAVPBR-1-6-5.zip
+sleep 3
+world lookrefl 42 flat
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /weather clear
+cmd /time set 4000
+config rtReflections false
+config reflections 2
+cmd /tp @p -700 7 -690 180 28
+sleep 4
+cmd /kill @e[type=!Player]
+cmd /fill -716 4 -716 -684 20 -684 air
+cmd /fill -716 3 -716 -684 3 -684 stone
+cmd /fill -712 3 -704 -710 3 -686 quartz_block
+cmd /fill -709 3 -704 -707 3 -686 stone 6
+cmd /fill -706 3 -704 -704 3 -686 stonebrick
+cmd /fill -703 3 -704 -701 3 -686 planks
+cmd /fill -700 3 -704 -698 3 -686 iron_block
+cmd /fill -697 3 -704 -695 3 -686 gold_block
+cmd /fill -694 3 -704 -692 3 -686 prismarine 1
+cmd /fill -691 3 -704 -689 3 -686 brick_block
+cmd /fill -712 4 -712 -688 14 -710 stonebrick
+cmd /fill -708 6 -710 -692 12 -710 red_sandstone
+cmd /fill -704 8 -710 -696 11 -710 lapis_block
+cmd /fill -700 4 -706 -700 14 -706 log
+cmd /fill -712 3 -684 -688 3 -680 water
+cmd /fill -712 2 -684 -688 2 -680 sand
+cmd /fill -712 4 -679 -688 9 -679 stonebrick
+sleep 8
+capture CAPTURE_A
+config roughReflections 0
+sleep 3
+capture CAPTURE_B
+config roughReflections 100
+sleep 3
+capture CAPTURE_C
+config roughReflectionQuality 2
+sleep 3
+capture CAPTURE_D
+config roughReflections 40
+config roughReflectionQuality 1
+config reflectionStrength 50
+sleep 3
+capture CAPTURE_E
+config reflectionStrength 100
+config specularHighlights 200
+cmd /time set 12200
+cmd /tp @p -690 7 -696 90 25
+sleep 4
+capture CAPTURE_F
+config specularHighlights 100
+cmd /time set 4000
+cmd /weather rain
+cmd /tp @p -700 7 -690 180 28
+sleep 10
+capture CAPTURE_G
+config rainPuddles false
+sleep 3
+capture CAPTURE_H
+config rainPuddles true
+config rainWetness 0
+sleep 3
+capture CAPTURE_I
+config rainWetness 100
+cmd /weather clear
+sleep 6
+cmd /time set 12300
+cmd /tp @p -700 6 -689 0 22
+config waterReflectionDistortion 0
+sleep 4
+capture CAPTURE_J
+config waterReflectionDistortion 200
+sleep 3
+capture CAPTURE_K
+config waterReflectionDistortion 100
+config reflectionSkyDetails false
+sleep 3
+capture CAPTURE_L
+config reflectionSkyDetails true
+quit

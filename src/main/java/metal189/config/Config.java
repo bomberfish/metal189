@@ -64,6 +64,7 @@ public final class Config {
     public static boolean waterCalmIndoors = true;
     public static int waterReflectivity = 4;      // reflectance facing the surface, percent (2 = physical)
     public static int waterSunReflection = 100;
+    public static int waterReflectionDistortion = 100;   // how far the waves bend reflections, percent
     public static int waterRefraction = 100;
     public static int waterFoam = 0;
     public static int waterFoamWidth = 100;
@@ -83,6 +84,14 @@ public final class Config {
     public static int pbrSpecularStrength = 100;
     public static int pbrEmissionStrength = 100;
     public static int reflections = 2;            // 0 off, 1 screen-space, 2 world-space (ray-traced: RT page)
+    public static int roughReflections = 40;      // roughness (percent) up to which surfaces reflect their surroundings
+    public static int roughReflectionQuality = 0; // rays per frame: 0 one, 1 two, 2 four
+    public static int reflectionStrength = 100;
+    public static int specularHighlights = 100;   // the sun's and moon's highlights on blocks
+    public static boolean reflectionSkyDetails = true;  // clouds, moon and stars in reflections
+    public static int reflectionDistance = 128;   // world-space reflection rays, blocks
+    public static int rainWetness = 100;
+    public static boolean rainPuddles = true;
     public static boolean pom = true;             // parallax occlusion mapping
     public static int pomDepth = 20;              // percent of a block
     public static int pomQuality = 1;             // 0 low .. 3 ultra (16..128 steps)

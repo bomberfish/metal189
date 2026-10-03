@@ -1074,6 +1074,17 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             [e setFragmentTexture:vox.tex atIndex:16];
             [e setFragmentTexture:vox.occ atIndex:18];
             [e setFragmentTexture:vox.shape atIndex:19];
+            [e setFragmentTexture:vox.occSlot atIndex:20];
+        }
+        {
+            // debug view 10: world-space reflection steps per ray, logged every 120 frames
+            static id<MTLBuffer> stats = [device() newBufferWithLength:16 options:MTLResourceStorageModeShared];
+            if (g_optAdvDebug == 10 && S.frame % 120 == 0) {
+                uint32_t* st = (uint32_t*)stats.contents;
+                if (st[1]) log("world-space reflections: %.1f steps per ray, %u rays per frame", (double)st[0] / st[1], st[1] / 120);
+                st[0] = st[1] = 0;
+            }
+            [e setFragmentBuffer:stats offset:0 atIndex:21];
         }
         {
             TexEntry* atlasL = texture(w.atlasTex);
@@ -1166,6 +1177,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             [e setFragmentTexture:vox.tex atIndex:11];
             [e setFragmentTexture:vox.occ atIndex:12];
             [e setFragmentTexture:vox.shape atIndex:13];
+            [e setFragmentTexture:vox.occSlot atIndex:14];
         }
         TexEntry* atlas = texture(w.atlasTex);
         if (atlas && atlas->tex) [e setFragmentTexture:atlas->tex atIndex:0];

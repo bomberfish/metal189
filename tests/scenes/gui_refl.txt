@@ -6,16 +6,20 @@ cmd /time set 5000
 cmd /tp @p 64 96 -32 135 12
 sleep 6
 gui metal189 materials
-guihover reflections
+guihover roughReflections
 sleep 2
 capture CAPTURE_A
-guihover none
-gui metal189 water
+guihover rainPuddles
 sleep 2
 capture CAPTURE_B
-gui metal189 rt
-guihover rtReflections
+guihover none
+gui metal189 lighting
+guihover blockLightWarmth
 sleep 2
 capture CAPTURE_C
+gui metal189 water
+guihover waterReflectionDistortion
+sleep 2
+capture CAPTURE_D
 gui none
 quit

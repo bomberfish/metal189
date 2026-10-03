@@ -126,13 +126,13 @@ public final class Options {
     // tracing reflects with RT and the others world-space.
     private static final int HW = -1, LOW_REFL = -2;
     private static final String[] PROFILE_KEYS = {"shadows", "shadowResolution", "shadowDistance", "ssao", "volumetrics",
-            "clouds", "taa", "pom", "pomQuality", "waterFoam", "reflections", "rtShadows", "rtReflections",
-            "rtAmbientOcclusion", "rtGlobalIllumination", "rtEntities"};
+            "clouds", "taa", "pom", "pomQuality", "waterFoam", "reflections", "roughReflectionQuality", "rtShadows",
+            "rtReflections", "rtAmbientOcclusion", "rtGlobalIllumination", "rtEntities"};
     private static final int[][] PROFILE_VALUES = {
-        {1, 2048, 64, 0, 0, 0, 1, 0, 0, 0, LOW_REFL, 0, 0, 0, 0, 0},
-        {1, 2048, 96, 1, 0, 1, 1, 1, 0, 0, 2, 0, HW, 0, 0, 0},
-        {1, 4096, 112, 1, 1, 1, 1, 1, 1, 0, 2, 0, HW, 0, 0, HW},
-        {1, 8192, 160, 1, 1, 1, 1, 1, 2, 0, 2, HW, HW, HW, 0, HW},
+        {1, 2048, 64, 0, 0, 0, 1, 0, 0, 0, LOW_REFL, 0, 0, 0, 0, 0, 0},
+        {1, 2048, 96, 1, 0, 1, 1, 1, 0, 0, 2, 0, 0, HW, 0, 0, 0},
+        {1, 4096, 112, 1, 1, 1, 1, 1, 1, 0, 2, 0, 0, HW, 0, 0, HW},
+        {1, 8192, 160, 1, 1, 1, 1, 1, 2, 0, 2, 1, HW, HW, HW, 0, HW},
     };
 
     private static int profileValue(int p, int i, boolean hwRt) {
@@ -222,6 +222,14 @@ public final class Options {
         slider("materials", "pbrSpecularStrength", S, 0, 200, 5, "%");
         slider("materials", "pbrEmissionStrength", S, 0, 300, 5, "%");
         named("materials", "reflections", S, 3);
+        slider("materials", "roughReflections", S, 0, 100, 5, "%");
+        named("materials", "roughReflectionQuality", S, 3);
+        slider("materials", "reflectionStrength", S, 0, 200, 5, "%");
+        slider("materials", "specularHighlights", S, 0, 200, 5, "%");
+        toggle("materials", "reflectionSkyDetails", S);
+        slider("materials", "reflectionDistance", S, 16, 128, 8, " blocks");
+        slider("materials", "rainWetness", S, 0, 200, 10, "%");
+        toggle("materials", "rainPuddles", S);
         toggle("materials", "pom", S);
         slider("materials", "pomDepth", S, 5, 50, 1, "%");
         named("materials", "pomQuality", S, 4);
@@ -236,6 +244,7 @@ public final class Options {
         toggle("water", "waterRainRipples", S);
         slider("water", "waterReflectivity", S, 2, 25, 1, "%");
         slider("water", "waterSunReflection", S, 0, 300, 5, "%");
+        slider("water", "waterReflectionDistortion", S, 0, 200, 10, "%");
         slider("water", "waterRefraction", S, 0, 300, 5, "%");
         slider("water", "waterClarity", S, 2, 48, 1, " blocks");
         slider("water", "waterColorR", S, 25, 300, 5, "%");

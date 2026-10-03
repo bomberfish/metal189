@@ -10,6 +10,7 @@ struct VoxelScene {
     id<MTLTexture> tex = nil;   // RGBA16Uint, N^3, toroidal: texel = (block + wrap) mod N
     id<MTLTexture> shape = nil; // RG32Uint, N^3: the shapes of partial blocks
     id<MTLTexture> occ = nil;   // R8Uint, (N/4)^3: 1 where a 4-block brick holds any block
+    id<MTLTexture> occSlot = nil;   // R8Uint, (N/16)^3: 1 where a 16-block slot does
     simd_int4 wrap = {0, 0, 0, 0};     // xyz: volume origin mod N, w: N
     simd_float4 cam = {0, 0, 0, 0};    // xyz: camera position relative to the volume origin (blocks)
     bool valid = false;

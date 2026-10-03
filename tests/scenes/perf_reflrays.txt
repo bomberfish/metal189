@@ -1,0 +1,39 @@
+resourcepack Nostalgia PBR 1.2.0.zip | §bAVPBR-1-6-5.zip
+sleep 3
+world lookrefl 42 flat
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /weather clear
+cmd /time set 4000
+config rtReflections false
+config reflections 2
+config roughReflections 40
+cmd /tp @p -700 7 -690 180 28
+sleep 10
+config roughReflectionQuality 0
+sleep 2
+fps 5 rays1
+config roughReflectionQuality 1
+sleep 2
+fps 5 rays2
+config roughReflectionQuality 2
+sleep 2
+fps 5 rays4
+config roughReflectionQuality 0
+sleep 2
+fps 5 rays1b
+config roughReflections 100
+config roughReflectionQuality 1
+sleep 2
+fps 5 rough100_rays2
+config roughReflectionQuality 2
+sleep 2
+fps 5 rough100_rays4
+config roughReflections 40
+config roughReflectionQuality 1
+config reflections 1
+sleep 2
+fps 5 ssr_rays2
+config reflections 2
+quit

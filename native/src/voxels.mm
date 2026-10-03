@@ -28,7 +28,7 @@ struct Slot {
     uint64_t version = 0;             // 0: the section was absent (cleared slot)
 };
 
-id<MTLTexture> g_tex = nil, g_shape = nil, g_occ = nil;
+id<MTLTexture> g_tex = nil, g_shape = nil, g_occ = nil, g_occSlot = nil;
 id<MTLBuffer> g_scratch = nil, g_dummy = nil;
 id<MTLComputePipelineState> g_accum = nil, g_resolve = nil, g_occK = nil;
 bool g_tried = false;
@@ -64,12 +64,13 @@ bool init() {
         g_tex = volume(dev, MTLPixelFormatRGBA16Uint, kN, @"voxels");
         g_shape = volume(dev, MTLPixelFormatRG32Uint, kN, @"voxel shapes");
         g_occ = volume(dev, MTLPixelFormatR8Uint, kN / 4, @"voxel bricks");
+        g_occSlot = volume(dev, MTLPixelFormatR8Uint, kSlots, @"voxel slots");
         // per-section scratch the resolve pass leaves cleared, so zeroed once here
         g_scratch = [dev newBufferWithLength:kScratchPerSection * kMaxUpdatesPerFrame options:MTLResourceStorageModeShared];
         if (g_scratch) memset(g_scratch.contents, 0, g_scratch.length);
         g_dummy = [dev newBufferWithLength:64 options:MTLResourceStorageModeShared];
         for (auto& a : g_slot) for (auto& b : a) for (Slot& sl : b) sl = Slot();
-        if (!g_tex || !g_shape || !g_occ || !g_scratch || !g_dummy) {
+        if (!g_tex || !g_shape || !g_occ || !g_occSlot || !g_scratch || !g_dummy) {
             log("voxels: unavailable: out of memory");
             voxelsRelease();
             return false;
@@ -100,7 +101,7 @@ bool init() {
 
 void voxelsRelease() {
     // command buffers in flight hold their own references
-    g_tex = g_shape = g_occ = nil;
+    g_tex = g_shape = g_occ = g_occSlot = nil;
     g_scratch = g_dummy = nil;
 }
 
@@ -171,6 +172,7 @@ bool voxelsUpdate(id<MTLCommandBuffer> cb, double camX, double camY, double camZ
         [e setComputePipelineState:g_occK];
         [e setTexture:g_tex atIndex:0];
         [e setTexture:g_occ atIndex:1];
+        [e setTexture:g_occSlot atIndex:2];
         for (const Job& jb : jobs) {
             simd_int4 slot = slotOf(jb);
             [e setBytes:&slot length:sizeof slot atIndex:0];
@@ -188,6 +190,7 @@ bool voxelsUpdate(id<MTLCommandBuffer> cb, double camX, double camY, double camZ
     out.tex = g_tex;
     out.shape = g_shape;
     out.occ = g_occ;
+    out.occSlot = g_occSlot;
     out.wrap = simd_make_int4(mod(ox, kN), mod(oy, kN), mod(oz, kN), kN);
     out.cam = simd_make_float4((float)(camX - ox), (float)(camY - oy), (float)(camZ - oz), 0);
     out.valid = true;

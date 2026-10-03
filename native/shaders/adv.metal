@@ -1094,16 +1094,26 @@ kernel void voxel_resolve_kernel(device const BlockVertex* solid [[buffer(0)]], 
     vox.write(ushort4(ushort(origin.x + 0.5), ushort(origin.y + 0.5), ushort(rgb), ushort(kind | (sky << 2) | (blk << 6) | (lsize << 10) | flags)), tc);
 }
 
-// Which 4-block bricks of a slot hold any block, so traces cross empty space a brick at a time.
+// Which 4-block bricks of a slot hold any block, and whether the slot (16 blocks) does, so
+// traces cross empty space a slot or a brick at a time. One threadgroup of 4^3 per slot.
 kernel void voxel_occ_kernel(texture3d<ushort, access::read> vox [[texture(0)]], texture3d<ushort, access::write> occ [[texture(1)]],
-                             constant int4& slot [[buffer(0)]], uint3 gid [[thread_position_in_grid]]) {
-    if (any(gid >= 4u)) return;
+                             texture3d<ushort, access::write> occSlot [[texture(2)]], constant int4& slot [[buffer(0)]],
+                             uint3 gid [[thread_position_in_grid]], uint li [[thread_index_in_threadgroup]]) {
+    threadgroup uint any4[64];
     uint3 base = uint3(slot.xyz) + gid * 4u;
     uint kinds = 0u;
     for (uint z = 0; z < 4u; z++)
         for (uint y = 0; y < 4u; y++)
             for (uint x = 0; x < 4u; x++) kinds |= uint(vox.read(base + uint3(x, y, z)).w);
-    occ.write(ushort4(ushort((kinds & 3u) != 0u)), base / 4u);
+    bool full = (kinds & 3u) != 0u;
+    occ.write(ushort4(ushort(full)), base / 4u);
+    any4[li] = full ? 1u : 0u;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (li == 0u) {
+        uint n = 0u;
+        for (uint k = 0; k < 64u; k++) n |= any4[k];
+        occSlot.write(ushort4(ushort(n)), uint3(slot.xyz) / 16u);
+    }
 }
 
 constexpr sampler rtEntSampler(filter::nearest, address::repeat);
@@ -1501,7 +1511,11 @@ static inline float underwaterFog(constant AdvFrame& fr, float d) {
     return 1.0 - exp(-0.6931 * r * r);
 }
 
-#define REFL_TUNE fr.tune[12]   // x: reflections (0 off, 1 screen-space, 2 world-space)
+#define REFL_TUNE  fr.tune[12]   // x: reflections (0 off, 1 screen-space, 2 world-space), y: rough reflection limit
+                                 // (roughness), z: rough reflection samples per frame, w: reflection strength
+#define REFL_TUNE2 fr.tune[13]   // x: specular highlights, y: sky details (clouds, moon, stars) in reflections,
+                                 // z: world-space reflection distance (blocks), w: water reflection distortion
+#define WET_TUNE   fr.tune[14]   // x: rain wetness, y: puddles
 
 constexpr sampler voxPoint(filter::nearest, mip_filter::linear, address::clamp_to_edge);
 
@@ -1512,6 +1526,7 @@ struct VoxHit {
     float2 uv;     // on the block's sprite
     uint4 v;
     float lod;     // atlas mip level for the ray's footprint there
+    int steps;     // traversal steps taken (debug statistics)
 };
 
 // Sprite coordinates of a point on a block face (cell-local), as vanilla models map them.
@@ -1648,10 +1663,11 @@ static bool voxPlanesHit(texture2d<float> atlas, uint4 v, bool diagonal, float3 
 // panes) are alpha-tested where hit; shaped blocks and plants are hit where their shape is.
 // cone: the ray's footprint at o (blocks) and its growth per block.
 static VoxHit voxTrace(constant AdvFrame& fr, texture3d<ushort> vox, texture3d<uint> voxShape, texture3d<ushort> occ,
-                       texture2d<float> atlas, float3 o, float3 d, float tmax, float2 cone) {
+                       texture3d<ushort> occSlot, texture2d<float> atlas, float3 o, float3 d, float tmax, float2 cone) {
     VoxHit h;
     h.hit = false;
     h.t = tmax;
+    h.steps = 0;
     int N = fr.voxel.w;
     uint wrapMask = uint(N - 1);   // N is a power of two
     float3 inv = 1.0 / select(d, float3(1e-9), abs(d) < 1e-9);
@@ -1668,26 +1684,31 @@ static VoxHit voxTrace(constant AdvFrame& fr, texture3d<ushort> vox, texture3d<u
     int axis = -1;
     int3 brick = int3(-1);
     bool brickFull = true;
-    for (int i = 0; i < 200; i++) {
+    int i = 0;
+    for (; i < 200; i++) {
         uint3 tc = (uint3(cell) + uint3(fr.voxel.xyz)) & wrapMask;
         int3 b = cell >> 2;
         if (any(b != brick)) {
             brick = b;
-            brickFull = occ.read(tc >> 2).r != 0u;
-        }
-        if (!brickFull) {
-            // nothing in this brick: on to the cell where the ray leaves it
-            float3 tf = (float3(b * 4) + far01 * 4.0 - o) * inv;
-            int ax = tf.x < tf.y && tf.x < tf.z ? 0 : (tf.y < tf.z ? 1 : 2);
-            t = tf[ax];
-            if (t >= tExit) break;
-            int3 nc = clamp(int3(floor(o + d * t)), b * 4, b * 4 + 3);
-            nc[ax] = st[ax] > 0 ? b[ax] * 4 + 4 : b[ax] * 4 - 1;
-            cell = nc;
-            axis = ax;
-            tNext = (float3(cell) + far01 - o) * inv;
-            if (any(cell < 0) || any(cell >= N)) break;
-            continue;
+            // an empty 16-block slot is crossed whole, an empty 4-block brick likewise
+            int size = 4;
+            if (occSlot.read(tc >> 4).r == 0u) size = 16;
+            else brickFull = occ.read(tc >> 2).r != 0u;
+            if (size == 16 || !brickFull) {
+                int3 lo = (cell / size) * size;
+                float3 tf = (float3(lo) + far01 * float(size) - o) * inv;
+                int ax = tf.x < tf.y && tf.x < tf.z ? 0 : (tf.y < tf.z ? 1 : 2);
+                t = tf[ax];
+                if (t >= tExit) break;
+                int3 nc = clamp(int3(floor(o + d * t)), lo, lo + (size - 1));
+                nc[ax] = st[ax] > 0 ? lo[ax] + size : lo[ax] - 1;
+                cell = nc;
+                axis = ax;
+                tNext = (float3(cell) + far01 - o) * inv;
+                brick = int3(-1);
+                if (any(cell < 0) || any(cell >= N)) break;
+                continue;
+            }
         }
         uint4 v = uint4(vox.read(tc));
         uint kind = v.w & 3u;
@@ -1697,7 +1718,10 @@ static VoxHit voxTrace(constant AdvFrame& fr, texture3d<ushort> vox, texture3d<u
             if (v.w & (VOX_CROSS | VOX_PLUS)) {
                 float2 yr = float2(0.0, 1.0);
                 if (v.w & VOX_PLUS) yr = voxShapeHeight(voxShape.read(tc).rg);
-                if (voxPlanesHit(atlas, v, (v.w & VOX_CROSS) != 0u, o, lo, d, inv, t, tOut, yr, cone, h)) return h;
+                if (voxPlanesHit(atlas, v, (v.w & VOX_CROSS) != 0u, o, lo, d, inv, t, tOut, yr, cone, h)) {
+                    h.steps = i + 1;
+                    return h;
+                }
             } else {
                 float th = t;
                 float3 n = float3(0.0);
@@ -1713,6 +1737,7 @@ static VoxHit voxTrace(constant AdvFrame& fr, texture3d<ushort> vox, texture3d<u
                         h.uv = uv;
                         h.v = v;
                         h.lod = lod;
+                        h.steps = i + 1;
                         return h;
                     }
                 }
@@ -1723,6 +1748,7 @@ static VoxHit voxTrace(constant AdvFrame& fr, texture3d<ushort> vox, texture3d<u
         else { axis = 2; t = tNext.z; tNext.z += tDelta.z; cell.z += st.z; }
         if (t >= tExit || any(cell < 0) || any(cell >= N)) break;
     }
+    h.steps = i + 1;
     return h;
 }
 
@@ -1787,6 +1813,8 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                                texture2d<float> waveTex [[texture(15)]],
                                texture3d<ushort> vox [[texture(16)]], texture2d<float> voxAtlas [[texture(17)]],
                                texture3d<ushort> voxOcc [[texture(18)]], texture3d<uint> voxShape [[texture(19)]],
+                               texture3d<ushort> voxOccSlot [[texture(20)]],
+                               device atomic_uint* voxStats [[buffer(21)]],
                                sampler cmp [[sampler(0)]], sampler lin [[sampler(1)]],
                                sampler rep [[sampler(3)]], sampler wrep [[sampler(4)]],
                                instance_acceleration_structure tlas [[buffer(10), function_constant(ac_rt)]],
@@ -1810,7 +1838,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
         if (!(fr.flags.x & ADV_WSR)) return float4(1.0, 0.0, 1.0, 1.0);
         // from the eye (camera-relative positions are relative to the view entity's feet)
         float3 eyeVox = fr.voxCam.xyz + (fr.invView * float4(0.0, 0.0, 0.0, 1.0)).xyz;
-        VoxHit vh = voxTrace(fr, vox, voxShape, voxOcc, voxAtlas, eyeVox, dirWorld, 128.0, float2(0.0, pixelAngle(fr)));
+        VoxHit vh = voxTrace(fr, vox, voxShape, voxOcc, voxOccSlot, voxAtlas, eyeVox, dirWorld, 128.0, float2(0.0, pixelAngle(fr)));
         return float4(vh.hit ? voxShade(fr, voxAtlas, shadowMap, cmp, skyLut, lin, vh) : skyBase(fr, skyLut, lin, dirWorld), 1.0);
     }
     if (d >= 1.0) {
@@ -1844,12 +1872,12 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
         F0 = mix(float3(0.04), albedo, metal);
     }
     // rain: exposed surfaces get wet (porous ones darken), puddles form on open ground
-    if (fr.params.y > 0.01 && fr.flags.y == 0 && !isFoliage(material) && material != 2 && material != 7) {
+    if (fr.params.y > 0.01 && WET_TUNE.x > 0.0 && fr.flags.y == 0 && !isFoliage(material) && material != 2 && material != 7) {
         float exposed = smoothstep(0.8, 0.97, skyLight);
         float up = smoothstep(0.6, 0.95, nWorld.y);
         float3 wa = world + fr.camera.xyz;
-        float puddle = up * smoothstep(0.45, 0.62, cloudNoise.sample(rep, float3(wa.xz / 80.0, 0.37)).g);
-        float wet = fr.params.y * exposed;
+        float puddle = WET_TUNE.y > 0.5 ? up * smoothstep(0.45, 0.62, cloudNoise.sample(rep, float3(wa.xz / 80.0, 0.37)).g) : 0.0;
+        float wet = saturate(fr.params.y * exposed * WET_TUNE.x);
         float porous = spm.z > 0.5 && spm.y < 0.26 ? spm.y * 4.0 : 0.6;
         albedo *= mix(1.0, 0.55, wet * porous * (1.0 - puddle * 0.5));
         rough = mix(rough, rough * 0.55, wet);
@@ -1913,7 +1941,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
         float3 F = F0 + (1.0 - F0) * pow(1.0 - vh, 5.0);
         // lightCol is scaled so that Lambert is albedo * N.L; the specular lobe gets the matching pi
         float3 specular = 3.14159 * D * G * F / (4.0 * nv);
-        color += lightCol * waterSun * (albedo * diffuse * (1.0 - F) * (1.0 - metal) + specular * nl) * shadow * skyGate;
+        color += lightCol * waterSun * (albedo * diffuse * (1.0 - F) * (1.0 - metal) + specular * nl * REFL_TUNE2.x) * shadow * skyGate;
         if (foliage) {
             // light passing through thin leaves and blades: some reaches the shaded side,
             // most of it towards a viewer looking at the sun through them
@@ -1930,9 +1958,17 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
         float2 env = float2(-1.04, 1.04) * a004 + r4.zw;
         float3 R = reflect(-v, n);
         float3 Rw = normalize((fr.invView * float4(R, 0)).xyz);
-        // reflected sky; below the horizon, a darkened horizon stands in for the ground
-        float3 envCol = fr.flags.y != 0 ? toLinear(fr.fogColor.rgb) * 0.3
-                                       : skyLut.sample(lin, lutUv(normalize(float3(Rw.x, max(Rw.y, 0.02), Rw.z))), level(rough * 6.0)).rgb;
+        // reflected sky; below the horizon, a darkened horizon stands in for the ground. Smooth
+        // surfaces show the clouds, moon and stars in it too (sky details setting)
+        float3 envCol;
+        if (fr.flags.y != 0) {
+            envCol = toLinear(fr.fogColor.rgb) * 0.3;
+        } else {
+            float3 Rh = normalize(float3(Rw.x, max(Rw.y, 0.02), Rw.z));
+            envCol = skyLut.sample(lin, lutUv(Rh), level(rough * 6.0)).rgb;
+            if (REFL_TUNE2.y > 0.5 && rough < 0.25)
+                envCol = mix(skyRadiance(fr, skyLut, lin, Rh, cloudMap, false), envCol, smoothstep(0.02, 0.25, rough));
+        }
         envCol *= mix(1.0, 0.3, saturate(-Rw.y * 2.5));
         float3 skyVis = float3(skyLight * skyLight * ao * fr.ambient.a);
         if (fr.flags.x & ADV_RT_GI)
@@ -1944,62 +1980,69 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
         // reflections off: no mirror image, but metals keep an even sheen of the sky light
         bool reflOn = REFL_TUNE.x > 0.5 || (ac_rt && (fr.flags.x & ADV_RT_REFL));
         float3 refl = reflOn ? envCol * skyVis : skyAmbient(fr, skyLut, lin, nWorld) * skyVis;
-        // smooth surfaces: traced reflections (RT closest hit, or screen space into last frame's resolve)
-        float smoothW = 1.0 - smoothstep(0.12, 0.4, rough);
+        // surfaces smooth enough (rough reflections setting) reflect their surroundings, blurred
+        // by their roughness (RT closest hit, or screen space into last frame's resolve with
+        // world space behind it); rougher ones reflect only the sky
+        float lim = REFL_TUNE.y;
+        float smoothW = 1.0 - smoothstep(lim * 0.3, max(lim, 1e-3), rough);
         if (smoothW > 0.0 && reflOn) {
-            float3 Rr = R;
-            if (fr.taa.w > 0.5 && rough > 0.05) {
-                // one GGX sample per pixel and frame; TAA integrates the lobe
-                float2 xi = hash22(in.position.xy + float(fr.flags.z % 256u) * float2(17.13, 7.31));
-                float ag = rough * rough;
-                float phi = 6.2831853 * xi.x;
-                float ct = sqrt((1.0 - xi.y) / (1.0 + (ag * ag - 1.0) * xi.y)), st = sqrt(1.0 - ct * ct);
-                float3 up = abs(n.z) < 0.999 ? float3(0, 0, 1) : float3(1, 0, 0);
-                float3 tx = normalize(cross(up, n)), ty = cross(n, tx);
-                float3 hv = normalize(tx * (st * cos(phi)) + ty * (st * sin(phi)) + n * ct);
-                Rr = reflect(-v, hv);
-                if (dot(Rr, n) <= 0.0) Rr = R;
-            }
-            float3 Rrw = normalize((fr.invView * float4(Rr, 0)).xyz);
-            float3 traced = refl;
-            bool hitAny = false;
-            if (ac_rt && (fr.flags.x & ADV_RT_REFL)) {
-                float3 o = world + fr.rtCam.xyz + nWorld * (0.01 + length(eye) * 0.0002);
-                RtHit rh = rtClosest(tlas, rtInst, atlas, pointS, o, Rrw, 256.0);
-                RtHit eh;
-                eh.hit = false;
-                if (fr.flags.x & ADV_RT_ENTITIES) eh = rtEntClosest(entAs, entV, entD, entT, o, Rrw, rh.t);
-                if (eh.hit || rh.hit) {
-                    traced = eh.hit ? rtEntShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, entV, entD, entT, eh, o, Rrw, smoothW > 0.5)
-                                    : rtShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, rh, o, Rrw, smoothW > 0.5);
-                    float hd = length(Rrw * (eh.hit ? eh.t : rh.t) + world);
-                    float hf = saturate((hd - fr.fog.x) / max(fr.fog.y - fr.fog.x, 1.0));
-                    traced = mix(traced, skyBase(fr, skyLut, lin, Rrw), hf * hf);
-                    hitAny = true;
+            // GGX samples of the lobe, TAA integrating them over frames: more per frame, less noise
+            bool lobe = fr.taa.w > 0.5 && rough > 0.05;
+            int samples = lobe ? clamp(int(REFL_TUNE.z + 0.5), 1, 4) : 1;
+            float3 sum = float3(0.0);
+            for (int si = 0; si < samples; si++) {
+                float3 Rr = R;
+                if (lobe) {
+                    float2 xi = hash22(in.position.xy + float(fr.flags.z % 256u) * float2(17.13, 7.31) + float(si) * float2(3.71, 9.13));
+                    float ag = rough * rough;
+                    float phi = 6.2831853 * xi.x;
+                    float ct = sqrt((1.0 - xi.y) / (1.0 + (ag * ag - 1.0) * xi.y)), st = sqrt(1.0 - ct * ct);
+                    float3 up = abs(n.z) < 0.999 ? float3(0, 0, 1) : float3(1, 0, 0);
+                    float3 tx = normalize(cross(up, n)), ty = cross(n, tx);
+                    float3 hv = normalize(tx * (st * cos(phi)) + ty * (st * sin(phi)) + n * ct);
+                    Rr = reflect(-v, hv);
+                    if (dot(Rr, n) <= 0.0) Rr = R;
                 }
-            } else if (REFL_TUNE.x > 0.5) {
-                // screen space (into last frame's resolve, so with TAA only) where the screen
-                // shows what is reflected; world space fills in the rest from the voxel volume
-                float3 hit = float3(0.0);
-                if (fr.taa.w > 0.5) hit = ssr(fr, depth, eye, Rr, fract(hash12(in.position.xy) + float(fr.flags.z % 64u) * 0.618034));
-                float3 back = refl;
-                if (hit.z < 0.99 && (fr.flags.x & ADV_WSR)) {
-                    VoxHit vh = voxTrace(fr, vox, voxShape, voxOcc, voxAtlas, world + fr.voxCam.xyz + nWorld * 0.03, Rrw, 128.0,
-                                         float2(length(eye), 1.0) * pixelAngle(fr));
-                    if (vh.hit) {
-                        back = voxShade(fr, voxAtlas, shadowMap, cmp, skyLut, lin, vh);
-                        float hd = length(Rrw * vh.t + world);
+                float3 Rrw = normalize((fr.invView * float4(Rr, 0)).xyz);
+                float3 traced = refl;   // the sky, where nothing is hit
+                if (ac_rt && (fr.flags.x & ADV_RT_REFL)) {
+                    float3 o = world + fr.rtCam.xyz + nWorld * (0.01 + length(eye) * 0.0002);
+                    RtHit rh = rtClosest(tlas, rtInst, atlas, pointS, o, Rrw, 256.0);
+                    RtHit eh;
+                    eh.hit = false;
+                    if (fr.flags.x & ADV_RT_ENTITIES) eh = rtEntClosest(entAs, entV, entD, entT, o, Rrw, rh.t);
+                    if (eh.hit || rh.hit) {
+                        traced = eh.hit ? rtEntShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, entV, entD, entT, eh, o, Rrw, smoothW > 0.5)
+                                        : rtShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, rh, o, Rrw, smoothW > 0.5);
+                        float hd = length(Rrw * (eh.hit ? eh.t : rh.t) + world);
                         float hf = saturate((hd - fr.fog.x) / max(fr.fog.y - fr.fog.x, 1.0));
-                        back = mix(back, skyBase(fr, skyLut, lin, Rrw), hf * hf);
-                        hitAny = true;
+                        traced = mix(traced, skyBase(fr, skyLut, lin, Rrw), hf * hf);
                     }
+                } else if (REFL_TUNE.x > 0.5) {
+                    float3 hit = float3(0.0);
+                    if (fr.taa.w > 0.5)
+                        hit = ssr(fr, depth, eye, Rr, fract(hash12(in.position.xy) + float(fr.flags.z % 64u) * 0.618034 + float(si) * 0.381966));
+                    if (hit.z < 0.99 && (fr.flags.x & ADV_WSR)) {
+                        VoxHit vh = voxTrace(fr, vox, voxShape, voxOcc, voxOccSlot, voxAtlas, world + fr.voxCam.xyz + nWorld * 0.03, Rrw, REFL_TUNE2.z,
+                                             float2(length(eye), 1.0) * pixelAngle(fr));
+                        if (fr.flags.w == 10u) {   // debug statistics: steps per ray (logged natively)
+                            atomic_fetch_add_explicit(&voxStats[0], uint(vh.steps), memory_order_relaxed);
+                            atomic_fetch_add_explicit(&voxStats[1], 1u, memory_order_relaxed);
+                        }
+                        if (vh.hit) {
+                            traced = voxShade(fr, voxAtlas, shadowMap, cmp, skyLut, lin, vh);
+                            float hd = length(Rrw * vh.t + world);
+                            float hf = saturate((hd - fr.fog.x) / max(fr.fog.y - fr.fog.x, 1.0));
+                            traced = mix(traced, skyBase(fr, skyLut, lin, Rrw), hf * hf);
+                        }
+                    }
+                    if (hit.z > 0.0) traced = mix(traced, history.sample(lin, hit.xy).rgb, hit.z);
                 }
-                traced = hit.z > 0.0 ? mix(back, history.sample(lin, hit.xy).rgb, hit.z) : back;
-                hitAny = hitAny || hit.z > 0.0;
+                sum += traced;
             }
-            if (hitAny) refl = mix(refl, traced, smoothW);
+            refl = mix(refl, sum / float(samples), smoothW);
         }
-        color += refl * (F0 * env.x + env.y);
+        color += refl * (F0 * env.x + env.y) * REFL_TUNE.w;
     }
     // dynamic light from the player's held item: vanilla falloff (one level per block);
     // ray-traced visibility when RT shadows are on, otherwise it passes walls like OptiFine's
@@ -2025,7 +2068,8 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
 
     // debug views: 1 no fog, 2 albedo, 3 normals, 4 white albedo lighting, 5 shadow term, 6 RT shadow,
     // 7 sunlight's path through water (yellow shallow, red deep), 8 lightmap (red sky, green block),
-    // 9 (above) the voxel volume of world-space reflections
+    // 9 (above) the voxel volume of world-space reflections; 10 renders normally and logs the
+    // world-space reflection steps per ray
     uint dbg = fr.flags.w;
     if (dbg == 1) return float4(color, 1.0);
     if (dbg == 2) return float4(albedo, 1.0);
@@ -2279,7 +2323,7 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
                                texture2d<float> waveTex [[texture(9)]], sampler wrep [[sampler(4)]],
                                texture2d<float> gLight [[texture(10)]],
                                texture3d<ushort> vox [[texture(11)]], texture3d<ushort> voxOcc [[texture(12)]],
-                               texture3d<uint> voxShape [[texture(13)]],
+                               texture3d<uint> voxShape [[texture(13)]], texture3d<ushort> voxOccSlot [[texture(14)]],
                                instance_acceleration_structure tlas [[buffer(10), function_constant(ac_rt)]],
                                device const RtInstance* rtInst [[buffer(11), function_constant(ac_rt)]],
                                primitive_acceleration_structure entAs [[buffer(12), function_constant(ac_rt)]],
@@ -2383,7 +2427,7 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
     float3 refr = sceneColor.read(uint2(refrPx)).rgb;
     float thickness = sceneD >= 1.0 ? 64.0 : max(length(sceneEye) - dist, 0.0);
 
-    if (fr.flags.w != 0) return float4(refr, 1.0);   // debug views show through the water
+    if (fr.flags.w != 0 && fr.flags.w < 10u) return float4(refr, 1.0);   // debug views (1-9) show through the water
     // the water column: absorption (red first) and light scattered back by the water itself
     float3 Tw = exp(-thickness * sigT);
     float3 below = refr * Tw + inLight * waterCol * (1.0 - Tw);
@@ -2415,15 +2459,20 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
         R = reflect(dirWorld, nw);
         R = normalize(float3(R.x, max(R.y, 0.003), R.z));
     }
+    // how far the waves bend what is reflected (reflection distortion setting)
+    float3 nr = normalize(mix(nWorld, nw, REFL_TUNE2.w));
+    R = reflect(dirWorld, nr);
+    R = normalize(float3(R.x, max(R.y, 0.003), R.z));
     float F0 = WATER_SURFACE.x;
     float fres = F0 + (1.0 - F0) * pow(1.0 - saturate(cosV), 5.0);
-    fres *= 1.0 - foam;
+    fres = saturate(fres * REFL_TUNE.w) * (1.0 - foam);
     bool reflOn = REFL_TUNE.x > 0.5 || (ac_rt && (fr.flags.x & ADV_RT_REFL));
     if (!reflOn) fres = 0.0;   // reflections off
     // the sky (no sun disk: the glint below is the sun's reflection); under cover, a dim
     // copy of the water's own colour instead of a sky it cannot see
     float skyVis = max(smoothstep(0.6, 0.95, in.lm.y), shadow * shadow * 0.3);
-    float3 refl = mix(inLight * waterCol * 0.5, skyRadiance(fr, skyLut, lin, R, cloudMap, false), skyVis);
+    float3 skyR = REFL_TUNE2.y > 0.5 ? skyRadiance(fr, skyLut, lin, R, cloudMap, false) : skyBase(fr, skyLut, lin, R);
+    float3 refl = mix(inLight * waterCol * 0.5, skyR, skyVis);
     float hitT = 0.0;   // reflected geometry blocks the sun glint
     float jitter = fract(hash12(px) + float(fr.flags.z % 64u) * 0.618034);
     if (ac_rt && (fr.flags.x & ADV_RT_REFL)) {
@@ -2448,7 +2497,7 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
         }
     } else if (fres > 0.02) {
         // screen-space: the march follows a normal 80% of the way to the waves (fewer broken hits)
-        float3 Rs = normalize(reflect(dirWorld, normalize(mix(nWorld, nw, 0.8))));
+        float3 Rs = normalize(reflect(dirWorld, normalize(mix(nWorld, nr, 0.8))));
         Rs.y = max(Rs.y, 0.003);
         float3 hit = ssr(fr, sceneDepth, in.eye + nvFlat * (0.02 + dist * 0.004), normalize((fr.view * float4(Rs, 0)).xyz), jitter);
         if (hit.z > 0.0) {
@@ -2458,7 +2507,7 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
         if (hit.z < 0.99 && (fr.flags.x & ADV_WSR)) {
             // world space: off-screen terrain from the voxel volume where screen space has
             // nothing (along the screen-space ray, so the two agree where they meet)
-            VoxHit vh = voxTrace(fr, vox, voxShape, voxOcc, atlas, in.world + fr.voxCam.xyz + nWorld * 0.02, Rs, 128.0, float2(dist, 1.0) * pixelAngle(fr));
+            VoxHit vh = voxTrace(fr, vox, voxShape, voxOcc, voxOccSlot, atlas, in.world + fr.voxCam.xyz + nWorld * 0.02, Rs, REFL_TUNE2.z, float2(dist, 1.0) * pixelAngle(fr));
             if (vh.hit) {
                 float3 hc = voxShade(fr, atlas, shadowMap, cmp, skyLut, lin, vh);
                 float hd = length(vh.t * Rs + in.world);

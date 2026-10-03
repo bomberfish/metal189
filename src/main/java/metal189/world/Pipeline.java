@@ -145,6 +145,15 @@ public final class Pipeline {
         t[47] = Config.contrast / 100f;
         // reflections: 0 off, 1 screen-space, 2 world-space (voxel volume)
         t[48] = Config.reflections;
+        t[49] = Config.roughReflections / 100f;
+        t[50] = 1 << Config.roughReflectionQuality;
+        t[51] = Config.reflectionStrength / 100f;
+        t[52] = Config.specularHighlights / 100f;
+        t[53] = Config.reflectionSkyDetails ? 1 : 0;
+        t[54] = Config.reflectionDistance;
+        t[55] = Config.waterReflectionDistortion / 100f;
+        t[56] = Config.rainWetness / 100f;
+        t[57] = Config.rainPuddles ? 1 : 0;
         for (int i = 0; i < TUNING; i++) metal189.engine.Mem.putFloat(tuning + i * 4L, t[i]);
         Native.advSetTuning(tuning, TUNING);
     }
