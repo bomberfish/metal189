@@ -1,0 +1,43 @@
+sleep 3
+world ref1 1234567
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /time set 5000
+cmd /tp @p 64 96 -32 135 12
+config shaders true
+sleep 6
+capture CAPTURE_A
+config rtShadows true
+config rtReflections true
+sleep 5
+capture CAPTURE_B
+cmd /tp @p 900 100 900 135 12
+sleep 10
+capture CAPTURE_C
+dim -1
+sleep 8
+cmd /fill ~-10 ~-4 ~-10 ~10 ~5 ~10 air
+cmd /setblock ~3 ~-1 ~-4 glowstone
+cmd /setblock ~-2 ~-4 ~-6 lava
+sleep 5
+capture CAPTURE_D
+dim 0
+sleep 6
+cmd /tp @p 64 96 -32 135 12
+sleep 8
+capture CAPTURE_E
+config shaders false
+sleep 3
+capture CAPTURE_F
+config shaders true
+config rtShadows false
+reload
+sleep 6
+capture CAPTURE_G
+config rtReflections false
+config shadowResolution 8192
+config taa false
+sleep 3
+capture CAPTURE_H
+quit

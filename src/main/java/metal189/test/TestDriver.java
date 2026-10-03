@@ -153,7 +153,8 @@ public final class TestDriver {
                     srv.addScheduledTask(new Runnable() {
                         public void run() {
                             net.minecraft.entity.player.EntityPlayerMP p = srv.getConfigurationManager().getPlayerByUsername(name);
-                            if (p != null) p.travelToDimension(dim);
+                            // no portal: vanilla's portal search NPEs when travelling without one
+                            if (p != null) srv.getConfigurationManager().transferPlayerToDimension(p, dim, new NoPortal(srv.worldServerForDimension(dim)));
                         }
                     });
                 }
@@ -219,6 +220,22 @@ public final class TestDriver {
                 mc.refreshResources();
                 return true;
             }
+            case "config": {
+                // config FIELD VALUE : set a metal189.config.Config field and re-apply the pipeline
+                try {
+                    java.lang.reflect.Field f = metal189.config.Config.class.getField(a[1]);
+                    if (f.getType() == boolean.class) f.setBoolean(null, Boolean.parseBoolean(a[2]));
+                    else if (f.getType() == int.class) f.setInt(null, Integer.parseInt(a[2]));
+                    metal189.world.Pipeline.apply();
+                } catch (Exception ex) {
+                    Native.LOG.warn("metal189-test: config {}: {}", a[1], ex.toString());
+                }
+                return true;
+            }
+            case "reload":
+                // like F3+A
+                if (mc.renderGlobal != null) mc.renderGlobal.loadRenderers();
+                return true;
             case "toggle":
                 // same path as the toggle keybind (saves config/metal189.properties)
                 metal189.world.Pipeline.toggle();
@@ -255,5 +272,25 @@ public final class TestDriver {
                 Native.LOG.warn("metal189-test: unknown command {}", line);
                 return true;
         }
+    }
+
+    /** Places the travelling entity without searching for or building a portal. */
+    static final class NoPortal extends net.minecraft.world.Teleporter {
+        NoPortal(net.minecraft.world.WorldServer w) { super(w); }
+
+        @Override
+        public void placeInPortal(net.minecraft.entity.Entity e, float yaw) {
+            e.setLocationAndAngles(e.posX, 64.0, e.posZ, e.rotationYaw, 0.0F);
+            e.motionX = e.motionY = e.motionZ = 0.0;
+        }
+
+        @Override
+        public boolean placeInExistingPortal(net.minecraft.entity.Entity e, float yaw) { return true; }
+
+        @Override
+        public boolean makePortal(net.minecraft.entity.Entity e) { return true; }
+
+        @Override
+        public void removeStalePortalLocations(long time) {}
     }
 }
