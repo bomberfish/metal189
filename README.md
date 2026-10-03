@@ -17,13 +17,15 @@ entity models, GUI layout). It ships two renderers and an optional ray tracing t
   whole loaded world, ray-traced reflections (water, metals, polished and wet
   surfaces), ray-traced ambient occlusion and one-bounce global illumination.
 
-It is an OptiFine replacement: do not install OptiFine alongside it.
+It is an OptiFine replacement: if OptiFine is installed too, metal189 stays disabled
+(the game runs with vanilla OpenGL and a notice on the main menu explains why).
 
 ## Requirements
 
 * macOS 14 or newer (macOS 15+ recommended: ray tracing uses residency sets there).
-* Apple silicon. Ray tracing needs a GPU with Metal ray tracing support
-  (hardware-accelerated on M3 and later; earlier chips run it on shader cores).
+* Apple silicon (the native library is universal, so x86_64 Java under Rosetta also
+  works). Ray tracing runs on every Apple silicon GPU and is hardware-accelerated on
+  M3 and later.
 * Minecraft 1.8.9 with Forge 11.15.1.x (for example a Prism Launcher instance).
 
 ## Installing

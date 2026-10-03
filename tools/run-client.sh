@@ -11,7 +11,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUN="${RUN_DIR:-$ROOT/run}"
 PRISM="$HOME/Library/Application Support/PrismLauncher"
-JAVA=/Library/Java/JavaVirtualMachines/zulu-8.jdk/Contents/Home/bin/java
+JAVA=${M189_JAVA:-/Library/Java/JavaVirtualMachines/zulu-8.jdk/Contents/Home/bin/java}
 JVM=()
 GAME=()
 WINDOW=background
@@ -33,7 +33,7 @@ cp "$ROOT/build/libs/metal189-0.1.0.jar" "$RUN/mods/metal189.jar"
 CP="$(cat "$RUN/classpath.txt")"
 cd "$RUN"
 exec "$JAVA" -Xmx4G -Xms1G -XX:+UseG1GC \
-  -Djava.library.path="$RUN/natives" -Dorg.lwjgl.librarypath="$RUN/natives" \
+  -Djava.library.path="${M189_NATIVES:-$RUN/natives}" -Dorg.lwjgl.librarypath="${M189_NATIVES:-$RUN/natives}" \
   -Dapple.awt.UIElement=true \
   -Dmetal189.window="$WINDOW" -Dmetal189.noGrab=true \
   ${NATIVEDIR[@]+"${NATIVEDIR[@]}"} \

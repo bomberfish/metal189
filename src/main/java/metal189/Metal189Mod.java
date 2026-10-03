@@ -11,6 +11,10 @@ import net.minecraftforge.fml.common.event.FMLInitializationEvent;
 public class Metal189Mod {
     @Mod.EventHandler
     public void init(FMLInitializationEvent e) {
+        if (metal189.core.Settings.conflict != null) {
+            MinecraftForge.EVENT_BUS.register(new metal189.gui.ConflictNotice(metal189.core.Settings.conflict));
+            return;
+        }
         if (metal189.core.Settings.DISABLED) return;
         Config.load();
         ClientEvents events = new ClientEvents();

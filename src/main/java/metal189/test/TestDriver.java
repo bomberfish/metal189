@@ -131,7 +131,7 @@ public final class TestDriver {
                 leavingDimension = false;
                 return true;
             case "capture": {
-                if (metal189.core.Settings.DISABLED) {
+                if (metal189.core.Settings.reference()) {
                     pendingCapture = a[1]; // taken from the next frame, before its swap
                     waitFrames = 1;
                     return false;

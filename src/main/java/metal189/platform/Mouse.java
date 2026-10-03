@@ -16,7 +16,7 @@ public final class Mouse {
     private Mouse() {}
 
     // ---- org.lwjgl.input.Mouse ----
-    static boolean created = Settings.DISABLED; // reference mode: LWJGL's Display owns the window
+    static boolean created = Settings.reference(); // reference mode: LWJGL's Display owns the window
     private static boolean isGrabbed;
     private static int x, y, absolute_x, absolute_y, dx, dy, dwheel;
     private static int grab_x, grab_y;
@@ -213,8 +213,8 @@ public final class Mouse {
         }
     }
 
-    private static int width() { return Settings.DISABLED ? org.lwjgl.opengl.Display.getWidth() : Display.getWidth(); }
-    private static int height() { return Settings.DISABLED ? org.lwjgl.opengl.Display.getHeight() : Display.getHeight(); }
+    private static int width() { return Settings.reference() ? org.lwjgl.opengl.Display.getWidth() : Display.getWidth(); }
+    private static int height() { return Settings.reference() ? org.lwjgl.opengl.Display.getHeight() : Display.getHeight(); }
 
     public static int getEventButton() { return eventButton; }
     public static boolean getEventButtonState() { return eventState; }

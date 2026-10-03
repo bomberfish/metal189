@@ -8,9 +8,9 @@ SHADERS   := $(wildcard shaders/*.metal)
 AIR       := $(patsubst shaders/%.metal,$(BUILD)/air/%.air,$(SHADERS))
 
 CXXFLAGS  := -std=c++20 -O2 -g -fobjc-arc -fvisibility=hidden -Wall -Wextra -Wno-unused-parameter \
-             -mmacosx-version-min=14.0 -arch arm64 \
+             -mmacosx-version-min=14.0 -arch arm64 -arch x86_64 \
              -I$(JAVA_HOME)/include -I$(JAVA_HOME)/include/darwin -Isrc -Ishaders
-LDFLAGS   := -dynamiclib -arch arm64 -mmacosx-version-min=14.0 \
+LDFLAGS   := -dynamiclib -arch arm64 -arch x86_64 -mmacosx-version-min=14.0 \
              -framework Cocoa -framework Metal -framework QuartzCore -framework CoreVideo \
              -framework IOKit -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers -install_name @rpath/libmetal189.dylib
 MTLFLAGS  := -std=metal3.1 -O3 -ffast-math -Ishaders -Wall

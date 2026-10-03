@@ -15,6 +15,12 @@ public final class Settings {
     /** Verbose logging of unimplemented GL entry points. */
     public static final boolean DEBUG_GL = Boolean.getBoolean("metal189.debugGL");
 
+    /** Set when an incompatible renderer mod (OptiFine) is installed: metal189 then stays inactive. */
+    public static String conflict;
+
+    /** Vanilla OpenGL renders (reference captures, or an incompatible mod is installed). */
+    public static boolean reference() { return DISABLED || conflict != null; }
+
     public static boolean background() {
         return "background".equals(WINDOW_MODE) || offscreen();
     }
