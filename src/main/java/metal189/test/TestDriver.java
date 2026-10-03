@@ -55,6 +55,7 @@ public final class TestDriver {
     }
 
     private static int hurtTicks;
+    private static boolean leavingDimension;
     private static float spinRate;
     private static int spinFrames;
 
@@ -110,6 +111,22 @@ public final class TestDriver {
             case "sleep": waitUntil = System.nanoTime() + (long) (Double.parseDouble(a[1]) * 1e9); return false;
             case "waitWorld":
                 if (mc.theWorld == null || mc.thePlayer == null || mc.renderGlobal == null) { pc--; return false; }
+                // scenes start alive in the overworld, whatever state an earlier run saved
+                if (mc.thePlayer.getHealth() <= 0.0F || mc.thePlayer.isDead) {
+                    mc.thePlayer.respawnPlayer();
+                    mc.displayGuiScreen(null);
+                    pc--;
+                    return false;
+                }
+                if (mc.thePlayer.dimension != 0) {
+                    if (!leavingDimension) {
+                        leavingDimension = true;
+                        run("dim 0");
+                    }
+                    pc--;
+                    return false;
+                }
+                leavingDimension = false;
                 return true;
             case "capture": {
                 if (metal189.core.Settings.DISABLED) {
@@ -154,7 +171,7 @@ public final class TestDriver {
                         public void run() {
                             net.minecraft.entity.player.EntityPlayerMP p = srv.getConfigurationManager().getPlayerByUsername(name);
                             // no portal: vanilla's portal search NPEs when travelling without one
-                            if (p != null) srv.getConfigurationManager().transferPlayerToDimension(p, dim, new NoPortal(srv.worldServerForDimension(dim)));
+                            if (p != null) srv.getConfigurationManager().transferPlayerToDimension(p, dim, new NoPortal(srv.worldServerForDimension(dim), dim));
                         }
                     });
                 }
@@ -276,12 +293,24 @@ public final class TestDriver {
 
     /** Places the travelling entity without searching for or building a portal. */
     static final class NoPortal extends net.minecraft.world.Teleporter {
-        NoPortal(net.minecraft.world.WorldServer w) { super(w); }
+        NoPortal(net.minecraft.world.WorldServer w, int dim) {
+            super(w);
+            this.dim = dim;
+        }
+
+        private final int dim;
 
         @Override
         public void placeInPortal(net.minecraft.entity.Entity e, float yaw) {
-            e.setLocationAndAngles(e.posX, 64.0, e.posZ, e.rotationYaw, 0.0F);
+            // the End: above the main island; elsewhere: same x/z at y 64. Players start flying
+            if (dim == 1) e.setLocationAndAngles(0.5, 90.0, 0.5, e.rotationYaw, 0.0F);
+            else e.setLocationAndAngles(e.posX, 64.0, e.posZ, e.rotationYaw, 0.0F);
             e.motionX = e.motionY = e.motionZ = 0.0;
+            if (e instanceof net.minecraft.entity.player.EntityPlayerMP) {
+                net.minecraft.entity.player.EntityPlayerMP p = (net.minecraft.entity.player.EntityPlayerMP) e;
+                p.capabilities.isFlying = true;
+                p.sendPlayerAbilities();
+            }
         }
 
         @Override

@@ -14,7 +14,8 @@ entity models, GUI layout). It ships two renderers and an optional ray tracing t
   sky, volumetric clouds and light shafts, water with refraction and reflections,
   bloom, TAA, auto exposure and LabPBR resource pack support.
 * **Ray tracing** (optional): hardware-accelerated ray-traced sun shadows over the
-  whole loaded world, and ray-traced water reflections.
+  whole loaded world, ray-traced reflections (water, metals, polished and wet
+  surfaces) and ray-traced ambient occlusion.
 
 It is an OptiFine replacement: do not install OptiFine alongside it.
 
@@ -56,7 +57,8 @@ It is an OptiFine replacement: do not install OptiFine alongside it.
 | Auto Exposure | on | Eye adaptation (scene log-average luminance, on the GPU) |
 | Exposure | 100% | Manual exposure bias |
 | RT Shadows | off | Ray-traced sun shadows for all loaded terrain |
-| RT Reflections | off | Ray-traced water reflections (off-screen geometry included) |
+| RT Reflections | off | Ray-traced reflections on water, metals, polished and wet surfaces |
+| RT Ambient Occlusion | off | Short-range ray-traced occlusion of indirect light (denoised) |
 
 ### PBR resource packs
 

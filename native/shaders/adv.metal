@@ -852,6 +852,30 @@ fragment float4 aoblur_fragment(FullscreenOut in [[stage_in]], constant AdvFrame
     return float4(sum / max(wsum, 1e-4), 1.0, 1.0, 1.0);
 }
 
+// Water as a participating medium (per block): absorption takes red first, turbidity
+// scatters the light that reaches the water back towards the eye.
+constant float3 kWaterAbsorb = float3(0.30, 0.075, 0.05);
+constant float kWaterScatter = 0.07;
+
+static float3 underwaterInscatter(constant AdvFrame& fr, texture2d<float> skyLut, sampler lin) {
+    float3 sun = fr.sunDirWorld.w > 0.0 ? fr.sunColor.rgb : fr.moonColor.rgb;
+    float3 light = skyLut.sample(lin, float2(0.5, 1.0), level(5)).rgb * 1.2 + sun * 0.35;
+    float3 sigT = kWaterAbsorb + kWaterScatter;
+    return light * float3(0.12, 0.5, 0.6) * (kWaterScatter / sigT);
+}
+
+// Animated caustics on underwater surfaces (warped interference pattern).
+static float caustics(float2 p, float t) {
+    float2 q = p * 0.55;
+    float c = 0.0;
+    for (int i = 0; i < 3; i++) {
+        q += float2(sin(q.y * 1.7 + t * 0.9), cos(q.x * 1.3 - t * 0.7)) * 0.4;
+        c += abs(sin(q.x * 2.1) * sin(q.y * 2.3));
+    }
+    c /= 3.0;
+    return c * c * c * 4.0;
+}
+
 static float3 ssr(constant AdvFrame& fr, depth2d<float> depthTex, float3 eyePos, float3 rdView);
 
 static inline float2 hash22(float2 p) {
@@ -890,7 +914,8 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     float3 dirWorld = normalize((fr.invView * float4(eye, 0)).xyz);
     if (d >= 1.0) {
         float3 sky = skyRadiance(fr, skyLut, lin, dirWorld, cloudMap);
-        if (fr.fog.w > 0.5) sky = toLinear(fr.fogColor.rgb) * 0.4;
+        if (fr.fog.w > 1.5) sky = toLinear(fr.fogColor.rgb) * 2.0;
+        else if (fr.fog.w > 0.5) sky = underwaterInscatter(fr, skyLut, lin);
         return float4(sky, 1.0);
     }
 
@@ -968,6 +993,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
         float3 F = F0 + (1.0 - F0) * pow(1.0 - vh, 5.0);
         // lightCol is scaled so that Lambert is albedo * N.L; the specular lobe gets the matching pi
         float3 specular = 3.14159 * D * G * F / (4.0 * nv);
+        if (fr.fog.w > 0.5 && fr.fog.w < 1.5) shadow *= 0.3 + caustics((world + fr.camera.xyz).xz, fr.params.x);
         color += lightCol * (albedo * diffuse * (1.0 - F) * (1.0 - metal) + specular * nl) * shadow * skyGate;
     }
     // sky light: diffuse irradiance + split-sum specular reflection (Lazarov's environment BRDF fit)
@@ -1032,6 +1058,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     color += albedo * nrm.w * 6.0;
     color += albedo * 0.004 * ao;
     if (int(fr.flags.y) == -1) color += albedo * 0.03; // Nether ambient
+    if (int(fr.flags.y) == 1) color += albedo * float3(0.045, 0.038, 0.06); // the End's dim violet ambient
 
     // debug views: 1 no fog, 2 albedo, 3 normals, 4 white albedo lighting, 5 shadow term
     uint dbg = fr.flags.w;
@@ -1043,11 +1070,13 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     if (dbg == 6) return float4(float3(rtShadow), 1.0);
 
     float dist = length(eye);
-    if (fr.fog.w > 0.5) {
-        // underwater / lava: exponential absorption towards the fluid colour
-        float3 fc = toLinear(fr.fogColor.rgb) * 0.4;
-        float3 absorb = exp(-dist * (fr.fog.w > 1.5 ? float3(1.2) : float3(0.12, 0.06, 0.035)));
-        color = mix(fc, color, absorb);
+    if (fr.fog.w > 1.5) {
+        // inside lava
+        color = mix(toLinear(fr.fogColor.rgb) * 2.0, color, exp(-dist * 1.2));
+    } else if (fr.fog.w > 0.5) {
+        // underwater: absorption and in-scattering along the view ray
+        float3 tv = exp(-dist * (kWaterAbsorb + kWaterScatter));
+        color = color * tv + underwaterInscatter(fr, skyLut, lin) * (1.0 - tv);
     } else {
         float fogF = saturate((dist - fr.fog.x) / max(fr.fog.y - fr.fog.x, 1.0));
         fogF *= fogF;
@@ -1161,6 +1190,24 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
     float3 bump = float3(waveHeight(wp + float2(e, 0), time) - h0, 0, waveHeight(wp + float2(0, e), time) - h0) / e;
     float3 nw = abs(nWorld.y) > 0.5 ? normalize(float3(-bump.x * 0.25, nWorld.y, -bump.z * 0.25)) : nWorld;
     float3 nv = normalize((fr.view * float4(nw, 0)).xyz);
+
+    // seen from below (vanilla draws the top face a second time, reversed): Snell's window
+    // shows the refracted sky, outside it total internal reflection of the lit water
+    if (nWorld.y < -0.5) {
+        float3 nDown = normalize(float3(bump.x * 0.25, -1.0, bump.z * 0.25));
+        float3 inScat = underwaterInscatter(fr, skyLut, lin);
+        float3 tr = refract(dirWorld, nDown, 1.33);
+        float3 c;
+        if (dot(tr, tr) < 1e-6) {
+            c = inScat * 1.2;
+        } else {
+            float cosI = saturate(dot(-dirWorld, nDown));
+            float fr0 = 0.02 + 0.98 * pow(1.0 - cosI, 5.0);
+            c = mix(skyRadiance(fr, skyLut, lin, normalize(tr), cloudMap) * skyGate, inScat * 1.2, fr0);
+        }
+        float3 tv = exp(-length(in.eye) * (kWaterAbsorb + kWaterScatter));
+        return float4(c * tv + inScat * (1.0 - tv), 1.0);
+    }
 
     // refraction: offset the opaque scene lookup along the wave normal (fading out at the
     // screen edges), then absorption + turbid in-scattering through the water column

@@ -1,0 +1,27 @@
+sleep 3
+world ref1 1234567
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /time set 6000
+cmd /weather clear
+cmd /tp @p 80.5 61 -224.5 160 5
+sleep 8
+capture CAPTURE_A
+cmd /tp @p 64 96 -32 135 12
+sleep 4
+dim 1
+sleep 8
+fly
+cmd /tp @p 20 75 20 225 15
+sleep 8
+capture CAPTURE_B
+dim -1
+sleep 8
+fly
+cmd /fill ~-12 ~-5 ~-12 ~12 ~6 ~12 air
+cmd /setblock ~4 ~-2 ~-5 glowstone
+cmd /fill ~-6 ~-5 ~-8 ~-3 ~-5 ~-6 lava
+sleep 5
+capture CAPTURE_C
+quit
