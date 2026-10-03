@@ -155,6 +155,8 @@ bool executorInit() {
         s.opRGB[0] = s.opRGB[1] = 0x300; s.opRGB[2] = 0x302;
         s.opA[0] = s.opA[1] = s.opA[2] = 0x302;
         s.rgbScale = s.alphaScale = 1;
+        s.minFilter = 0x2702; s.magFilter = 0x2601; s.wrapS = s.wrapT = 0x2901;
+        s.maxLevel = 1000; s.minLod = -1000; s.maxLod = 1000; s.aniso = 1;
     }
     g.light.lightBits = 0;
     g.light.modelAmbient[0] = g.light.modelAmbient[1] = g.light.modelAmbient[2] = 0.2f;
@@ -685,7 +687,9 @@ static bool prepareDraw(Exec& x, uint32_t glPrim, int format) {
     for (int i = 0; i < 3; i++) {
         if (!units[i]) continue;
         id<MTLTexture> t = units[i]->tex;
-        id<MTLSamplerState> s = textureSampler(*units[i]);
+        const UnitState& us = g.units[i];
+        id<MTLSamplerState> s = samplerFor((int)us.minFilter, (int)us.magFilter, (int)us.wrapS, (int)us.wrapT,
+                                           (int)us.maxLevel, us.minLod, us.maxLod, us.aniso);
         if (t != x.bTex[i]) { [x.enc setFragmentTexture:t atIndex:i]; x.bTex[i] = t; }
         if (s != x.bSmp[i]) { [x.enc setFragmentSamplerState:s atIndex:i]; x.bSmp[i] = s; }
     }

@@ -200,7 +200,11 @@ static float4 texEnv(uint4 env, float4 envScale, float4 texel, float4 primary, f
     return saturate(float4(rgb * envScale.x, a * envScale.y));
 }
 
-static bool alphaPass(uint func, float a, float ref) {
+// GL converts both the fragment alpha and the reference to the colour buffer's
+// fixed-point precision (8 bits) before comparing.
+static bool alphaPass(uint func, float af, float reff) {
+    float a = rint(saturate(af) * 255.0);
+    float ref = rint(saturate(reff) * 255.0);
     switch (func) {
         case 0: return false;          // NEVER
         case 1: return a < ref;        // LESS

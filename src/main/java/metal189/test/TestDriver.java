@@ -54,10 +54,20 @@ public final class TestDriver {
         Native.LOG.info("metal189-test capture {} -> {}", path, ok ? "ok" : "FAILED");
     }
 
+    private static int hurtTicks;
+
     /** Called after every presented frame. */
     public static void onFrame() {
         if (!active) return;
         frame++;
+        if (hurtTicks > 0) {
+            Minecraft m = Minecraft.getMinecraft();
+            if (m.theWorld != null) {
+                for (Object o : m.theWorld.loadedEntityList) {
+                    if (o instanceof net.minecraft.entity.EntityLivingBase && o != m.thePlayer) ((net.minecraft.entity.EntityLivingBase) o).hurtTime = hurtTicks;
+                }
+            }
+        }
         if (fpsLabel != null) {
             fpsFrames++;
             long now = System.nanoTime();
@@ -103,13 +113,30 @@ public final class TestDriver {
             }
             case "world": {
                 long seed = a.length > 2 ? Long.parseLong(a[2]) : 1L;
-                WorldSettings ws = new WorldSettings(seed, WorldSettings.GameType.CREATIVE, true, false, WorldType.DEFAULT);
+                WorldType type = a.length > 3 && "flat".equals(a[3]) ? WorldType.FLAT : WorldType.DEFAULT;
+                WorldSettings ws = new WorldSettings(seed, WorldSettings.GameType.CREATIVE, true, false, type);
                 ws.enableCommands();
                 mc.launchIntegratedServer(a[1], a[1], ws);
                 return false;
             }
-            case "cmd":
-                if (mc.thePlayer != null) mc.thePlayer.sendChatMessage(line.substring(4).trim());
+            case "cmd": {
+                String c = line.substring(4).trim();
+                final net.minecraft.server.MinecraftServer srv = net.minecraft.server.MinecraftServer.getServer();
+                if (srv != null && mc.thePlayer != null) {
+                    final String cmdText = c;
+                    final net.minecraft.entity.player.EntityPlayerMP p = srv.getConfigurationManager().getPlayerByUsername(mc.thePlayer.getName());
+                    if (p != null) {
+                        srv.addScheduledTask(new Runnable() {
+                            public void run() { srv.getCommandManager().executeCommand(p, cmdText); }
+                        });
+                        return true;
+                    }
+                }
+                if (mc.thePlayer != null) mc.thePlayer.sendChatMessage(c);
+                return true;
+            }
+            case "hurtall":
+                hurtTicks = Integer.parseInt(a[1]);
                 return true;
             case "look":
                 if (mc.thePlayer != null) {
@@ -119,6 +146,21 @@ public final class TestDriver {
                 return true;
             case "gui":
                 if ("none".equals(a[1])) mc.displayGuiScreen(null);
+                else if ("inventory".equals(a[1]) && mc.thePlayer != null) mc.displayGuiScreen(new net.minecraft.client.gui.inventory.GuiContainerCreative(mc.thePlayer));
+                else if ("survival".equals(a[1]) && mc.thePlayer != null) mc.displayGuiScreen(new net.minecraft.client.gui.inventory.GuiInventory(mc.thePlayer));
+                else if ("options".equals(a[1])) mc.displayGuiScreen(new net.minecraft.client.gui.GuiOptions(null, mc.gameSettings));
+                return true;
+            case "f3":
+                mc.gameSettings.showDebugInfo = !mc.gameSettings.showDebugInfo;
+                return true;
+            case "hidegui":
+                mc.gameSettings.hideGUI = !mc.gameSettings.hideGUI;
+                return true;
+            case "slot":
+                if (mc.thePlayer != null) mc.thePlayer.inventory.currentItem = Integer.parseInt(a[1]);
+                return true;
+            case "perspective":
+                mc.gameSettings.thirdPersonView = Integer.parseInt(a[1]);
                 return true;
             case "fps":
                 fpsStart = System.nanoTime();

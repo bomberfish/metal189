@@ -41,6 +41,9 @@ struct UnitState {
     uint32_t enabled, tex, mode, combineRGB, combineA;
     uint32_t srcRGB[3], srcA[3], opRGB[3], opA[3];
     float envColor[4]; float rgbScale, alphaScale;
+    // sampling parameters of the bound texture at draw time (GL texture-object state)
+    uint32_t minFilter, magFilter, wrapS, wrapT, maxLevel;
+    float minLod, maxLod, aniso;
 };
 struct TexGenState { uint32_t bits; uint32_t mode[4]; float objPlane[16]; float eyePlane[16]; };
 struct LightState {
@@ -54,7 +57,7 @@ static_assert(sizeof(PipeState) == 9 * 4, "");
 static_assert(sizeof(DepthState) == 4 * 4, "");
 static_assert(sizeof(RasterState) == 8 * 4, "");
 static_assert(sizeof(FragState) == 13 * 4, "");
-static_assert(sizeof(UnitState) == 23 * 4, "");
+static_assert(sizeof(UnitState) == 31 * 4, "");
 static_assert(sizeof(TexGenState) == 37 * 4, "");
 static_assert(sizeof(LightState) == 33 * 4, "");
 static_assert(sizeof(AttribState) == 15 * 4, "");

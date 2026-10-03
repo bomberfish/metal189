@@ -71,12 +71,12 @@ static MTLSamplerAddressMode addressMode(int wrap) {
         case 0x2901: return MTLSamplerAddressModeRepeat;          // GL_REPEAT
         case 0x8370: return MTLSamplerAddressModeMirrorRepeat;    // GL_MIRRORED_REPEAT
         case 0x812D: return MTLSamplerAddressModeClampToBorderColor; // GL_CLAMP_TO_BORDER
-        default: return MTLSamplerAddressModeClampToEdge;         // GL_CLAMP, GL_CLAMP_TO_EDGE
+        case 0x2900: return MTLSamplerAddressModeClampToBorderColor; // GL_CLAMP: border texels (transparent black)
+        default: return MTLSamplerAddressModeClampToEdge;         // GL_CLAMP_TO_EDGE
     }
 }
 
-static id<MTLSamplerState> samplerFor(const TexEntry& t) {
-    int minF = t.minFilter, magF = t.magFilter;
+id<MTLSamplerState> samplerFor(int minF, int magF, int wrapS, int wrapT, int maxLevel, float minLod, float maxLod, float anisoIn) {
     MTLSamplerMinMagFilter min = MTLSamplerMinMagFilterNearest, mag = MTLSamplerMinMagFilterNearest;
     MTLSamplerMipFilter mip = MTLSamplerMipFilterNotMipmapped;
     switch (minF) {
@@ -88,12 +88,12 @@ static id<MTLSamplerState> samplerFor(const TexEntry& t) {
         default: break;
     }
     if (magF == 0x2601) mag = MTLSamplerMinMagFilterLinear;
-    float lodMin = std::max(0.0f, t.minLod);
-    float lodMax = std::min(t.maxLod, (float)std::min(t.maxLevel, 1000));
+    float lodMin = std::max(0.0f, minLod);
+    float lodMax = std::min(maxLod, (float)std::min(maxLevel, 1000));
     if (lodMax < lodMin) lodMax = lodMin;
-    int aniso = (int)std::clamp(t.aniso, 1.0f, 16.0f);
-    uint64_t key = (uint64_t)min | (uint64_t)mag << 2 | (uint64_t)mip << 4 | (uint64_t)addressMode(t.wrapS) << 6 |
-                   (uint64_t)addressMode(t.wrapT) << 10 | (uint64_t)(aniso & 31) << 14 |
+    int aniso = (int)std::clamp(anisoIn, 1.0f, 16.0f);
+    uint64_t key = (uint64_t)min | (uint64_t)mag << 2 | (uint64_t)mip << 4 | (uint64_t)addressMode(wrapS) << 6 |
+                   (uint64_t)addressMode(wrapT) << 10 | (uint64_t)(aniso & 31) << 14 |
                    (uint64_t)(uint32_t)(lodMin * 16) << 20 | (uint64_t)(uint32_t)(std::min(lodMax, 64.0f) * 16) << 40;
     auto it = g_samplers.find(key);
     if (it != g_samplers.end()) return it->second;
@@ -101,8 +101,8 @@ static id<MTLSamplerState> samplerFor(const TexEntry& t) {
     d.minFilter = min;
     d.magFilter = mag;
     d.mipFilter = mip;
-    d.sAddressMode = addressMode(t.wrapS);
-    d.tAddressMode = addressMode(t.wrapT);
+    d.sAddressMode = addressMode(wrapS);
+    d.tAddressMode = addressMode(wrapT);
     d.rAddressMode = MTLSamplerAddressModeClampToEdge;
     d.borderColor = MTLSamplerBorderColorTransparentBlack;
     d.lodMinClamp = lodMin;
@@ -112,11 +112,6 @@ static id<MTLSamplerState> samplerFor(const TexEntry& t) {
     id<MTLSamplerState> s = [device() newSamplerStateWithDescriptor:d];
     g_samplers[key] = s;
     return s;
-}
-
-id<MTLSamplerState> textureSampler(TexEntry& t) {
-    if (!t.sampler) t.sampler = samplerFor(t);
-    return t.sampler;
 }
 
 void texParams(int id, int minF, int magF, int wrapS, int wrapT, int maxLevel, float minLod, float maxLod, float aniso) {

@@ -131,6 +131,7 @@ public final class Draw {
             for (int i = 0; i < 4; i++) Mem.putFloat(q + 68 + i * 4, e.color[i]);
             Mem.putFloat(q + 84, e.rgbScale);
             Mem.putFloat(q + 88, e.alphaScale);
+            Textures.writeSampler(boundTex[u], q + 92);
         }
     }
 

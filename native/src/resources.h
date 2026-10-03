@@ -26,7 +26,7 @@ TexEntry* texture(int id);
 TexEntry* renderbuffer(int id);
 id<MTLBuffer> mesh(int id);
 const VertexLayout* layout(int id);
-id<MTLSamplerState> textureSampler(TexEntry& t);
+id<MTLSamplerState> samplerFor(int minF, int magF, int wrapS, int wrapT, int maxLevel, float minLod, float maxLod, float aniso);
 
 void formatRegister(int id, int stride, const int32_t* attrs, int count);
 void texImage(int id, int level, int internalFormat, int w, int h, int format, int type, const void* data, int rowLength);

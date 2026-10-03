@@ -77,7 +77,7 @@ public final class Textures {
         t.internalFormat = internalFormat;
         t.w[level] = w;
         t.h[level] = h;
-        pushParams(t);
+        if (level == 0) Native.texParams(t.id, t.minFilter, t.magFilter, t.wrapS, t.wrapT, t.maxLevel, t.minLod, t.maxLod, t.aniso);
         long addr = data == null ? 0 : Mem.positionAddress(data) + unpackOffset(w, format, type);
         Native.texImage(t.id, level, internalFormat, w, h, format, type, addr, rowLength(w));
     }
@@ -85,7 +85,6 @@ public final class Textures {
     public static void texSubImage2D(int target, int level, int x, int y, int w, int h, int format, int type, Buffer data) {
         Tex t = bound();
         if (t == null || data == null || w <= 0 || h <= 0) return;
-        pushParams(t);
         long addr = Mem.positionAddress(data) + unpackOffset(w, format, type);
         Native.texSubImage(t.id, level, x, y, w, h, format, type, addr, rowLength(w));
     }
@@ -163,10 +162,28 @@ public final class Textures {
         pushParams(t);
     }
 
+    /**
+     * Sampling parameters are texture-object state that vanilla changes
+     * mid-frame (e.g. setBlurMipmap around GUI items); they travel with each
+     * draw in the units state rather than being applied to the texture.
+     */
     private static void pushParams(Tex t) {
         if (!t.paramsDirty) return;
         t.paramsDirty = false;
-        Native.texParams(t.id, t.minFilter, t.magFilter, t.wrapS, t.wrapT, t.maxLevel, t.minLod, t.maxLod, t.aniso);
+        for (int u = 0; u < 3; u++) if (GL.boundTex[u] == t.id) GL.dirty |= GL.D_UNITS;
+    }
+
+    static void writeSampler(int id, long p) {
+        Tex t = id == 0 ? null : textures.get(id);
+        if (t == null) {
+            Mem.putInt(p, GL_NEAREST_MIPMAP_LINEAR); Mem.putInt(p + 4, GL_LINEAR);
+            Mem.putInt(p + 8, GL_REPEAT); Mem.putInt(p + 12, GL_REPEAT); Mem.putInt(p + 16, 1000);
+            Mem.putFloat(p + 20, -1000f); Mem.putFloat(p + 24, 1000f); Mem.putFloat(p + 28, 1f);
+            return;
+        }
+        Mem.putInt(p, t.minFilter); Mem.putInt(p + 4, t.magFilter);
+        Mem.putInt(p + 8, t.wrapS); Mem.putInt(p + 12, t.wrapT); Mem.putInt(p + 16, t.maxLevel);
+        Mem.putFloat(p + 20, t.minLod); Mem.putFloat(p + 24, t.maxLod); Mem.putFloat(p + 28, t.aniso);
     }
 
     public static int getLevelParameteri(int target, int level, int pname) {
