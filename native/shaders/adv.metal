@@ -1447,7 +1447,8 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
             float hf = saturate((hd - fr.fog.x) / max(fr.fog.y - fr.fog.x, 1.0));
             refl = mix(hc, skyBase(fr, skyLut, lin, rdWorld), hf * hf);
         }
-    } else {
+    } else if (fres > 0.03) {
+        // screen-space reflection, skipped where the Fresnel weight makes it invisible
         float3 hit = ssr(fr, sceneDepth, in.eye, rdView);
         if (hit.z > 0.0) refl = mix(sky, sceneColor.sample(lin, hit.xy).rgb, hit.z);
     }

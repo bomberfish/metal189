@@ -1,0 +1,23 @@
+sleep 3
+world nether1 4242
+waitWorld
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+dim -1
+sleep 10
+fly
+cmd /tp @p 20.5 60 20.5 225 15
+sleep 6
+cmd /fill 8 50 8 33 72 33 air
+cmd /fill 8 49 8 33 49 33 netherrack
+cmd /fill 14 50 14 18 50 18 lava
+cmd /setblock 26 55 26 glowstone
+cmd /setblock 12 53 28 glowstone
+sleep 8
+cmd /kill @e[type=!Player]
+sleep 2
+capture CAPTURE_A
+cmd /tp @p 20.5 60 20.5 45 30
+sleep 4
+capture CAPTURE_B
+quit

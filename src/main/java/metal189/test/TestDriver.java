@@ -112,6 +112,10 @@ public final class TestDriver {
             case "sleep": waitUntil = System.nanoTime() + (long) (Double.parseDouble(a[1]) * 1e9); return false;
             case "waitWorld":
                 if (mc.theWorld == null || mc.thePlayer == null || mc.renderGlobal == null) { pc--; return false; }
+                // the login position (and the yaw/pitch saved by an earlier run) arrives with the
+                // first position packet, which also closes "Downloading terrain"; commands sent
+                // before that would be overridden by it
+                if (mc.currentScreen instanceof net.minecraft.client.gui.GuiDownloadTerrain) { pc--; return false; }
                 // scenes start alive in the overworld, whatever state an earlier run saved
                 if (mc.thePlayer.getHealth() <= 0.0F || mc.thePlayer.isDead) {
                     mc.thePlayer.respawnPlayer();
@@ -231,9 +235,10 @@ public final class TestDriver {
                 repo.updateRepositoryEntriesAll();
                 java.util.List<net.minecraft.client.resources.ResourcePackRepository.Entry> sel =
                         new java.util.ArrayList<net.minecraft.client.resources.ResourcePackRepository.Entry>();
+                String packName = line.substring("resourcepack".length()).trim();   // names may contain spaces
                 for (net.minecraft.client.resources.ResourcePackRepository.Entry e : repo.getRepositoryEntriesAll())
-                    if (e.getResourcePackName().equals(a[1])) sel.add(e);
-                if (sel.isEmpty() && !"none".equals(a[1])) Native.LOG.warn("metal189-test: no resource pack {}", a[1]);
+                    if (e.getResourcePackName().equals(packName)) sel.add(e);
+                if (sel.isEmpty() && !"none".equals(packName)) Native.LOG.warn("metal189-test: no resource pack {}", packName);
                 repo.setRepositories(sel);
                 mc.refreshResources();
                 return true;
@@ -290,6 +295,9 @@ public final class TestDriver {
             case "info":
                 if (mc.thePlayer != null) {
                     net.minecraft.entity.Entity v = mc.getRenderViewEntity();
+                    Native.LOG.info("metal189-test info: mouse events {} sum|d| {} grabbed {} inGameHasFocus {} active {}",
+                            metal189.platform.Mouse.movedEvents, metal189.platform.Mouse.movedAbs,
+                            metal189.platform.Mouse.isGrabbed(), mc.inGameHasFocus, metal189.platform.Display.isActive());
                     Native.LOG.info("metal189-test info: player {} {} {} yaw {} pitch {} flying {} invisible {} view {} viewIsPlayer {} third {} {}",
                             mc.thePlayer.posX, mc.thePlayer.posY, mc.thePlayer.posZ, mc.thePlayer.rotationYaw, mc.thePlayer.rotationPitch,
                             mc.thePlayer.capabilities.isFlying, mc.thePlayer.isInvisible(), v, v == mc.thePlayer,

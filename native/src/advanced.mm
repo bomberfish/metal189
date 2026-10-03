@@ -576,7 +576,19 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         if (atlas && atlas->tex) [e setFragmentTexture:atlas->tex atIndex:0];
         // Every loaded section near the camera casts shadows, not just the visible ones
         // (with ray-traced shadows the map only holds dynamic geometry).
-        float reach = shadowRadius + 24.0f;
+        // Sections are culled against the shadow map's box itself (its footprint stretches
+        // along the sun's path at low sun angles), with a 1-block margin for waving foliage.
+        const simd_float4x4& SM = fr.shadowViewProj;
+        auto outsideShadowBox = [&](float tx, float ty, float tz) {
+            float cx = tx + 8, cy = ty + 8, cz = tz + 8;
+            for (int r = 0; r < 3; r++) {
+                float cc = SM.columns[0][r] * cx + SM.columns[1][r] * cy + SM.columns[2][r] * cz + SM.columns[3][r];
+                float ex = 9.0f * (fabsf(SM.columns[0][r]) + fabsf(SM.columns[1][r]) + fabsf(SM.columns[2][r]));
+                if (r < 2 ? fabsf(cc) - ex > 1.0f : (cc - ex > 1.0f || cc + ex < 0.0f)) return true;
+            }
+            return false;
+        };
+        float cullReach = shadowRadius * 4.0f + 32.0f;   // bounds the box footprint even near the horizon
         // (volumetric light still needs terrain in the map)
         bool terrainInMap = !(features & ADV_RT_SHADOW) || (features & ADV_VOLUMETRIC);
         for (int layer = 0; layer < (terrainInMap ? 3 : 0); layer++) {
@@ -589,7 +601,8 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
                 const Section* s = &kv.second;
                 if (!s->layers[layer]) continue;
                 float tx = (float)(s->ox - camX), ty = (float)(s->oy - camY), tz = (float)(s->oz - camZ);
-                if (fabsf(tx + 8) > reach || fabsf(tz + 8) > reach || fabsf(ty + 8) > reach + 64) continue;
+                if (fabsf(tx + 8) > cullReach || fabsf(tz + 8) > cullReach) continue;   // cheap reject first
+                if (outsideShadowBox(tx, ty, tz)) continue;
                 simd_float4 off = simd_make_float4(tx, ty, tz, 0);
                 [e setVertexBytes:&off length:sizeof off atIndex:4];
                 [e setVertexBuffer:s->layers[layer] offset:0 atIndex:0];

@@ -146,9 +146,20 @@ void rtSectionDeleted(int sid) {
 }
 
 void rtRelease() {
+    // Called when ray tracing is switched off: nothing will call rtPrepare to process
+    // deferred residency removals, so wait for the GPU and empty the set now.
+    waitIdle();
+    if (g_residency) {
+        if (@available(macOS 15.0, *)) {
+            id<MTLResidencySet> rs = (id<MTLResidencySet>)g_residency;
+            [rs removeAllAllocations];
+            [rs commit];
+        }
+    }
+    g_pendingRemoval.clear();
+    g_residencyDirty = false;
     for (auto& kv : g_rt) {
         RtSection& r = kv.second;
-        releaseSection(r);
         r.blas = nil;
         for (auto& v : r.verts) v = nil;
         if (!r.queued) {

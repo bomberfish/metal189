@@ -74,18 +74,21 @@ metal blocks, water, emissive blocks).
 
 ## Performance
 
-Measured on an Apple M4 Pro, render distance 16, forest scene:
+Apple M4 Pro, render distance 16, forest scene (two views), measured 2026-10-03 on a
+machine under other load (load average ~8):
 
-| Renderer | 854x480 | 1920x1080 |
-|---|---|---|
-| Vanilla OpenGL (Apple's driver) | | 60-81 fps |
-| metal189 baseline | ~940 fps | ~1100 fps (GPU 1.3 ms) |
-| metal189 advanced (shadows, bloom, sky, water) | | ~480 fps |
-| + TAA, clouds, light shafts, auto exposure | | ~320 fps |
-| advanced + RT shadows + RT reflections | | ~290 fps |
+| Renderer | 854x480 | 1920x1080 | 2560x1440 |
+|---|---|---|---|
+| Vanilla OpenGL (Apple's driver) | | 71-88 fps | |
+| metal189 baseline (vanilla-exact) | 964-1234 fps | 911-1107 fps | 865-1073 fps |
+| metal189 advanced, default settings* | | 245-247 fps | 169-172 fps |
+| advanced + RT shadows, reflections, AO and GI | | 124-137 fps | |
 
-With 300 mobs at 1080p the baseline renders 239 fps static / 473 fps rotating
-(vanilla OpenGL: 72 / 103).
+\* shadows, bloom, physical sky, water, TAA, volumetric clouds, light shafts, auto
+exposure and SSAO. Shadows, bloom, sky and water alone run at about 480 fps at 1080p.
+
+300 mobs in view at 1080p: baseline 228 fps static / 506 fps rotating (vanilla
+OpenGL: 83 / 136).
 
 ## Building
 

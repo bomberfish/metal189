@@ -52,7 +52,13 @@ public final class Mouse {
         putMouseEvent((byte) button, (byte) state, 0, nanos);
     }
 
+    /** Diagnostics for tests: move events received and their summed |delta|. */
+    public static long movedEvents;
+    public static double movedAbs;
+
     static void nativeMouseMoved(float mx, float my, float mdx, float mdy, float dz, long nanos) {
+        movedEvents++;
+        movedAbs += Math.abs(mdx) + Math.abs(mdy);
         if (skip_event > 0) {
             --skip_event;
             if (skip_event == 0) {

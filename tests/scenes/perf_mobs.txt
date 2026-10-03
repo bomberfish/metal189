@@ -9,6 +9,8 @@ sleep 3
 cmd /kill @e[type=!Player]
 summongrid 300 1.6 Zombie,Skeleton,Creeper,Pig,Sheep,Cow,Chicken,Villager,Spider,Wolf
 sleep 8
+info
+capture /Users/hariz/metal189/captures/perf/mobs_static.png
 fps 10 mobs300_static
 spin 0.5 100000
 fps 10 mobs300_spin

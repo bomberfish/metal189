@@ -1,0 +1,23 @@
+sleep 3
+world ref1 1234567
+waitWorld
+resourcepack Faithful Texture Pack 64x64 1.8.zip
+sleep 15
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /time set 6000
+cmd /weather clear
+cmd /tp @p 120 90 40 -45 20
+sleep 10
+cmd /kill @e[type=!Player]
+sleep 2
+capture CAPTURE_A
+cmd /tp @p 64 78 -32 135 10
+sleep 6
+cmd /kill @e[type=!Player]
+sleep 2
+capture CAPTURE_B
+gui inventory
+sleep 1
+capture CAPTURE_C
+quit
