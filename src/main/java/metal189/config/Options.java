@@ -219,6 +219,8 @@ public final class Options {
         slider("water", "waterWaveSize", S, 25, 300, 5, "%");
         slider("water", "waterWaveSpeed", S, 0, 300, 5, "%");
         toggle("water", "waterCalmIndoors", S);
+        toggle("water", "waterRainRipples", S);
+        named("water", "waterReflections", S, 2);
         slider("water", "waterReflectivity", S, 2, 25, 1, "%");
         slider("water", "waterSunReflection", S, 0, 300, 5, "%");
         slider("water", "waterRefraction", S, 0, 300, 5, "%");
@@ -230,6 +232,7 @@ public final class Options {
         slider("water", "waterFoam", S, 0, 150, 5, "%");
         slider("water", "waterFoamWidth", S, 25, 300, 5, "%");
         slider("water", "underwaterVisibility", S, 8, 128, 4, " blocks");
+        slider("water", "underwaterDistortion", S, 0, 200, 10, "%");
         toggle("water", "underwaterOverlay", 0);
         toggle("water", "hideUnderwaterParticles", S);
 

@@ -74,7 +74,7 @@ public final class Pipeline {
 
     // Continuous settings for the shaders (adv.metal WATER_* / fr.tune), 4 floats per group.
     private static final int TUNING = 64;
-    private static final int WATER_FLAG_BIOME_TINT = 1, WATER_FLAG_CALM_INDOORS = 2;
+    private static final int WATER_FLAG_BIOME_TINT = 1, WATER_FLAG_CALM_INDOORS = 2, WATER_FLAG_RAIN_RIPPLES = 4, WATER_FLAG_SKY_REFLECT = 8;
     private static long tuning;
 
     private static void pushTuning() {
@@ -108,8 +108,9 @@ public final class Pipeline {
         t[15] = 1f;   // caustics
         // underwater visibility, distortion, flags, foam band width (blocks)
         t[16] = Config.underwaterVisibility;
-        t[17] = 1f;
-        t[18] = (Config.waterBiomeTint ? WATER_FLAG_BIOME_TINT : 0) | (Config.waterCalmIndoors ? WATER_FLAG_CALM_INDOORS : 0);
+        t[17] = Config.underwaterDistortion / 100f;
+        t[18] = (Config.waterBiomeTint ? WATER_FLAG_BIOME_TINT : 0) | (Config.waterCalmIndoors ? WATER_FLAG_CALM_INDOORS : 0)
+                | (Config.waterRainRipples ? WATER_FLAG_RAIN_RIPPLES : 0) | (Config.waterReflections == 0 ? WATER_FLAG_SKY_REFLECT : 0);
         t[19] = 1.2f * Config.waterFoamWidth / 100f;
         // lighting: foliage translucency, flags (bit 0: plant shadows)
         t[20] = Config.foliageTranslucency / 100f;

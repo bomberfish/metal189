@@ -1312,6 +1312,8 @@ fragment float4 aoblur_fragment(FullscreenOut in [[stage_in]], constant AdvFrame
 #define WATER_UNDER   fr.tune[4]   // x: underwater visibility (blocks to 50%), y: distortion, z: flags, w: foam width
 #define WF_BIOME_TINT   1u
 #define WF_CALM_INDOORS 2u
+#define WF_RAIN_RIPPLES 4u
+#define WF_SKY_REFLECT  8u   // reflections: sky only (no screen-space march)
 #define LIGHT_TUNE fr.tune[9]    // x: minimum light
 #define SKY_TUNE   fr.tune[10]   // x: cloud coverage, y: cloud speed, z: haze density, w: star brightness
 #define POST_TUNE  fr.tune[11]   // x: vignette, y: sharpening, z: saturation, w: contrast
@@ -1741,6 +1743,30 @@ static float waterCaustics(constant AdvFrame& fr, texture2d<float> waveTex, samp
     return mix(1.0, min(I, 3.0), saturate(WATER_COLOR.w * exp(-d / 16.0)));
 }
 
+// Rain on the water: each cell of two jittered grids drops an expanding ring now and then.
+// Returns the slope the rings add (a ring's height is a short damped wave around its radius).
+static float2 rainRipples(float2 p, float t) {
+    float2 slope = float2(0.0);
+    for (int layer = 0; layer < 2; layer++) {
+        float scale = layer == 0 ? 1.25 : 2.3;
+        float2 q = p * scale + float2(float(layer) * 7.31, float(layer) * 3.17);
+        float2 cell = floor(q), f = q - cell;
+        for (int dy = -1; dy <= 1; dy++)
+            for (int dx = -1; dx <= 1; dx++) {
+                float2 c = float2(float(dx), float(dy));
+                float2 h = hash22(cell + c + float(layer) * 19.0);
+                float age = fract(t * (0.7 + 0.3 * h.y) + h.x * 7.0);   // 0 = the drop lands, 1 = gone
+                float2 d = f - (c + 0.2 + 0.6 * h);
+                float r = length(d);
+                float x = (r - age * 0.85) * 28.0;                       // distance from the ring front
+                float env = exp(-x * x * 0.08) * (1.0 - age) * (1.0 - age);
+                float dh = -sin(x) * env;                                // d(height)/dr, up to scale
+                slope += (r > 1e-4 ? d / r : float2(0.0)) * dh * scale;
+            }
+    }
+    return slope * 0.12;
+}
+
 // Screen-space ray march against the opaque depth: exponentially growing steps, then a
 // binary search on the first crossing. Returns the hit uv (xy) and a confidence (z).
 static float3 ssr(constant AdvFrame& fr, depth2d<float> depthTex, float3 eyePos, float3 rdView, float jitter) {
@@ -1847,12 +1873,17 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
     float2 xz = style == 1 ? (floor(xzRaw * 16.0) + 0.5) / 16.0 : xzRaw;   // pixel style: one wave value per texel
     bool top = abs(nWorld.y) > 0.5;
     float3 up = float3(0, nWorld.y >= 0.0 ? 1.0 : -1.0, 0);
-    WaterWaves wv = waterWaves(fr, waveTex, wrep, xz, dfdx(xzRaw), dfdy(xzRaw), time);
+    // flowing water: its surface slopes downhill along the flow; the waves drift with it
+    float2 flow = top && length(nWorld.xz) > 0.01 ? normalize(nWorld.xz) * min(length(nWorld.xz) * 10.0, 2.0) : float2(0.0);
+    WaterWaves wv = waterWaves(fr, waveTex, wrep, xz - flow * time, dfdx(xzRaw), dfdy(xzRaw), time);
     float cosV = abs(dot(dirWorld, nWorld));
     float atten = mix(0.35, 1.0, saturate(cosV * 2.5));    // calmer at grazing angles: no horizon sparkle
     if (wflags & WF_CALM_INDOORS) atten *= mix(0.25, 1.0, smoothstep(0.55, 0.9, in.lm.y));
     if (style == 2 || !top) atten = 0.0;                   // vanilla texture style: a flat surface
     float2 slope = wv.slope * atten;
+    if ((wflags & WF_RAIN_RIPPLES) && top && fr.params.y > 0.01 && fr.fog.w < 0.5)
+        slope += rainRipples(xzRaw, time) * fr.params.y * smoothstep(0.8, 0.97, in.lm.y) *
+                 saturate(1.0 - dist / 48.0);   // fine detail: none far away
     float3 nw = top ? normalize(float3(-slope.x, 1.0, -slope.y)) * up.y : nWorld;
     float variance = wv.variance * atten * atten;
 
@@ -1966,7 +1997,7 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
             refl = mix(hc, skyBase(fr, skyLut, lin, R), hf * hf);
             hitT = 1.0;
         }
-    } else if (fres > 0.02) {
+    } else if (fres > 0.02 && !(wflags & WF_SKY_REFLECT)) {
         // screen-space: the march follows a normal 80% of the way to the waves (fewer broken hits)
         float3 Rs = reflect(dirWorld, normalize(mix(nWorld, nw, 0.8)));
         Rs.y = max(Rs.y, 0.003);
@@ -2217,8 +2248,17 @@ fragment float4 tonemap_fragment(FullscreenOut in [[stage_in]], constant AdvFram
     int2 px = int2(in.position.xy);
     float3 b = (fr.flags.x & ADV_BLOOM) ? bloom.sample(s, in.uv).rgb * (0.06 * fr.post.x) : float3(0);
     float exposure = fr.params.z * ((fr.flags.x & ADV_AUTOEXP) ? expState[0].x : 1.0);
-    float3 c = aces((hdr.read(uint2(px)).rgb + b) * exposure);
-    if (fr.flags.x & ADV_TAA) {
+    // under water: a slow, slight wobble of the whole image (Water: Underwater Distortion)
+    bool wobble = fr.fog.w > 0.5 && fr.fog.w < 1.5 && fr.tune[4].y > 0.0;
+    float3 c;
+    if (wobble) {
+        float t = fr.params.x;
+        float2 o = float2(sin(in.uv.y * 23.0 + t * 1.9), cos(in.uv.x * 19.0 + t * 1.6)) * fr.tune[4].y * 1.5 * fr.screen.zw;
+        c = aces((hdr.sample(s, in.uv + o).rgb + b) * exposure);
+    } else {
+        c = aces((hdr.read(uint2(px)).rgb + b) * exposure);
+    }
+    if ((fr.flags.x & ADV_TAA) && !wobble) {
         // contrast-adaptive sharpening (after AMD CAS) to restore texture detail TAA softens
         int2 mx = int2(fr.screen.xy) - 1;
         float3 n = aces((hdr.read(uint2(clamp(px + int2(0, -1), int2(0), mx))).rgb + b) * exposure);

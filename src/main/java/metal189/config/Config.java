@@ -72,6 +72,9 @@ public final class Config {
     public static boolean waterBiomeTint = true;
     public static int underwaterVisibility = 40;  // blocks until the fog hides half the view
     public static boolean underwaterOverlay = true;  // vanilla's water texture over the screen (both renderers)
+    public static boolean waterRainRipples = true;
+    public static int waterReflections = 1;           // 0 sky only, 1 screen-space (ray tracing: RT page)
+    public static int underwaterDistortion = 100;     // percent
     public static boolean hideUnderwaterParticles = true;   // shaders mode: no vanilla suspended particles in water
 
     // materials (resource-pack PBR textures)

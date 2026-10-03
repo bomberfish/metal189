@@ -1,0 +1,24 @@
+sleep 3
+world lookpool 42 flat
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /time set 5000
+cmd /weather rain
+cmd /tp @p -500 20 -483 180 45
+sleep 4
+cmd /setblock -490 18 -500 water
+sleep 10
+capture CAPTURE_A
+config waterRainRipples false
+sleep 2
+capture CAPTURE_B
+config waterRainRipples true
+cmd /weather clear
+cmd /tp @p -492 19 -497 0 60
+sleep 6
+capture CAPTURE_C
+cmd /tp @p -500 10 -492 180 0
+sleep 3
+capture CAPTURE_D
+quit
