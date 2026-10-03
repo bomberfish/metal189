@@ -28,8 +28,8 @@ public final class Config {
     public static boolean volumetrics = true;
     public static boolean autoExposure = true;
     public static boolean ssao = true;
-    /** LWJGL's macOS Ctrl+left click = right click; off by default when mcmouser (which removes it) is installed. */
-    public static boolean ctrlClickRightClick = !metal189.core.Compat.mcmouserInstalled();
+    /** LWJGL's macOS emulation of a right click by Ctrl+left click; off by default (Ctrl+click stays a left click). */
+    public static boolean ctrlClickRightClick = false;
     public static int exposure = 100;        // percent
     public static boolean rtShadows = false;
     public static boolean rtReflections = false;
@@ -113,17 +113,20 @@ public final class Config {
                 if (in != null) try { in.close(); } catch (IOException ignored) {}
             }
         }
+        // settings files before version 2 saved Ctrl+click = right click as the default
+        // (LWJGL's behaviour); version 2 makes Ctrl+click a left click by default
+        if (version(p) < 2) p.remove("ctrlClickRightClick");
         for (Options.Opt o : Options.all()) {
             String v = p.getProperty(o.key);
             if (v != null) o.parse(v);
         }
-        Native.LOG.info("metal189: Ctrl+left click is a {} click (mcmouser installed: {})",
-                ctrlClickRightClick ? "right" : "left", metal189.core.Compat.mcmouserInstalled());
+        Native.LOG.info("metal189: Ctrl+left click is a {} click", ctrlClickRightClick ? "right" : "left");
         applyInput();
     }
 
     public static void save() {
         Properties p = new Properties();
+        p.setProperty("configVersion", Integer.toString(CONFIG_VERSION));
         for (Options.Opt o : Options.all()) p.setProperty(o.key, o.format());
         File f = file();
         f.getParentFile().mkdirs();
@@ -135,6 +138,16 @@ public final class Config {
             Native.LOG.warn("metal189: cannot write {}: {}", f, e.toString());
         } finally {
             if (out != null) try { out.close(); } catch (IOException ignored) {}
+        }
+    }
+
+    private static final int CONFIG_VERSION = 2;
+
+    private static int version(Properties p) {
+        try {
+            return Integer.parseInt(p.getProperty("configVersion", "1").trim());
+        } catch (NumberFormatException e) {
+            return 1;
         }
     }
 

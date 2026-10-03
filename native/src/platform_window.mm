@@ -109,8 +109,9 @@ static const uint64_t kModifierMasks[10] = {
 };
 static uint64_t g_lastModifierFlags = 0;
 static bool g_leftMouseDown = false, g_rightMouseDown = false;
-// LWJGL turns Ctrl+left click into a right click on macOS; mods such as mcmouser remove that.
-namespace m189 { bool g_ctrlClickRight = true; }
+// LWJGL turns Ctrl+left click into a right click on macOS. metal189 keeps it a left click
+// unless the Ctrl+Click setting asks for LWJGL's behaviour (Config.applyInput).
+namespace m189 { bool g_ctrlClickRight = false; }
 using m189::g_ctrlClickRight;
 
 @implementation M189View {
@@ -212,7 +213,7 @@ static void pushKey(NSEvent* e, int state) {
     pushEvent({EV_MOUSE_MOVE, 0, 0, dz, (float)p.x, (float)p.y, (float)e.deltaX, (float)e.deltaY, evNanos(e)});
 }
 
-// Ctrl-click is a right click, as in LWJGL (unless disabled, see g_ctrlClickRight).
+// Ctrl-click becomes a right click only when g_ctrlClickRight (LWJGL's macOS behaviour) is on.
 - (void)mouseDown:(NSEvent*)e {
     if (g_ctrlClickRight && (e.modifierFlags & NSEventModifierFlagControl)) {
         g_rightMouseDown = true;
