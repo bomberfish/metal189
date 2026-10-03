@@ -126,6 +126,7 @@ static void JNICALL n_advSetTables(JNIEnv*, jclass, jlong mat, jlong emi) {
     @autoreleasepool { advancedSetTables((const uint8_t*)ptr(mat), (const uint8_t*)ptr(emi)); }
 }
 static jboolean JNICALL n_rtSupported(JNIEnv*, jclass) { return rtAvailable(); }
+static jboolean JNICALL n_rtAccelerated(JNIEnv*, jclass) { return engine().rtAccelerated; }
 static void JNICALL n_advSetPbr(JNIEnv*, jclass, jint n, jint s) { advancedSetPbr(n, s); }
 static void JNICALL n_advSetTuning(JNIEnv*, jclass, jlong v, jint n) { advancedSetTuning((const float*)(intptr_t)v, n); }
 static void JNICALL n_renderbufferStorage(JNIEnv*, jclass, jint id, jint fmt, jint w, jint h) { @autoreleasepool { renderbufferStorage(id, fmt, w, h); } }
@@ -169,6 +170,7 @@ static JNINativeMethod kMethods[] = {
     {(char*)"advSetFeatures", (char*)"(I)V", (void*)n_advSetFeatures},
     {(char*)"advSetTables", (char*)"(JJ)V", (void*)n_advSetTables},
     {(char*)"rtSupported", (char*)"()Z", (void*)n_rtSupported},
+    {(char*)"rtAccelerated", (char*)"()Z", (void*)n_rtAccelerated},
     {(char*)"advSetPbr", (char*)"(II)V", (void*)n_advSetPbr},
     {(char*)"advSetTuning", (char*)"(JI)V", (void*)n_advSetTuning},
 };

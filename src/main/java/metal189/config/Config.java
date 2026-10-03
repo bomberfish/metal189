@@ -65,7 +65,7 @@ public final class Config {
     public static int waterReflectivity = 4;      // reflectance facing the surface, percent (2 = physical)
     public static int waterSunReflection = 100;
     public static int waterRefraction = 100;
-    public static int waterFoam = 100;
+    public static int waterFoam = 0;
     public static int waterFoamWidth = 100;
     public static int waterClarity = 10;          // blocks until half the light is gone
     public static int waterColorR = 100, waterColorG = 100, waterColorB = 100;
@@ -113,9 +113,13 @@ public final class Config {
                 if (in != null) try { in.close(); } catch (IOException ignored) {}
             }
         }
-        // settings files before version 2 saved Ctrl+click = right click as the default
-        // (LWJGL's behaviour); version 2 makes Ctrl+click a left click by default
-        if (version(p) < 2) p.remove("ctrlClickRightClick");
+        // older settings files saved what were then defaults: Ctrl+click = right click
+        // (before version 2) and shore foam at 100% (before version 3)
+        int version = version(p);
+        if (version < 2) p.remove("ctrlClickRightClick");
+        if (version < 3) p.remove("waterFoam");
+        // a first start takes the default (High) profile, ray tracing included on hardware that accelerates it
+        if (!f.isFile()) Options.applyProfile(Options.DEFAULT_PROFILE, metal189.world.Pipeline.rtAccelerated());
         for (Options.Opt o : Options.all()) {
             String v = p.getProperty(o.key);
             if (v != null) o.parse(v);
@@ -141,7 +145,7 @@ public final class Config {
         }
     }
 
-    private static final int CONFIG_VERSION = 2;
+    private static final int CONFIG_VERSION = 3;
 
     private static int version(Properties p) {
         try {

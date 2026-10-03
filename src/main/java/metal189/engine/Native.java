@@ -98,6 +98,8 @@ public final class Native {
     public static native void advSetFeatures(int flags);
     public static native void advSetTables(long materials, long emissions);
     public static native boolean rtSupported();
+    /** Hardware-accelerated ray tracing (Apple GPU family 9 and later: M3, M4, ...). */
+    public static native boolean rtAccelerated();
     public static native void advSetPbr(int normalTex, int specularTex);
     /** Continuous shader settings: {@code count} floats at {@code addr} (Pipeline.TUNE_*). */
     public static native void advSetTuning(long addr, int count);

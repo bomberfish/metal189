@@ -1,0 +1,20 @@
+sleep 3
+world ref1 1234567
+waitWorld
+fly
+cmd /time set 5000
+cmd /tp @p 64 96 -32 135 12
+sleep 6
+gui metal189
+sleep 2
+capture CAPTURE_A
+gui metal189 rt
+sleep 2
+capture CAPTURE_B
+gui metal189 water
+sleep 2
+capture CAPTURE_C
+gui metal189 input
+sleep 2
+capture CAPTURE_D
+quit

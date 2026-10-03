@@ -33,6 +33,7 @@ struct Engine {
     id<MTLLibrary> library = nil;
     dispatch_semaphore_t inflight = nullptr;
     bool supportsRaytracing = false;
+    bool rtAccelerated = false;   // hardware ray tracing (Apple GPU family 9: M3 and later)
 
     FrameResources frames[kFramesInFlight];
     FrameResources* cur = nullptr;

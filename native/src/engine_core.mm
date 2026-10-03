@@ -27,6 +27,7 @@ bool engineInit(const void* metallib, size_t metallibSize, int flags) {
     e.queue.label = @"metal189";
     e.inflight = dispatch_semaphore_create(kFramesInFlight);
     e.supportsRaytracing = dev.supportsRaytracing;
+    e.rtAccelerated = dev.supportsRaytracing && [dev supportsFamily:MTLGPUFamilyApple9];
 
     NSError* err = nil;
     if (metallib && metallibSize > 0) {

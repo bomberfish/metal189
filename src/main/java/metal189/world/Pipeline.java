@@ -29,6 +29,8 @@ public final class Pipeline {
 
     public static boolean rtSupported() { return Native.rtSupported(); }
 
+    public static boolean rtAccelerated() { return Native.rtAccelerated(); }
+
     public static void toggle() {
         Config.shaders = !advanced;
         Config.save();

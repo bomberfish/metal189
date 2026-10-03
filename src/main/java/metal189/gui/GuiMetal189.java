@@ -61,7 +61,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
             cells.add(b);
         }
         if (MAIN.equals(page)) {
-            profileButton = new GuiButton(id++, 0, 0, 150, 20, "");
+            profileButton = new GuiButton(id++, 0, 0, 150, 20, "");   // next to the shaders switch
             cells.add(profileButton);
             if (cells.size() % 2 != 0) cells.add(null);
             for (String p : Options.PAGES) {
@@ -100,7 +100,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
 
     private void refresh() {
         if (profileButton != null) {
-            int p = Options.currentProfile(Pipeline.rtSupported());
+            int p = Options.currentProfile(Pipeline.rtAccelerated());
             profileButton.displayString = I18n.format("metal189.gui.profile") + ": "
                     + I18n.format("metal189.profile." + (p < 0 ? "custom" : Options.PROFILES[p]));
             profileButton.enabled = Config.shaders;
@@ -119,9 +119,9 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
     private void pressed(GuiButton b, boolean backwards) {
         if (!b.enabled) return;
         if (b == profileButton) {
-            int n = Options.PROFILES.length, p = Options.currentProfile(Pipeline.rtSupported());
+            int n = Options.PROFILES.length, p = Options.currentProfile(Pipeline.rtAccelerated());
             p = p < 0 ? (backwards ? n - 1 : 0) : (p + (backwards ? n - 1 : 1)) % n;
-            Options.applyProfile(p, Pipeline.rtSupported());
+            Options.applyProfile(p, Pipeline.rtAccelerated());
             Pipeline.apply();
             Config.save();
             refresh();
@@ -150,7 +150,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
             Config.save();
             mc.displayGuiScreen(parent);
         } else if (b.id == RESET) {
-            for (Opt o : Options.page(page)) o.set(o.def);
+            for (Opt o : Options.page(page)) o.set(Options.defaultValue(o, Pipeline.rtAccelerated()));
             Config.applyInput();
             Pipeline.apply();
             Config.save();

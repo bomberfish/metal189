@@ -20,7 +20,7 @@ public final class Options {
     public static final int NEEDS_SHADERS = 1, NEEDS_RT = 2;
 
     /** Settings pages after the main page, in menu order. */
-    public static final String[] PAGES = {"lighting", "materials", "water", "sky", "post", "rt"};
+    public static final String[] PAGES = {"lighting", "materials", "water", "sky", "post", "rt", "input"};
 
     public static final class Opt {
         public final String key, page;
@@ -115,39 +115,47 @@ public final class Options {
 
     private static final List<Opt> ALL = new ArrayList<Opt>();
 
-    /** Quality profiles: values for the performance-relevant options (others are left alone). */
+    /**
+     * Quality profiles: values for the performance-relevant options (others are left alone).
+     * HW: on only with hardware-accelerated ray tracing (M3 and later). High is the default.
+     */
     public static final String[] PROFILES = {"low", "medium", "high", "ultra"};
+    public static final int DEFAULT_PROFILE = 2;
+    private static final int HW = -1;
     private static final String[] PROFILE_KEYS = {"shadows", "shadowResolution", "shadowDistance", "ssao", "volumetrics",
-            "clouds", "taa", "pom", "pomQuality", "rtShadows", "rtReflections", "rtAmbientOcclusion", "rtGlobalIllumination"};
+            "clouds", "taa", "pom", "pomQuality", "waterFoam", "rtShadows", "rtReflections", "rtAmbientOcclusion",
+            "rtGlobalIllumination", "rtEntities"};
     private static final int[][] PROFILE_VALUES = {
-        {1, 2048, 64, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0},
-        {1, 2048, 96, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0},
-        {1, 4096, 112, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0},
-        {1, 8192, 160, 1, 1, 1, 1, 1, 2, 1, 1, 1, 0},
+        {1, 2048, 64, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0},
+        {1, 2048, 96, 1, 0, 1, 1, 1, 0, 0, 0, HW, 0, 0, 0},
+        {1, 4096, 112, 1, 1, 1, 1, 1, 1, 0, 0, HW, 0, 0, HW},
+        {1, 8192, 160, 1, 1, 1, 1, 1, 2, 0, HW, HW, HW, 0, HW},
     };
 
-    public static void applyProfile(int p, boolean rt) {
-        for (int i = 0; i < PROFILE_KEYS.length; i++) {
-            Opt o = get(PROFILE_KEYS[i]);
-            int v = PROFILE_VALUES[p][i];
-            if ((o.needs & NEEDS_RT) != 0 && !rt) v = 0;
-            o.set(v);
-        }
+    private static int profileValue(int p, int i, boolean hwRt) {
+        int v = PROFILE_VALUES[p][i];
+        return v == HW ? (hwRt ? 1 : 0) : v;
+    }
+
+    public static void applyProfile(int p, boolean hwRt) {
+        for (int i = 0; i < PROFILE_KEYS.length; i++) get(PROFILE_KEYS[i]).set(profileValue(p, i, hwRt));
     }
 
     /** The profile the current settings match, or -1 (custom). */
-    public static int currentProfile(boolean rt) {
+    public static int currentProfile(boolean hwRt) {
         for (int p = 0; p < PROFILES.length; p++) {
             boolean match = true;
-            for (int i = 0; i < PROFILE_KEYS.length && match; i++) {
-                Opt o = get(PROFILE_KEYS[i]);
-                int v = PROFILE_VALUES[p][i];
-                if ((o.needs & NEEDS_RT) != 0 && !rt) v = 0;
-                match = o.get() == v;
-            }
+            for (int i = 0; i < PROFILE_KEYS.length && match; i++) match = get(PROFILE_KEYS[i]).get() == profileValue(p, i, hwRt);
             if (match) return p;
         }
         return -1;
+    }
+
+    /** An option's default: options in the profiles default to the High profile's value. */
+    public static int defaultValue(Opt o, boolean hwRt) {
+        for (int i = 0; i < PROFILE_KEYS.length; i++)
+            if (PROFILE_KEYS[i].equals(o.key)) return profileValue(DEFAULT_PROFILE, i, hwRt);
+        return o.def;
     }
 
     public static List<Opt> all() { return Collections.unmodifiableList(ALL); }
@@ -184,7 +192,7 @@ public final class Options {
     static {
         final int S = NEEDS_SHADERS, RT = NEEDS_SHADERS | NEEDS_RT;
         toggle("main", "shaders", 0);
-        toggle("main", "ctrlClickRightClick", 0);
+        toggle("input", "ctrlClickRightClick", 0);
 
         toggle("lighting", "shadows", S);
         numbers("lighting", "shadowResolution", S, "", Config.SHADOW_RESOLUTIONS);
