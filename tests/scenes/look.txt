@@ -1,0 +1,28 @@
+sleep 3
+world ref1 1234567
+waitWorld
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /weather clear
+cmd /time set 4000
+cmd /tp @p 120 90 40 -45 20
+sleep 12
+cmd /kill @e[type=!Player]
+sleep 1
+capture CAPTURE_A
+cmd /tp @p 64 78 -32 135 10
+sleep 6
+capture CAPTURE_B
+cmd /time set 12300
+cmd /tp @p 64 82 -32 90 5
+sleep 3
+capture CAPTURE_C
+cmd /time set 6000
+cmd /tp @p 145 76 64 -45 50
+sleep 4
+capture CAPTURE_D
+cmd /time set 18000
+cmd /tp @p 64 82 -32 135 10
+sleep 3
+capture CAPTURE_E
+quit
