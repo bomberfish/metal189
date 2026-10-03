@@ -2,8 +2,12 @@ package metal189.gui;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import metal189.config.Config;
+import metal189.config.Options;
+import metal189.config.Options.Opt;
 import metal189.engine.Native;
 import metal189.world.Pipeline;
 import net.minecraft.client.Minecraft;
@@ -14,126 +18,112 @@ import net.minecraft.client.resources.I18n;
 import net.minecraftforge.fml.client.config.GuiSlider;
 
 /**
- * metal189 rendering settings (opened from Video Settings or the settings keybind):
- * a scrolling list of two-option rows, like vanilla's video settings.
+ * metal189 rendering settings (opened from Video Settings, Options or the settings keybind).
+ * The main page holds the shaders switch and links to one page per topic; every page is a
+ * scrolling list of two-column rows built from {@link Options}. Hovering an option shows
+ * its description. In a world there is no dirt background, so changes preview live.
  */
 public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
-    private enum Opt {
-        SHADERS, TAA, SHADOWS, SHADOW_RES, SHADOW_DIST, BLOOM, SKY, WATER, WAVING, BLOOM_STRENGTH, CLOUDS, VOLUMETRICS,
-        AUTO_EXP, EXPOSURE, SSAO, RT_SHADOWS, RT_REFL, RT_AO, RT_GI, CTRL_CLICK, PLAYER_SHADOW, RT_ENTITIES
-    }
-
-    private static final Opt[][] ROWS = {
-        {Opt.SHADERS, Opt.TAA},
-        {Opt.SHADOWS, Opt.SHADOW_RES},
-        {Opt.SHADOW_DIST, Opt.BLOOM},
-        {Opt.SKY, Opt.WATER},
-        {Opt.CLOUDS, Opt.VOLUMETRICS},
-        {Opt.WAVING, Opt.BLOOM_STRENGTH},
-        {Opt.AUTO_EXP, Opt.EXPOSURE},
-        {Opt.SSAO, Opt.PLAYER_SHADOW},
-        {Opt.RT_SHADOWS, Opt.RT_REFL},
-        {Opt.RT_AO, Opt.RT_GI},
-        {Opt.RT_ENTITIES, Opt.CTRL_CLICK},
-    };
-    private static final int DONE = 200;
+    private static final int DONE = 200, RESET = 201;
+    private static final String MAIN = "main";
 
     private final GuiScreen parent;
+    private final String page;
     private OptionList list;
-    private final List<GuiButton> optionButtons = new ArrayList<GuiButton>();
+    private final Map<GuiButton, Opt> options = new IdentityHashMap<GuiButton, Opt>();
+    private final Map<GuiButton, String> links = new IdentityHashMap<GuiButton, String>();
+    private GuiButton hovered;
+    private long hoverStart;
+    /** Tests: show this option's tooltip as if hovered (the test window never moves the pointer). */
+    public static String testHover;
 
-    public GuiMetal189(GuiScreen parent) { this.parent = parent; }
+    public GuiMetal189(GuiScreen parent) { this(parent, MAIN); }
+
+    public GuiMetal189(GuiScreen parent, String page) {
+        this.parent = parent;
+        this.page = page;
+    }
 
     @Override
     public void initGui() {
         buttonList.clear();
-        optionButtons.clear();
+        options.clear();
+        links.clear();
         list = new OptionList(mc, width, height, 32, height - 46, 25);
-        for (Opt[] row : ROWS) list.rows.add(new Row(make(row[0]), row[1] == null ? null : make(row[1])));
-        buttonList.add(new GuiButton(DONE, width / 2 - 100, height - 27, 200, 20, I18n.format("gui.done")));
+        List<GuiButton> cells = new ArrayList<GuiButton>();
+        int id = 0;
+        for (Opt o : Options.page(page)) {
+            GuiButton b = o.kind == Options.Kind.SLIDER
+                    ? new GuiSlider(id++, 0, 0, 150, 20, name(o) + ": ", o.unit, o.min, o.max, o.get(), false, true, this)
+                    : new GuiButton(id++, 0, 0, 150, 20, "");
+            options.put(b, o);
+            cells.add(b);
+        }
+        if (MAIN.equals(page)) {
+            if (cells.size() % 2 != 0) cells.add(null);
+            for (String p : Options.PAGES) {
+                GuiButton b = new GuiButton(id++, 0, 0, 150, 20, I18n.format("metal189.page." + p) + "...");
+                links.put(b, p);
+                cells.add(b);
+            }
+        }
+        for (int i = 0; i < cells.size(); i += 2)
+            list.rows.add(new Row(cells.get(i), i + 1 < cells.size() ? cells.get(i + 1) : null));
+        if (MAIN.equals(page)) {
+            buttonList.add(new GuiButton(DONE, width / 2 - 100, height - 27, 200, 20, I18n.format("gui.done")));
+        } else {
+            buttonList.add(new GuiButton(RESET, width / 2 - 155, height - 27, 150, 20, I18n.format("metal189.gui.reset")));
+            buttonList.add(new GuiButton(DONE, width / 2 + 5, height - 27, 150, 20, I18n.format("gui.done")));
+        }
         refresh();
     }
 
-    private GuiButton make(Opt o) {
-        GuiButton b;
-        if (o == Opt.EXPOSURE)
-            b = new GuiSlider(o.ordinal(), 0, 0, 150, 20, I18n.format("metal189.gui.exposure") + ": ", "%", 25, 400, Config.exposure, false, true, this);
-        else if (o == Opt.BLOOM_STRENGTH)
-            b = new GuiSlider(o.ordinal(), 0, 0, 150, 20, I18n.format("metal189.gui.bloomStrength") + ": ", "%", 0, 300, Config.bloomStrength, false, true, this);
-        else
-            b = new GuiButton(o.ordinal(), 0, 0, 150, 20, "");
-        optionButtons.add(b);
-        return b;
+    private static String name(Opt o) { return I18n.format("metal189.opt." + o.key); }
+
+    private static String value(Opt o) {
+        int v = o.get();
+        String named = "metal189.opt." + o.key + "." + v, label = I18n.format(named);
+        if (!label.equals(named)) return label;   // options may name their values
+        switch (o.kind) {
+            case TOGGLE: return I18n.format(v != 0 ? "options.on" : "options.off");
+            default: return v + o.unit;
+        }
     }
 
-    private static String onOff(boolean v) { return v ? I18n.format("options.on") : I18n.format("options.off"); }
-
-    private static boolean isRt(Opt o) {
-        return o == Opt.RT_SHADOWS || o == Opt.RT_REFL || o == Opt.RT_AO || o == Opt.RT_GI || o == Opt.RT_ENTITIES;
+    private boolean available(Opt o) {
+        if ((o.needs & Options.NEEDS_RT) != 0 && !Pipeline.rtSupported()) return false;
+        return (o.needs & Options.NEEDS_SHADERS) == 0 || Config.shaders;
     }
 
     private void refresh() {
-        boolean rt = Pipeline.rtSupported();
-        for (GuiButton b : optionButtons) {
-            Opt o = Opt.values()[b.id];
-            String unsupported = I18n.format("metal189.gui.unsupported");
-            switch (o) {
-                case SHADERS: b.displayString = label("shaders", onOff(Config.shaders)); break;
-                case TAA: b.displayString = label("taa", onOff(Config.taa)); break;
-                case SHADOWS: b.displayString = label("shadows", onOff(Config.shadows)); break;
-                case SHADOW_RES: b.displayString = label("shadowResolution", Integer.toString(Config.shadowResolution)); break;
-                case SHADOW_DIST: b.displayString = label("shadowDistance", Integer.toString(Config.shadowDistance)); break;
-                case BLOOM: b.displayString = label("bloom", onOff(Config.bloom)); break;
-                case SKY: b.displayString = label("sky", onOff(Config.sky)); break;
-                case WATER: b.displayString = label("water", onOff(Config.water)); break;
-                case WAVING: b.displayString = label("waving", onOff(Config.waving)); break;
-                case CLOUDS: b.displayString = label("clouds", onOff(Config.clouds)); break;
-                case VOLUMETRICS: b.displayString = label("volumetrics", onOff(Config.volumetrics)); break;
-                case AUTO_EXP: b.displayString = label("autoExposure", onOff(Config.autoExposure)); break;
-                case SSAO: b.displayString = label("ssao", onOff(Config.ssao)); break;
-                case CTRL_CLICK: b.displayString = label("ctrlClick", I18n.format(Config.ctrlClickRightClick ? "metal189.gui.ctrlClick.right" : "metal189.gui.ctrlClick.left")); break;
-                case RT_SHADOWS: b.displayString = label("rtShadows", rt ? onOff(Config.rtShadows) : unsupported); break;
-                case RT_REFL: b.displayString = label("rtReflections", rt ? onOff(Config.rtReflections) : unsupported); break;
-                case RT_AO: b.displayString = label("rtAO", rt ? onOff(Config.rtAmbientOcclusion) : unsupported); break;
-                case RT_GI: b.displayString = label("rtGI", rt ? onOff(Config.rtGlobalIllumination) : unsupported); break;
-                case RT_ENTITIES: b.displayString = label("rtEntities", rt ? onOff(Config.rtEntities) : unsupported); break;
-                case PLAYER_SHADOW: b.displayString = label("playerShadow", onOff(Config.playerShadow)); break;
-                default: break;   // sliders draw their own label
+        for (Map.Entry<GuiButton, Opt> e : options.entrySet()) {
+            GuiButton b = e.getKey();
+            Opt o = e.getValue();
+            if (!(b instanceof GuiSlider)) {
+                boolean noRt = (o.needs & Options.NEEDS_RT) != 0 && !Pipeline.rtSupported();
+                b.displayString = name(o) + ": " + (noRt ? I18n.format("metal189.gui.unsupported") : value(o));
             }
-            b.enabled = o == Opt.SHADERS || o == Opt.CTRL_CLICK || (Config.shaders && (!isRt(o) || rt));
+            b.enabled = available(o);
         }
     }
 
-    private static String label(String key, String value) { return I18n.format("metal189.gui." + key) + ": " + value; }
-
-    private void pressed(GuiButton b) {
-        if (!b.enabled || b instanceof GuiSlider) return;
-        switch (Opt.values()[b.id]) {
-            case SHADERS: Config.shaders = !Config.shaders; break;
-            case TAA: Config.taa = !Config.taa; break;
-            case SHADOWS: Config.shadows = !Config.shadows; break;
-            case SHADOW_RES: Config.shadowResolution = Config.next(Config.shadowResolution, Config.SHADOW_RESOLUTIONS); break;
-            case SHADOW_DIST: Config.shadowDistance = Config.next(Config.shadowDistance, Config.SHADOW_DISTANCES); break;
-            case BLOOM: Config.bloom = !Config.bloom; break;
-            case SKY: Config.sky = !Config.sky; break;
-            case WATER: Config.water = !Config.water; break;
-            case WAVING: Config.waving = !Config.waving; break;
-            case CLOUDS: Config.clouds = !Config.clouds; break;
-            case VOLUMETRICS: Config.volumetrics = !Config.volumetrics; break;
-            case AUTO_EXP: Config.autoExposure = !Config.autoExposure; break;
-            case SSAO: Config.ssao = !Config.ssao; break;
-            case CTRL_CLICK: Config.ctrlClickRightClick = !Config.ctrlClickRightClick; Config.applyInput(); break;
-            case RT_SHADOWS: Config.rtShadows = !Config.rtShadows; break;
-            case RT_REFL: Config.rtReflections = !Config.rtReflections; break;
-            case RT_AO: Config.rtAmbientOcclusion = !Config.rtAmbientOcclusion; break;
-            case RT_GI: Config.rtGlobalIllumination = !Config.rtGlobalIllumination; break;
-            case RT_ENTITIES: Config.rtEntities = !Config.rtEntities; break;
-            case PLAYER_SHADOW: Config.playerShadow = !Config.playerShadow; break;
-            default: return;
+    private void pressed(GuiButton b, boolean backwards) {
+        if (!b.enabled) return;
+        String link = links.get(b);
+        if (link != null) {
+            mc.displayGuiScreen(new GuiMetal189(this, link));
+            return;
         }
-        Config.save();
-        Pipeline.apply();
+        Opt o = options.get(b);
+        if (o == null || b instanceof GuiSlider) return;
+        o.cycle(backwards);
+        changed(o);
         refresh();
+    }
+
+    private void changed(Opt o) {
+        if ("ctrlClickRightClick".equals(o.key)) Config.applyInput();
+        Pipeline.apply();
     }
 
     @Override
@@ -141,15 +131,27 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
         if (b.id == DONE) {
             Config.save();
             mc.displayGuiScreen(parent);
+        } else if (b.id == RESET) {
+            for (Opt o : Options.page(page)) o.set(o.def);
+            Config.applyInput();
+            Pipeline.apply();
+            Config.save();
+            initGui();
         }
     }
 
     @Override
     public void onChangeSliderValue(GuiSlider slider) {
-        Opt o = Opt.values()[slider.id];
-        if (o == Opt.EXPOSURE) Config.exposure = slider.getValueInt();
-        else if (o == Opt.BLOOM_STRENGTH) Config.bloomStrength = slider.getValueInt();
-        Pipeline.apply();
+        Opt o = options.get(slider);
+        if (o == null) return;
+        int v = o.sanitize(slider.getValueInt());
+        // snap the knob to the option's step without re-entering updateSlider()
+        slider.sliderValue = (v - slider.minValue) / (slider.maxValue - slider.minValue);
+        slider.displayString = slider.dispString + v + slider.suffix;
+        if (v != o.get()) {
+            o.set(v);
+            changed(o);
+        }
     }
 
     @Override
@@ -187,10 +189,42 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
             drawDefaultBackground();
         }
         list.drawScreen(mouseX, mouseY, partialTicks);
-        drawCenteredString(fontRendererObj, I18n.format("metal189.gui.title"), width / 2, 8, 0xFFFFFF);
+        String title = I18n.format("metal189.gui.title");
+        if (!MAIN.equals(page)) title += " - " + I18n.format("metal189.page." + page);
+        drawCenteredString(fontRendererObj, title, width / 2, 8, 0xFFFFFF);
         String dev = Native.deviceName() + (Pipeline.rtSupported() ? " - " + I18n.format("metal189.gui.rtAvailable") : "");
         drawCenteredString(fontRendererObj, dev, width / 2, 20, 0xA0A0A0);
         super.drawScreen(mouseX, mouseY, partialTicks);
+        drawTooltip(mouseX, mouseY);
+    }
+
+    /** The hovered option's description, after a short delay (like vanilla's video settings tooltips in later versions). */
+    private void drawTooltip(int mouseX, int mouseY) {
+        GuiButton over = null;
+        if (mouseY >= list.top() && mouseY < list.bottom())
+            for (GuiButton b : options.keySet())
+                if (b.visible && mouseX >= b.xPosition && mouseX < b.xPosition + b.width && mouseY >= b.yPosition
+                        && mouseY < b.yPosition + b.height) over = b;
+        if (testHover != null) {
+            for (Map.Entry<GuiButton, Opt> e : options.entrySet())
+                if (e.getValue().key.equals(testHover)) over = e.getKey();
+            if (over != null) {
+                mouseX = over.xPosition + over.width / 2;
+                mouseY = over.yPosition + over.height / 2;
+                hoverStart = 0;
+                hovered = over;
+            }
+        }
+        if (over != hovered) {
+            hovered = over;
+            hoverStart = System.currentTimeMillis();
+        }
+        if (over == null || System.currentTimeMillis() - hoverStart < 500) return;
+        String key = "metal189.opt." + options.get(over).key + ".desc";
+        String text = I18n.format(key);
+        if (text.equals(key)) return;   // no description
+        List<String> lines = fontRendererObj.listFormattedStringToWidth(text, 220);
+        drawHoveringText(lines, mouseX, mouseY);
     }
 
     private final class Row implements GuiListExtended.IGuiListEntry {
@@ -204,9 +238,11 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
         @Override
         public void drawEntry(int slotIndex, int x, int y, int listWidth, int slotHeight, int mouseX, int mouseY, boolean isSelected) {
             int cx = width / 2;
-            left.xPosition = cx - 155;
-            left.yPosition = y;
-            left.drawButton(mc, mouseX, mouseY);
+            if (left != null) {
+                left.xPosition = cx - 155;
+                left.yPosition = y;
+                left.drawButton(mc, mouseX, mouseY);
+            }
             if (right != null) {
                 right.xPosition = cx + 5;
                 right.yPosition = y;
@@ -219,7 +255,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
             for (GuiButton b : new GuiButton[] {left, right}) {
                 if (b != null && b.mousePressed(mc, mouseX, mouseY)) {
                     b.playPressSound(mc.getSoundHandler());
-                    pressed(b);
+                    pressed(b, mouseEvent == 1);
                     return true;
                 }
             }
@@ -228,7 +264,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
 
         @Override
         public void mouseReleased(int slotIndex, int x, int y, int mouseEvent, int relativeX, int relativeY) {
-            left.mouseReleased(x, y);
+            if (left != null) left.mouseReleased(x, y);
             if (right != null) right.mouseReleased(x, y);
         }
 

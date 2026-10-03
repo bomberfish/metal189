@@ -1,0 +1,196 @@
+package metal189.config;
+
+import java.lang.reflect.Field;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+/**
+ * Every user setting: its menu page, kind and range. Values live in the {@link Config}
+ * static fields of the same name (booleans or ints); this table drives loading, saving,
+ * validation and the settings screens. Names and tooltips come from the language file
+ * ({@code metal189.opt.<key>} and {@code metal189.opt.<key>.desc}).
+ */
+public final class Options {
+    private Options() {}
+
+    public enum Kind { TOGGLE, SLIDER, CHOICE }
+
+    /** Enabled only with shaders on / with hardware ray tracing. */
+    public static final int NEEDS_SHADERS = 1, NEEDS_RT = 2;
+
+    /** Settings pages after the main page, in menu order. */
+    public static final String[] PAGES = {"lighting", "water", "sky", "post", "rt"};
+
+    public static final class Opt {
+        public final String key, page;
+        public final Kind kind;
+        public final int min, max, step;   // SLIDER
+        public final int[] choices;        // CHOICE: allowed values
+        public final boolean named;        // CHOICE: values have names (metal189.opt.<key>.<value>)
+        public final String unit;          // shown after numeric values
+        public final int needs;
+        public final int def;
+        private final Field field;
+
+        Opt(String key, String page, Kind kind, int min, int max, int step, int[] choices, boolean named, String unit, int needs) {
+            this.key = key;
+            this.page = page;
+            this.kind = kind;
+            this.min = min;
+            this.max = max;
+            this.step = step;
+            this.choices = choices;
+            this.named = named;
+            this.unit = unit;
+            this.needs = needs;
+            try {
+                field = Config.class.getField(key);
+            } catch (NoSuchFieldException e) {
+                throw new IllegalStateException("metal189: no Config." + key, e);
+            }
+            def = get();
+        }
+
+        public int get() {
+            try {
+                return field.getType() == boolean.class ? (field.getBoolean(null) ? 1 : 0) : field.getInt(null);
+            } catch (IllegalAccessException e) {
+                throw new IllegalStateException(e);
+            }
+        }
+
+        public void set(int v) {
+            v = sanitize(v);
+            try {
+                if (field.getType() == boolean.class) field.setBoolean(null, v != 0);
+                else field.setInt(null, v);
+            } catch (IllegalAccessException e) {
+                throw new IllegalStateException(e);
+            }
+        }
+
+        public int sanitize(int v) {
+            switch (kind) {
+                case TOGGLE: return v != 0 ? 1 : 0;
+                case SLIDER:
+                    v = Math.max(min, Math.min(max, v));
+                    return step > 1 ? Math.min(max, min + Math.round((v - min) / (float) step) * step) : v;
+                default: return Config.pick(v, choices);
+            }
+        }
+
+        /** Next value for a button press (toggles flip, choices advance and wrap). */
+        public void cycle(boolean backwards) {
+            if (kind == Kind.TOGGLE) {
+                set(get() ^ 1);
+                return;
+            }
+            if (kind != Kind.CHOICE) return;
+            int v = get(), n = choices.length;
+            for (int i = 0; i < n; i++)
+                if (choices[i] == v) {
+                    set(choices[(i + (backwards ? n - 1 : 1)) % n]);
+                    return;
+                }
+            set(choices[0]);
+        }
+
+        public boolean isBoolean() { return field.getType() == boolean.class; }
+
+        /** Value from a properties file (booleans as true/false, numbers as integers). */
+        public void parse(String s) {
+            s = s.trim();
+            if (isBoolean()) set(Boolean.parseBoolean(s) ? 1 : 0);
+            else {
+                try {
+                    set(Integer.parseInt(s));
+                } catch (NumberFormatException ignored) {
+                }
+            }
+        }
+
+        public String format() { return isBoolean() ? Boolean.toString(get() != 0) : Integer.toString(get()); }
+    }
+
+    private static final List<Opt> ALL = new ArrayList<Opt>();
+
+    public static List<Opt> all() { return Collections.unmodifiableList(ALL); }
+
+    public static List<Opt> page(String page) {
+        List<Opt> r = new ArrayList<Opt>();
+        for (Opt o : ALL) if (o.page.equals(page)) r.add(o);
+        return r;
+    }
+
+    public static Opt get(String key) {
+        for (Opt o : ALL) if (o.key.equals(key)) return o;
+        return null;
+    }
+
+    private static void toggle(String page, String key, int needs) {
+        ALL.add(new Opt(key, page, Kind.TOGGLE, 0, 1, 1, null, false, "", needs));
+    }
+
+    private static void slider(String page, String key, int needs, int min, int max, int step, String unit) {
+        ALL.add(new Opt(key, page, Kind.SLIDER, min, max, step, null, false, unit, needs));
+    }
+
+    private static void numbers(String page, String key, int needs, String unit, int... values) {
+        ALL.add(new Opt(key, page, Kind.CHOICE, 0, 0, 1, values, false, unit, needs));
+    }
+
+    private static void named(String page, String key, int needs, int count) {
+        int[] v = new int[count];
+        for (int i = 0; i < count; i++) v[i] = i;
+        ALL.add(new Opt(key, page, Kind.CHOICE, 0, count - 1, 1, v, true, "", needs));
+    }
+
+    static {
+        final int S = NEEDS_SHADERS, RT = NEEDS_SHADERS | NEEDS_RT;
+        toggle("main", "shaders", 0);
+        toggle("main", "ctrlClickRightClick", 0);
+
+        toggle("lighting", "shadows", S);
+        numbers("lighting", "shadowResolution", S, "", Config.SHADOW_RESOLUTIONS);
+        numbers("lighting", "shadowDistance", S, " blocks", Config.SHADOW_DISTANCES);
+        toggle("lighting", "playerShadow", S);
+        toggle("lighting", "ssao", S);
+        toggle("lighting", "waving", S);
+        toggle("lighting", "autoExposure", S);
+        slider("lighting", "exposure", S, 25, 400, 5, "%");
+
+        toggle("water", "water", S);
+        named("water", "waterStyle", S, 3);
+        slider("water", "waterWaveStrength", S, 0, 250, 5, "%");
+        slider("water", "waterWaveSize", S, 25, 300, 5, "%");
+        slider("water", "waterWaveSpeed", S, 0, 300, 5, "%");
+        toggle("water", "waterCalmIndoors", S);
+        slider("water", "waterReflectivity", S, 2, 25, 1, "%");
+        slider("water", "waterSunReflection", S, 0, 300, 5, "%");
+        slider("water", "waterRefraction", S, 0, 300, 5, "%");
+        slider("water", "waterClarity", S, 2, 48, 1, " blocks");
+        slider("water", "waterColorR", S, 25, 300, 5, "%");
+        slider("water", "waterColorG", S, 25, 300, 5, "%");
+        slider("water", "waterColorB", S, 25, 300, 5, "%");
+        toggle("water", "waterBiomeTint", S);
+        slider("water", "waterFoam", S, 0, 150, 5, "%");
+        slider("water", "waterFoamWidth", S, 25, 300, 5, "%");
+        slider("water", "underwaterVisibility", S, 8, 128, 4, " blocks");
+        toggle("water", "underwaterOverlay", 0);
+
+        toggle("sky", "sky", S);
+        toggle("sky", "clouds", S);
+        toggle("sky", "volumetrics", S);
+
+        toggle("post", "taa", S);
+        toggle("post", "bloom", S);
+        slider("post", "bloomStrength", S, 0, 300, 5, "%");
+
+        toggle("rt", "rtShadows", RT);
+        toggle("rt", "rtReflections", RT);
+        toggle("rt", "rtAmbientOcclusion", RT);
+        toggle("rt", "rtGlobalIllumination", RT);
+        toggle("rt", "rtEntities", RT);
+    }
+}

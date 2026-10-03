@@ -41,9 +41,10 @@ void setOption(int key, int value) {
 // persistent GL state mirror
 
 struct GLMirror {
-    PipeState pipe{0, 1, 0, 1, 0, 0x8006, 0xF, 0, 0x1503};
-    DepthState depth{0, 0x201, 1, 0};
-    RasterState raster{0, 0x405, 0x901, 0, 0, 0, 1, 0};
+    // GL's initial state (the Java side sends the real state before the first draw)
+    PipeState pipe{0, 1, 0, 1, 0, 0x8006, 0xF, 0, 0x1503, {0, 0, 0, 0}};
+    DepthState depth{0, 0x201, 1, 0, 0x207, 0, 0xFFFFFFFFu, 0x1E00, 0x1E00, 0x1E00, 0xFFFFFFFFu};
+    RasterState raster{0, 0x405, 0x901, 0, 0, 0, 1, 0, 1, 0x1B02, 0, 0};
     FragState frag{0, 0x207, 0, 0, 0x0800, 0x855C, 0, 1, 1, {0, 0, 0, 0}};
     UnitState units[3];
     TexGenState texgen{};

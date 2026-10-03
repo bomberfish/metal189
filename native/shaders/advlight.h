@@ -80,6 +80,18 @@ static float4 fwdLight(constant AdvFrame& fr, float4 rgba, float3 eyePos, float3
     c += albedo * 0.004;
     if (int(fr.flags.y) == -1) c += albedo * 0.03;
     if (int(fr.flags.y) == 1) c += albedo * float3(0.045, 0.038, 0.06);
+    bool inWater = fr.fog.w > 0.5 && fr.fog.w < 1.5;
+    if (inWater) {
+        // under water the lightmap's sky light drops to nothing a few blocks down, but light
+        // scattered by the water itself still reaches everything (fr.tune[3]: water colour)
+        float3 sunC = fr.sunDirWorld.w > 0.0 ? fr.sunColor.rgb : fr.moonColor.rgb;
+        float3 waterLight = (skyLut.sample(lin, float2(0.5, 1.0), level(5)).rgb * 1.2 + sunC * 0.35) * fr.tune[3].rgb * 1.5;
+        c += albedo * waterLight * 0.6;
+        // underwater fog (fr.tune[4].x: visibility, fr.tune[2]: absorption), as in light_fragment
+        float r = dcam / max(fr.tune[4].x, 1.0);
+        float f = 1.0 - exp(-0.6931 * r * r);
+        c = c * exp(-fr.tune[2].xyz * dcam * 0.5) * (1.0 - f) + waterLight * f;
+    }
     // distance haze towards the horizon colour (particles far away)
     if (fr.flags.y == 0 && fr.fog.w < 0.5) {
         float fogF = saturate((dcam - fr.fog.x) / max(fr.fog.y - fr.fog.x, 1.0));

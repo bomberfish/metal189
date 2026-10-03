@@ -1,0 +1,41 @@
+sleep 3
+world lookpool 42 flat
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /weather clear
+cmd /time set 4000
+cmd /tp @p -500 30 -468 180 40
+sleep 4
+cmd /kill @e[type=!Player]
+cmd /fill -520 3 -520 -480 16 -480 stone
+cmd /fill -515 5 -515 -485 16 -485 water
+cmd /fill -515 4 -515 -485 4 -485 sand
+cmd /fill -515 5 -490 -485 13 -485 sand
+cmd /fill -515 14 -489 -485 14 -485 sand
+cmd /fill -515 15 -487 -485 15 -485 sand
+cmd /fill -515 16 -486 -485 16 -485 sand
+cmd /fill -500 5 -500 -500 19 -500 log
+cmd /fill -508 5 -508 -506 7 -506 stonebrick
+sleep 6
+capture CAPTURE_A
+cmd /time set 12300
+cmd /tp @p -476 22 -500 90 12
+sleep 4
+capture CAPTURE_B
+cmd /time set 4000
+cmd /tp @p -500 10 -492 180 0
+sleep 4
+capture CAPTURE_C
+config underwaterOverlay false
+sleep 2
+capture CAPTURE_D
+cmd /tp @p -500 10 -495 180 -60
+sleep 3
+capture CAPTURE_E
+config underwaterOverlay true
+cmd /tp @p -500 19.5 -483 180 50
+sleep 4
+capture CAPTURE_F
+quit

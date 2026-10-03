@@ -49,6 +49,13 @@ void advancedSetParam(int key, int value) {
     }
 }
 
+static float g_tuning[kTuningValues];
+
+void advancedSetTuning(const float* v, int n) {
+    n = std::clamp(n, 0, kTuningValues);
+    memcpy(g_tuning, v, (size_t)n * sizeof(float));
+}
+
 void advancedSetEnabled(bool on) { g_enabled = on; }
 bool advancedCloudsActive() { return g_enabled && (g_features & ADV_CLOUDS); }
 void advancedSetFeatures(uint32_t f) { g_features = f; }
@@ -76,7 +83,10 @@ struct State {
     id<MTLRenderPipelineState> volPso, volCompPso, rtaoPso, aoBlurPso, giTracePso, giTemporalPso, giBlurPso, ssaoPso;
     bool giHistory = false;
     int giIndex = 0;
-    id<MTLComputePipelineState> exposureKernel;
+    id<MTLComputePipelineState> exposureKernel, waveKernel;
+    id<MTLTexture> waveTex;              // water wave height/slope field (wave_texture_kernel), mipmapped
+    id<MTLSamplerState> waveSampler;
+    bool waveReady = false;
     id<MTLBuffer> exposureState;
     AdvLitContext lit;
     id<MTLTexture> dummyDepth;
@@ -195,6 +205,25 @@ bool initState() {
         rs.minFilter = rs.magFilter = MTLSamplerMinMagFilterLinear;
         rs.sAddressMode = rs.tAddressMode = rs.rAddressMode = MTLSamplerAddressModeRepeat;
         S.repeatLinear = [device() newSamplerStateWithDescriptor:rs];
+    }
+
+    {
+        NSError* err = nil;
+        id<MTLFunction> k = fn(@"wave_texture_kernel");
+        S.waveKernel = k ? [device() newComputePipelineStateWithFunction:k error:&err] : nil;
+        if (!S.waveKernel) log("advanced: wave kernel: %s", err ? err.localizedDescription.UTF8String : "missing");
+        MTLTextureDescriptor* wd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                                                      width:256 height:256 mipmapped:YES];
+        wd.storageMode = MTLStorageModePrivate;
+        wd.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget;
+        S.waveTex = [device() newTextureWithDescriptor:wd];
+        S.waveTex.label = @"water waves";
+        MTLSamplerDescriptor* sd = [MTLSamplerDescriptor new];
+        sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear;
+        sd.mipFilter = MTLSamplerMipFilterLinear;
+        sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeRepeat;
+        sd.maxAnisotropy = 8;
+        S.waveSampler = [device() newSamplerStateWithDescriptor:sd];
     }
 
     {
@@ -595,6 +624,8 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
     if (!taaOn) fr.post.y = cloudsOn && S.cloudHistory ? 1.0f : 0.0f;
     S.cloudHistory = cloudsOn;
     fr.flags = simd_make_uint4(features, (uint32_t)env.dimension, (uint32_t)S.frame, (uint32_t)g_optAdvDebug);
+    static_assert(sizeof fr.tune == sizeof g_tuning, "tuning block size");
+    memcpy(fr.tune, g_tuning, sizeof fr.tune);
     int shadowRes = g_shadowRes;
     if (features & ADV_SHADOWS) {
         ensureShadowMap(shadowRes);
@@ -982,6 +1013,18 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
     }
 
     // ---- translucent terrain (water, glass, ice) ----
+    if (!w.terrain[3].empty() && !S.waveReady && S.waveKernel) {
+        id<MTLComputeCommandEncoder> c = [cb computeCommandEncoder];
+        c.label = @"water waves";
+        [c setComputePipelineState:S.waveKernel];
+        [c setTexture:S.waveTex atIndex:0];
+        [c dispatchThreads:MTLSizeMake(256, 256, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+        [c endEncoding];
+        id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+        [b generateMipmapsForTexture:S.waveTex];
+        [b endEncoding];
+        S.waveReady = true;
+    }
     if (!w.terrain[3].empty()) {
         // refraction and screen-space reflections read the opaque scene from copies
         MTLBlitPassDescriptor* bp = [MTLBlitPassDescriptor blitPassDescriptor];
@@ -1028,6 +1071,8 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [e setFragmentTexture:S.t.sceneColor atIndex:6];
         [e setFragmentTexture:S.t.sceneDepth atIndex:7];
         [e setFragmentTexture:cloudMap atIndex:8];
+        [e setFragmentTexture:S.waveTex atIndex:9];
+        [e setFragmentSamplerState:S.waveSampler atIndex:4];
         TexEntry* atlas = texture(w.atlasTex);
         if (atlas && atlas->tex) [e setFragmentTexture:atlas->tex atIndex:0];
         const uint32_t* sp = w.layerSampler[3];

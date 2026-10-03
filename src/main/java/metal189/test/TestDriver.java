@@ -232,7 +232,13 @@ public final class TestDriver {
                 else if ("survival".equals(a[1]) && mc.thePlayer != null) mc.displayGuiScreen(new net.minecraft.client.gui.inventory.GuiInventory(mc.thePlayer));
                 else if ("options".equals(a[1])) mc.displayGuiScreen(new net.minecraft.client.gui.GuiOptions(new net.minecraft.client.gui.GuiMainMenu(), mc.gameSettings));
                 else if ("video".equals(a[1])) mc.displayGuiScreen(new net.minecraft.client.gui.GuiVideoSettings(null, mc.gameSettings));
-                else if ("metal189".equals(a[1])) mc.displayGuiScreen(new metal189.gui.GuiMetal189(null));
+                else if ("metal189".equals(a[1]))
+                    mc.displayGuiScreen(a.length > 2 ? new metal189.gui.GuiMetal189(new metal189.gui.GuiMetal189(null), a[2])
+                                                     : new metal189.gui.GuiMetal189(null));
+                return true;
+            case "guihover":
+                // guihover KEY|none : show an option's tooltip in the metal189 settings screen
+                metal189.gui.GuiMetal189.testHover = "none".equals(a[1]) ? null : a[1];
                 return true;
             case "f3":
                 mc.gameSettings.showDebugInfo = !mc.gameSettings.showDebugInfo;

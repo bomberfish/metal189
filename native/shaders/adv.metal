@@ -655,12 +655,12 @@ static float cloudShadow(constant AdvFrame& fr, texture3d<float> noise, sampler 
 }
 
 static float3 skyRadiance(constant AdvFrame& fr, texture2d<float> skyLut, sampler s, float3 dirWorld,
-                          texture2d<float> cloudMap) {
+                          texture2d<float> cloudMap, bool sunDisc = true) {
     if (fr.flags.y != 0) return toLinear(fr.fogColor.rgb);
     float3 d = dirWorld;
     float3 base = skyBase(fr, skyLut, s, d);
     float mu = dot(d, fr.sunDirWorld.xyz);
-    float disc = smoothstep(0.99955, 0.9998, mu) * fr.sunDirWorld.w;
+    float disc = sunDisc ? smoothstep(0.99955, 0.9998, mu) * fr.sunDirWorld.w : 0.0;
     float3 c = base + fr.sunColor.rgb * disc * 60.0;
     // moon (always opposite the sun in Minecraft) with vanilla's phases: a lit sphere whose
     // terminator is an ellipse, plus faint earthshine on the dark part
@@ -1208,16 +1208,28 @@ fragment float4 aoblur_fragment(FullscreenOut in [[stage_in]], constant AdvFrame
     return float4(sum / max(wsum, 1e-4), 1.0, 1.0, 1.0);
 }
 
-// Water as a participating medium (per block): absorption takes red first, turbidity
-// scatters the light that reaches the water back towards the eye.
-constant float3 kWaterAbsorb = float3(0.30, 0.075, 0.05);
-constant float kWaterScatter = 0.07;
+// user settings (Pipeline.java TUNE_*)
+#define WATER_WAVES   fr.tune[0]   // x: strength, y: size, z: speed, w: style (0 smooth, 1 pixel, 2 vanilla texture)
+#define WATER_SURFACE fr.tune[1]   // x: reflectivity (F0), y: sun reflection, z: refraction, w: foam
+#define WATER_ABSORB  fr.tune[2]   // xyz: absorption per block, w: scattering per block
+#define WATER_COLOR   fr.tune[3]   // xyz: deep-water colour (linear), w: caustics
+#define WATER_UNDER   fr.tune[4]   // x: underwater visibility (blocks to 50%), y: distortion, z: flags, w: foam width
+#define WF_BIOME_TINT   1u
+#define WF_CALM_INDOORS 2u
 
+// Water as a participating medium (user colour and clarity): absorption takes red first,
+// and the light the water scatters back gives deep water its colour.
 static float3 underwaterInscatter(constant AdvFrame& fr, texture2d<float> skyLut, sampler lin) {
     float3 sun = fr.sunDirWorld.w > 0.0 ? fr.sunColor.rgb : fr.moonColor.rgb;
     float3 light = skyLut.sample(lin, float2(0.5, 1.0), level(5)).rgb * 1.2 + sun * 0.35;
-    float3 sigT = kWaterAbsorb + kWaterScatter;
-    return light * float3(0.12, 0.5, 0.6) * (kWaterScatter / sigT);
+    return light * WATER_COLOR.rgb * 1.5;
+}
+
+// Share of the view hidden by underwater fog at distance d: Gaussian, so the near field
+// stays clear, reaching half at the visibility setting.
+static inline float underwaterFog(constant AdvFrame& fr, float d) {
+    float r = d / max(WATER_UNDER.x, 1.0);
+    return 1.0 - exp(-0.6931 * r * r);
 }
 
 // Animated caustics on underwater surfaces (warped interference pattern).
@@ -1232,7 +1244,7 @@ static float caustics(float2 p, float t) {
     return c * c * c * 4.0;
 }
 
-static float3 ssr(constant AdvFrame& fr, depth2d<float> depthTex, float3 eyePos, float3 rdView);
+static float3 ssr(constant AdvFrame& fr, depth2d<float> depthTex, float3 eyePos, float3 rdView, float jitter);
 
 fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                                constant AdvFrame& fr [[buffer(1)]],
@@ -1405,7 +1417,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                     hitAny = true;
                 }
             } else if (fr.taa.w > 0.5) {
-                float3 hit = ssr(fr, depth, eye, Rr);
+                float3 hit = ssr(fr, depth, eye, Rr, fract(hash12(in.position.xy) + float(fr.flags.z % 64u) * 0.618034));
                 if (hit.z > 0.0) {
                     traced = mix(refl, history.sample(lin, hit.xy).rgb, hit.z);
                     hitAny = true;
@@ -1451,9 +1463,9 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
         // inside lava
         color = mix(toLinear(fr.fogColor.rgb) * 2.0, color, exp(-dist * 1.2));
     } else if (fr.fog.w > 0.5) {
-        // underwater: absorption and in-scattering along the view ray
-        float3 tv = exp(-dist * (kWaterAbsorb + kWaterScatter));
-        color = color * tv + underwaterInscatter(fr, skyLut, lin) * (1.0 - tv);
+        // underwater: absorption (red first) and fog along the view ray
+        float f = underwaterFog(fr, dist);
+        color = color * exp(-WATER_ABSORB.xyz * dist * 0.5) * (1.0 - f) + underwaterInscatter(fr, skyLut, lin) * f;
     } else {
         float fogF = saturate((dist - fr.fog.x) / max(fr.fog.y - fr.fog.x, 1.0));
         fogF *= fogF;
@@ -1500,32 +1512,130 @@ vertex WaterOut water_vertex(uint vid [[vertex_id]],
     return o;
 }
 
-static float waveHeight(float2 p, float t) {
-    return sin(p.x * 0.9 + t * 1.3) * 0.12 + sin(p.y * 1.1 - t * 1.1) * 0.1 +
-           sin((p.x + p.y) * 2.3 + t * 2.1) * 0.05 + sin((p.x - p.y) * 3.1 - t * 2.6) * 0.035;
+// Wave texture, generated once by wave_texture_kernel: a tileable height field built from
+// random integer-frequency waves (so it repeats seamlessly), stored as xy = slope (unit
+// RMS), z = height on the same scale (slope = its gradient), w = squared slope. Filtering
+// averages the slope away with distance; w's mips keep the variance that was averaged
+// away, which widens the sun glint instead of letting distant water shimmer.
+kernel void wave_texture_kernel(texture2d<float, access::write> out [[texture(0)]],
+                                uint2 gid [[thread_position_in_grid]]) {
+    uint W = out.get_width();
+    if (gid.x >= W || gid.y >= W) return;
+    float2 p = (float2(gid) + 0.5) / float(W);
+    float h = 0.0, norm = 0.0;
+    float2 g = float2(0.0);
+    for (int i = 0; i < 48; i++) {
+        float2 r = hash22(float2(float(i) * 7.31 + 1.7, float(i) * 3.17 + 9.2));
+        float ang = r.x * 6.2831853;
+        float2 k = round(float2(cos(ang), sin(ang)) * mix(2.0, 10.0, r.y * r.y));
+        if (all(k == 0.0)) k = float2(2.0, 1.0);
+        float km = length(k);
+        float amp = 1.0 / (km * km);   // height spectrum ~ k^-2: long waves carry the height
+        float a = 6.2831853 * dot(k, p) + hash12(float2(float(i), 17.0)) * 6.2831853;
+        h += amp * sin(a);
+        g += amp * 6.2831853 * k * cos(a);
+        float sk = amp * 6.2831853 * km;
+        norm += 0.5 * sk * sk;
+    }
+    float s = rsqrt(norm);
+    g *= s;
+    h *= s;
+    out.write(float4(g, h, dot(g, g)), gid);
 }
 
-// Screen-space ray march against the opaque depth; returns uv (xy) and a hit weight (z).
-static float3 ssr(constant AdvFrame& fr, depth2d<float> depthTex, float3 eyePos, float3 rdView) {
-    float3 p = eyePos;
-    float stepLen = 0.6;
-    for (int i = 0; i < 40; i++) {
-        p += rdView * stepLen;
-        stepLen *= 1.09;
+struct WaterWaves {
+    float2 slope;      // surface slope along world x and z
+    float height;      // blocks
+    float variance;    // slope variance below the filter footprint
+};
+
+// Four octaves of the wave texture, each rotated and drifting along its own axis at a
+// deep-water dispersion speed (longer waves travel faster). xz: world position;
+// dX/dY: its screen derivatives (explicit, so snapped pixel-style positions filter right).
+static WaterWaves waterWaves(constant AdvFrame& fr, texture2d<float> waveTex, sampler wrep,
+                             float2 xz, float2 dX, float2 dY, float t) {
+    const float tiles[4] = {2.3, 7.6, 21.0, 63.0};
+    const float angles[4] = {0.0, 0.65, -1.07, 2.13};
+    const float weights[4] = {0.45, 0.8, 1.0, 0.7};
+    float size = max(WATER_WAVES.y, 0.05);
+    WaterWaves w;
+    w.slope = float2(0.0);
+    w.height = 0.0;
+    w.variance = 0.0;
+    for (int i = 0; i < 4; i++) {
+        float L = tiles[i] * size;
+        float c = cos(angles[i]), s = sin(angles[i]);
+        float2x2 toLocal = float2x2(float2(c, -s), float2(s, c));   // rotation by -angle
+        float2 q = toLocal * xz;
+        q.y += t * WATER_WAVES.z * 0.25 * sqrt(L);
+        float4 smp = waveTex.sample(wrep, q / L, gradient2d(toLocal * dX / L, toLocal * dY / L));
+        w.slope += float2(c * smp.x - s * smp.y, s * smp.x + c * smp.y) * weights[i];
+        w.height += smp.z * weights[i] * L;
+        w.variance += max(smp.w - dot(smp.xy, smp.xy), 0.0) * weights[i] * weights[i];
+    }
+    float k = 0.072 * WATER_WAVES.x;
+    w.slope *= k;
+    w.height *= k;
+    w.variance *= k * k;
+    return w;
+}
+
+// Screen-space ray march against the opaque depth: exponentially growing steps, then a
+// binary search on the first crossing. Returns the hit uv (xy) and a confidence (z).
+static float3 ssr(constant AdvFrame& fr, depth2d<float> depthTex, float3 eyePos, float3 rdView, float jitter) {
+    float stepLen = (0.15 + length(eyePos) * 0.008) * (0.75 + 0.5 * jitter);
+    float3 prev = eyePos, p = eyePos + rdView * stepLen;
+    for (int i = 0; i < 30; i++) {
         float4 c = fr.proj * float4(p, 1.0);
         if (c.w <= 0.0) break;
         float2 ndc = c.xy / c.w;
         if (any(abs(ndc) > 1.0)) break;
-        float2 fc = float2((ndc.x * 0.5 + 0.5) * fr.screen.x, (ndc.y * 0.5 + 0.5) * fr.screen.y);
+        float2 fc = (ndc * 0.5 + 0.5) * fr.screen.xy;
         float sd = depthTex.read(uint2(fc));
-        if (sd >= 1.0) continue;
-        float3 sp = eyeFromDepth(fr, fc, sd);
-        if (sp.z > p.z && sp.z - p.z < stepLen * 2.5 + 0.2) {
-            float edge = saturate(1.0 - max(abs(ndc.x), abs(ndc.y)));
-            return float3(fc * fr.screen.zw, saturate(edge * 4.0));
+        if (sd < 1.0) {
+            float behind = eyeFromDepth(fr, fc, sd).z - p.z;   // > 0: the ray passed behind the surface
+            if (behind > 0.0 && behind < stepLen * 2.0 + 0.25) {
+                float3 a = prev, b = p;
+                for (int j = 0; j < 6; j++) {
+                    float3 m = (a + b) * 0.5;
+                    float4 mc = fr.proj * float4(m, 1.0);
+                    float2 mf = clamp((mc.xy / mc.w * 0.5 + 0.5) * fr.screen.xy, float2(0.5), fr.screen.xy - 0.5);
+                    float md = depthTex.read(uint2(mf));
+                    if (md < 1.0 && eyeFromDepth(fr, mf, md).z > m.z) b = m;
+                    else a = m;
+                }
+                float4 bc = fr.proj * float4(b, 1.0);
+                float2 bn = bc.xy / bc.w;
+                float edge = saturate((1.0 - max(abs(bn.x), abs(bn.y))) * 6.0);
+                return float3(bn * 0.5 + 0.5, edge);
+            }
         }
+        prev = p;
+        stepLen *= 1.4;
+        p += rdView * stepLen;
     }
-    return float3(0);
+    return float3(0.0);
+}
+
+// Sun glint: GGX with the sun as a disk of ~1.4 degrees radius (representative-point
+// sphere light), soft-clamped so TAA and bloom never see fireflies. Returns radiance per
+// unit sun colour.
+static float sunGlint(float3 n, float3 v, float3 L, float alpha, float F0) {
+    const float sinR = 0.024;
+    float3 R = reflect(-v, n);
+    float3 toRay = dot(L, R) * R - L;
+    float3 Lp = normalize(L + toRay * saturate(sinR / max(length(toRay), 1e-5)));
+    float3 h = normalize(Lp + v);
+    float nh = saturate(dot(n, h)), nl = saturate(dot(n, Lp)), nv = max(dot(n, v), 1e-3), vh = saturate(dot(v, h));
+    float a2 = alpha * alpha;
+    float spread = alpha / saturate(alpha + 0.5 * sinR);   // energy kept as the disk widens the lobe
+    float dd = nh * nh * (a2 - 1.0) + 1.0;
+    float D = a2 / (3.14159 * dd * dd) * spread * spread;
+    float k = alpha * 0.5;
+    float G = (nl / (nl * (1.0 - k) + k)) * (nv / (nv * (1.0 - k) + k));
+    float F = F0 + (1.0 - F0) * pow(1.0 - vh, 5.0);
+    float x = 3.14159 * D * G * F / (4.0 * nv);
+    return x / (1.0 + x / 12.0);
 }
 
 fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_facing]],
@@ -1534,6 +1644,7 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
                                depth2d<float> shadowMap [[texture(4)]], sampler cmp [[sampler(1)]],
                                texture2d<float> skyLut [[texture(5)]], sampler lin [[sampler(2)]],
                                texture2d<float> sceneColor [[texture(6)]], depth2d<float> sceneDepth [[texture(7)]],
+                               texture2d<float> waveTex [[texture(9)]], sampler wrep [[sampler(4)]],
                                instance_acceleration_structure tlas [[buffer(10), function_constant(ac_rt)]],
                                device const RtInstance* rtInst [[buffer(11), function_constant(ac_rt)]],
                                primitive_acceleration_structure entAs [[buffer(12), function_constant(ac_rt)]],
@@ -1547,105 +1658,173 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
     float3 v = normalize(-in.eye);
     float3 dirWorld = normalize((fr.invView * float4(-v, 0)).xyz);
     float3 nWorld = normalize((fr.invView * float4(n, 0)).xyz);
-    float3 lightDir = fr.sunDirView.w > 0.0 ? fr.sunDirView.xyz : fr.moonDirView.xyz;
-    float3 lightCol = fr.sunDirView.w > 0.0 ? fr.sunColor.rgb : fr.moonColor.rgb;
+    bool sunUp = fr.sunDirView.w > 0.0;
+    float3 lightDir = sunUp ? fr.sunDirView.xyz : fr.moonDirView.xyz;
+    float3 lightCol = sunUp ? fr.sunColor.rgb : fr.moonColor.rgb;
+    float3 Lw = sunUp ? fr.sunDirWorld.xyz : -fr.sunDirWorld.xyz;
     float ndl = saturate(dot(n, lightDir));
     float shadow = (fr.flags.x & ADV_SHADOWS) ? sampleShadow(fr, shadowMap, cmp, in.world, nWorld, ndl) : 1.0;
     float skyGate = smoothstep(0.35, 0.9, in.lm.y);
     float2 px = in.position.xy;
     uint2 ipx = uint2(px);
 
-    if (in.material != 2) {
-        // stained glass, ice, slime...: lit translucent surface
+    if (in.material != 2 || !(fr.flags.x & ADV_WATER)) {
+        // stained glass, ice, slime (and water with water effects off): lit translucent surface
         float3 albedo = toLinear(t.rgb * in.color.rgb);
         float3 c = albedo * (lightCol * ndl * shadow * skyGate + skyAmbient(fr, skyLut, lin, nWorld) * in.lm.y * in.lm.y +
                              fr.blockLight.rgb * pow(in.lm.x, fr.blockLight.a) * (1.0 - 0.75 * in.lm.y * in.lm.y * fr.sunDirWorld.w) + 0.004);
         return float4(c, t.a * in.color.a);
     }
 
-    // water: wave normal, refraction with absorption, SSR + sky reflection, sun glint
+    // ---- water ----
+    uint wflags = uint(WATER_UNDER.z + 0.5);
+    int style = int(WATER_WAVES.w + 0.5);
     float time = fr.params.x;
-    float2 wp = in.world.xz + fr.camera.xz;
-    float e = 0.05;
-    float h0 = waveHeight(wp, time);
-    float3 bump = float3(waveHeight(wp + float2(e, 0), time) - h0, 0, waveHeight(wp + float2(0, e), time) - h0) / e;
-    float3 nw = abs(nWorld.y) > 0.5 ? normalize(float3(-bump.x * 0.25, nWorld.y, -bump.z * 0.25)) : nWorld;
-    float3 nv = normalize((fr.view * float4(nw, 0)).xyz);
+    float dist = length(in.eye);
+    float2 xzRaw = in.world.xz + fr.camera.xz;
+    float2 xz = style == 1 ? (floor(xzRaw * 16.0) + 0.5) / 16.0 : xzRaw;   // pixel style: one wave value per texel
+    bool top = abs(nWorld.y) > 0.5;
+    float3 up = float3(0, nWorld.y >= 0.0 ? 1.0 : -1.0, 0);
+    WaterWaves wv = waterWaves(fr, waveTex, wrep, xz, dfdx(xzRaw), dfdy(xzRaw), time);
+    float cosV = abs(dot(dirWorld, nWorld));
+    float atten = mix(0.35, 1.0, saturate(cosV * 2.5));    // calmer at grazing angles: no horizon sparkle
+    if (wflags & WF_CALM_INDOORS) atten *= mix(0.25, 1.0, smoothstep(0.55, 0.9, in.lm.y));
+    if (style == 2 || !top) atten = 0.0;                   // vanilla texture style: a flat surface
+    float2 slope = wv.slope * atten;
+    float3 nw = top ? normalize(float3(-slope.x, 1.0, -slope.y)) * up.y : nWorld;
+    float variance = wv.variance * atten * atten;
+
+    // the water body's colour: user colour, optionally tinted by the biome (swamps)
+    float3 waterCol = WATER_COLOR.rgb;
+    if (wflags & WF_BIOME_TINT) waterCol *= toLinear(in.color.rgb) / max(toLinear(float3(1.0)), 1e-3);
+    if (style == 2) waterCol = toLinear(t.rgb) * 0.35;
+    float3 sigA = WATER_ABSORB.xyz;
+    float3 sigT = sigA + WATER_ABSORB.w;
+    float3 skyIn = skyAmbient(fr, skyLut, lin, float3(0, 1, 0)) * in.lm.y * in.lm.y;
+    float3 inLight = skyIn + lightCol * shadow * skyGate * 0.6;
 
     // seen from below (vanilla draws the top face a second time, reversed): Snell's window
     // shows the refracted sky, outside it total internal reflection of the lit water
     if (nWorld.y < -0.5) {
-        float3 nDown = normalize(float3(bump.x * 0.25, -1.0, bump.z * 0.25));
         float3 inScat = underwaterInscatter(fr, skyLut, lin);
-        float3 tr = refract(dirWorld, nDown, 1.33);
+        float3 tr = refract(dirWorld, nw, 1.33);
         float3 c;
         if (dot(tr, tr) < 1e-6) {
             c = inScat * 1.2;
         } else {
-            float cosI = saturate(dot(-dirWorld, nDown));
+            float cosI = saturate(dot(-dirWorld, nw));
             float fr0 = 0.02 + 0.98 * pow(1.0 - cosI, 5.0);
-            c = mix(skyRadiance(fr, skyLut, lin, normalize(tr), cloudMap) * skyGate, inScat * 1.2, fr0);
+            float3 trn = normalize(tr);
+            float3 skyC = skyRadiance(fr, skyLut, lin, trn, cloudMap) * skyGate;
+            skyC += lightCol * pow(saturate(dot(trn, Lw)), 400.0) * 40.0 * shadow * skyGate;   // the sun through the surface
+            c = mix(skyC, inScat * 1.2, fr0);
         }
-        float3 tv = exp(-length(in.eye) * (kWaterAbsorb + kWaterScatter));
-        return float4(c * tv + inScat * (1.0 - tv), 1.0);
+        float f = underwaterFog(fr, dist);
+        return float4(c * exp(-sigA * dist * 0.5) * (1.0 - f) + inScat * f, 1.0);
     }
 
-    // refraction: offset the opaque scene lookup along the wave normal (fading out at the
-    // screen edges), then absorption + turbid in-scattering through the water column
+    // opaque scene directly behind this pixel
+    float sceneD0 = sceneDepth.read(ipx);
+    float3 sceneEye0 = eyeFromDepth(fr, px, sceneD0);
+    float thick0 = sceneD0 >= 1.0 ? 64.0 : max(length(sceneEye0) - dist, 0.0);
+
+    // refraction: shift the lookup by the wave's tilt, a fixed world-space amount (fewer
+    // pixels far away), fading in over the first block of depth (no halos at shores)
+    float3 nvWave = normalize((fr.view * float4(nw, 0)).xyz);
+    float3 nvFlat = normalize((fr.view * float4(nWorld, 0)).xyz);
+    float pxPerBlock = fr.proj[1][1] * 0.5 * fr.screen.y / max(dist, 0.5);
     float2 edge = saturate(min(px, fr.screen.xy - px) / 48.0);
-    float2 refrPx = px + nv.xy * float2(1, -1) * (fr.screen.y / 45.0) * edge.x * edge.y;
-    refrPx = clamp(refrPx, float2(0.5), fr.screen.xy - 0.5);
+    float2 shift = (nvWave.xy - nvFlat.xy) * float2(1, -1) * WATER_SURFACE.z * 0.6 * pxPerBlock * saturate(thick0);
+    shift = clamp(shift, float2(-48.0), float2(48.0)) * edge.x * edge.y;
+    float2 refrPx = clamp(px + shift, float2(0.5), fr.screen.xy - 0.5);
     float sceneD = sceneDepth.read(uint2(refrPx));
     float3 sceneEye = eyeFromDepth(fr, refrPx, sceneD);
-    if (sceneEye.z > in.eye.z || sceneD >= 1.0) { refrPx = px; sceneD = sceneDepth.read(ipx); sceneEye = eyeFromDepth(fr, px, sceneD); }
+    if (sceneEye.z > in.eye.z || (sceneD >= 1.0 && sceneD0 < 1.0)) { refrPx = px; sceneD = sceneD0; sceneEye = sceneEye0; }
     float3 refr = sceneColor.read(uint2(refrPx)).rgb;
-    float thickness = sceneD >= 1.0 ? 64.0 : max(length(sceneEye) - length(in.eye), 0.0);
-    float3 waterTint = toLinear(t.rgb * in.color.rgb);
-    const float3 sigA = float3(0.32, 0.075, 0.05);  // per block: red absorbed first
-    const float sigS = 0.09;                         // turbidity
-    float3 sigT = sigA + sigS;
-    float3 Tw = exp(-thickness * sigT);
-    float3 inLight = skyAmbient(fr, skyLut, lin, float3(0, 1, 0)) * in.lm.y * in.lm.y + lightCol * shadow * skyGate * 0.6;
-    float3 scatterCol = normalize(waterTint + 0.02) * 0.6 + float3(0.05, 0.25, 0.3);
-    float3 below = refr * Tw + inLight * scatterCol * (sigS / sigT) * (1.0 - Tw) * 0.5;
+    float thickness = sceneD >= 1.0 ? 64.0 : max(length(sceneEye) - dist, 0.0);
 
-    // reflection
-    float3 rdWorld = reflect(dirWorld, nw);
-    float3 rdView = normalize((fr.view * float4(rdWorld, 0)).xyz);
-    float3 sky = skyRadiance(fr, skyLut, lin, normalize(float3(rdWorld.x, abs(rdWorld.y), rdWorld.z)), cloudMap) *
-                 smoothstep(0.2, 0.9, in.lm.y);
-    float3 refl = sky;
-    float cosT = saturate(dot(-dirWorld, nw));
-    float fres = 0.02 + 0.98 * pow(1.0 - cosT, 5.0);
+    // the water column: absorption (red first) and light scattered back by the water itself
+    float3 Tw = exp(-thickness * sigT);
+    float3 below = refr * Tw + inLight * waterCol * (1.0 - Tw);
+
+    // shoreline foam where terrain comes within a (noisy) band below the surface; full-height
+    // surfaces only, so flowing water's lower levels stay clear
+    float foam = 0.0;
+    if (top && WATER_SURFACE.w > 0.0) {
+        float3 sceneWorld0 = (fr.invView * float4(sceneEye0, 1.0)).xyz;
+        float depthBelow = sceneD0 >= 1.0 ? 64.0 : max(in.world.y - sceneWorld0.y, 0.0);
+        float noise = waveTex.sample(wrep, (xz + float2(0.21, -0.13) * time) / 4.7).z * 0.5 + 0.5;
+        float width = WATER_UNDER.w * (0.35 + 0.65 * noise);
+        float level = saturate((fract(in.world.y + fr.camera.y) - 0.7) * 10.0);
+        float f = saturate(1.0 - depthBelow / max(width, 1e-3));
+        foam = f * f * level * min(WATER_SURFACE.w, 1.0);
+    }
+
+    // reflection: direction from the wave normal, weight from the flat normal's Fresnel
+    // (waves change what is reflected, not how much: no sparkle)
+    float3 R = reflect(dirWorld, nw);
+    if (R.y < 0.03) {
+        // steep waves would reflect the underwater side: lean the normal back towards flat
+        nw = normalize(mix(nw, up, saturate((0.03 - R.y) * 6.0)));
+        R = reflect(dirWorld, nw);
+        R = normalize(float3(R.x, max(R.y, 0.003), R.z));
+    }
+    float F0 = WATER_SURFACE.x;
+    float fres = F0 + (1.0 - F0) * pow(1.0 - saturate(cosV), 5.0);
+    fres *= 1.0 - foam;
+    // the sky (no sun disk: the glint below is the sun's reflection); under cover, a dim
+    // copy of the water's own colour instead of a sky it cannot see
+    float skyVis = max(smoothstep(0.6, 0.95, in.lm.y), shadow * shadow * 0.3);
+    float3 refl = mix(inLight * waterCol * 0.5, skyRadiance(fr, skyLut, lin, R, cloudMap, false), skyVis);
+    float hitT = 0.0;   // reflected geometry blocks the sun glint
+    float jitter = fract(hash12(px) + float(fr.flags.z % 64u) * 0.618034);
     if (ac_rt && (fr.flags.x & ADV_RT_REFL)) {
-        // ray-traced reflection of the terrain (off-screen geometry included); skipped
-        // where the Fresnel weight makes it invisible
-        float3 o = in.world + fr.rtCam.xyz + nw * 0.02;
+        // ray-traced reflection (off-screen geometry and entities included); skipped where
+        // the Fresnel weight makes it invisible
+        float3 o = in.world + fr.rtCam.xyz + nWorld * (0.02 + dist * 0.0005);
         RtHit rh;
         rh.hit = false;
         RtHit eh;
         eh.hit = false;
-        if (fres > 0.03) {
-            rh = rtClosest(tlas, rtInst, atlas, pointS, o, rdWorld, 320.0);
-            if (fr.flags.x & ADV_RT_ENTITIES) eh = rtEntClosest(entAs, entV, entD, entT, o, rdWorld, rh.hit ? rh.t : 320.0);
+        if (fres > 0.02) {
+            rh = rtClosest(tlas, rtInst, atlas, pointS, o, R, 320.0);
+            if (fr.flags.x & ADV_RT_ENTITIES) eh = rtEntClosest(entAs, entV, entD, entT, o, R, rh.hit ? rh.t : 320.0);
         }
         if (eh.hit || rh.hit) {
-            float3 hc = eh.hit ? rtEntShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, entV, entD, entT, eh, o, rdWorld, fres > 0.15)
-                               : rtShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, rh, o, rdWorld, fres > 0.15);
-            float hd = length((eh.hit ? eh.t : rh.t) * rdWorld + in.world);  // distance from the camera
+            float3 hc = eh.hit ? rtEntShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, entV, entD, entT, eh, o, R, fres > 0.15)
+                               : rtShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, rh, o, R, fres > 0.15);
+            float hd = length((eh.hit ? eh.t : rh.t) * R + in.world);  // distance from the camera
             float hf = saturate((hd - fr.fog.x) / max(fr.fog.y - fr.fog.x, 1.0));
-            refl = mix(hc, skyBase(fr, skyLut, lin, rdWorld), hf * hf);
+            refl = mix(hc, skyBase(fr, skyLut, lin, R), hf * hf);
+            hitT = 1.0;
         }
-    } else if (fres > 0.03) {
-        // screen-space reflection, skipped where the Fresnel weight makes it invisible
-        float3 hit = ssr(fr, sceneDepth, in.eye, rdView);
-        if (hit.z > 0.0) refl = mix(sky, sceneColor.sample(lin, hit.xy).rgb, hit.z);
+    } else if (fres > 0.02) {
+        // screen-space: the march follows a normal 80% of the way to the waves (fewer broken hits)
+        float3 Rs = reflect(dirWorld, normalize(mix(nWorld, nw, 0.8)));
+        Rs.y = max(Rs.y, 0.003);
+        float3 hit = ssr(fr, sceneDepth, in.eye + nvFlat * (0.02 + dist * 0.004), normalize((fr.view * float4(Rs, 0)).xyz), jitter);
+        if (hit.z > 0.0) {
+            refl = mix(refl, sceneColor.sample(lin, hit.xy).rgb, hit.z);
+            hitT = hit.z;
+        }
     }
-    float3 h = normalize(-dirWorld + fr.sunDirWorld.xyz);
-    float glint = pow(saturate(dot(nw, h)), 600.0) * 60.0 * shadow * fr.sunDirWorld.w * skyGate;
-    float3 c = mix(below, refl, fres) + fr.sunColor.rgb * glint;
+    float3 c = mix(below, refl, fres);
 
-    float dist = length(in.eye);
+    // the sun's reflection, widened by the wave detail filtering left unresolved
+    if (fr.flags.y == 0 && WATER_SURFACE.y > 0.0) {
+        float alpha = sqrt(0.0036 + 0.5 * variance);
+        float g = sunGlint(nw, -dirWorld, Lw, alpha, 0.04);
+        c += lightCol * g * WATER_SURFACE.y * shadow * skyGate * (1.0 - hitT) * (1.0 - foam) * (1.0 - 0.85 * fr.params.y);
+    }
+
+    // foam: an opaque, matte white cap lit like terrain
+    if (foam > 0.0) {
+        float3 foamAlbedo = float3(0.80, 0.86, 0.90) * max(WATER_SURFACE.w, 1.0);
+        float3 lit = lightCol * saturate(dot(nWorld, Lw)) * shadow * skyGate + skyAmbient(fr, skyLut, lin, nWorld) * in.lm.y * in.lm.y +
+                     fr.blockLight.rgb * pow(in.lm.x, fr.blockLight.a) * 0.5 + 0.004;
+        c = mix(c, foamAlbedo * lit, foam);
+    }
+
     float fogF = saturate((dist - fr.fog.x) / max(fr.fog.y - fr.fog.x, 1.0));
     float haze = (1.0 - exp(-dist * (0.0012 + fr.params.y * 0.01))) * 0.6;
     c = mix(c, hazeColor(fr, skyLut, lin, dirWorld), haze);

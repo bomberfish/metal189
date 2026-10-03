@@ -31,6 +31,7 @@ struct AdvFrame {
     m189_float4x4 prevViewProj;  // previous frame's proj * view (GL clip, unjittered)
     m189_float4 taa;             // xyz: camera position minus previous camera position, w: history valid
     m189_float4 moon;            // x: illuminated fraction (phase), y: lit side (+1 waxing, -1 waning)
+    m189_float4 tune[16];        // user settings (Pipeline.java TUNE_*), see the TUNE_ accessors below
 };
 
 #define ADV_SHADOWS   (1u << 0)

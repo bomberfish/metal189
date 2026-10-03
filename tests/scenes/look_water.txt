@@ -1,0 +1,33 @@
+sleep 3
+world ref1 1234567
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /weather clear
+cmd /time set 4000
+cmd /tp @p 78 67 -199 160 14
+sleep 12
+cmd /kill @e[type=!Player]
+sleep 1
+capture CAPTURE_A
+cmd /time set 12300
+cmd /tp @p 104 66 -222 90 6
+sleep 4
+capture CAPTURE_B
+cmd /time set 4000
+cmd /tp @p 84 66 -204 150 55
+sleep 4
+capture CAPTURE_C
+cmd /tp @p 88 60 -214 150 5
+sleep 4
+capture CAPTURE_D
+cmd /tp @p 78 67 -199 160 14
+config waterStyle 1
+sleep 3
+capture CAPTURE_E
+config waterStyle 2
+sleep 3
+capture CAPTURE_F
+config waterStyle 0
+quit

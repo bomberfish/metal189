@@ -56,6 +56,9 @@ void advancedSetTables(const uint8_t* materials, const uint8_t* emissions);
 void advancedSetParam(int key, int value);
 // LabPBR material atlases (texture ids, 0 = none) laid out like the block atlas.
 void advancedSetPbr(int normalTex, int specularTex);
+// Continuous user settings (Pipeline.java TUNE_*), copied into AdvFrame every frame.
+constexpr int kTuningValues = 64;
+void advancedSetTuning(const float* values, int count);
 
 // Lighting inputs of the last advanced frame, for draws the baseline executor replays on
 // top of it in shaders mode (hand, particles, weather: ff_fragment's advLit variant).

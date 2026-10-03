@@ -12,7 +12,7 @@ import net.minecraftforge.fml.client.registry.ClientRegistry;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.minecraftforge.fml.common.gameevent.InputEvent;
 
-/** Settings entry points: a button in Video Settings and two keybinds. */
+/** Settings entry points (a button in Video Settings and two keybinds), and vanilla overlays the settings can hide. */
 public final class ClientEvents {
     private static final int BUTTON_ID = 0x189;
     // LWJGL key codes: K toggles the advanced pipeline (as in Iris; F6 belongs to 1.8.9's stream
@@ -59,6 +59,13 @@ public final class ClientEvents {
             Minecraft.getMinecraft().displayGuiScreen(new GuiMetal189(e.gui));
             e.setCanceled(true);
         }
+    }
+
+    /** Vanilla's wavy screen overlay while the head is under water, if the user turned it off. */
+    @SubscribeEvent
+    public void onBlockOverlay(net.minecraftforge.client.event.RenderBlockOverlayEvent e) {
+        if (e.overlayType == net.minecraftforge.client.event.RenderBlockOverlayEvent.OverlayType.WATER
+                && !metal189.config.Config.underwaterOverlay) e.setCanceled(true);
     }
 
     @SubscribeEvent

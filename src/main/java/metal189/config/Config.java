@@ -40,6 +40,23 @@ public final class Config {
     /** Shaders mode: the first-person player casts a shadow (and appears in ray tracing). */
     public static boolean playerShadow = true;
 
+    // water (shaders mode)
+    public static int waterStyle = 0;             // 0 smooth waves, 1 pixel waves, 2 vanilla texture
+    public static int waterWaveStrength = 100;    // percent
+    public static int waterWaveSize = 100;
+    public static int waterWaveSpeed = 100;
+    public static boolean waterCalmIndoors = true;
+    public static int waterReflectivity = 4;      // reflectance facing the surface, percent (2 = physical)
+    public static int waterSunReflection = 100;
+    public static int waterRefraction = 100;
+    public static int waterFoam = 100;
+    public static int waterFoamWidth = 100;
+    public static int waterClarity = 10;          // blocks until half the light is gone
+    public static int waterColorR = 100, waterColorG = 100, waterColorB = 100;
+    public static boolean waterBiomeTint = true;
+    public static int underwaterVisibility = 40;  // blocks until the fog hides half the view
+    public static boolean underwaterOverlay = true;  // vanilla's water texture over the screen (both renderers)
+
     public static final int[] SHADOW_RESOLUTIONS = {2048, 4096, 8192};
     public static final int[] SHADOW_DISTANCES = {64, 96, 112, 128, 160, 192};
 
@@ -51,6 +68,7 @@ public final class Config {
     }
 
     public static void load() {
+        Options.all();   // the registry records defaults before any value is loaded
         Properties p = new Properties();
         File f = file();
         if (f.isFile()) {
@@ -64,57 +82,18 @@ public final class Config {
                 if (in != null) try { in.close(); } catch (IOException ignored) {}
             }
         }
-        shaders = bool(p, "shaders", shaders);
-        shadows = bool(p, "shadows", shadows);
-        shadowResolution = pick(integer(p, "shadowResolution", shadowResolution), SHADOW_RESOLUTIONS);
-        shadowDistance = pick(integer(p, "shadowDistance", shadowDistance), SHADOW_DISTANCES);
-        bloom = bool(p, "bloom", bloom);
-        bloomStrength = clamp(integer(p, "bloomStrength", bloomStrength), 0, 300);
-        sky = bool(p, "sky", sky);
-        water = bool(p, "water", water);
-        waving = bool(p, "waving", waving);
-        taa = bool(p, "taa", taa);
-        clouds = bool(p, "clouds", clouds);
-        volumetrics = bool(p, "volumetrics", volumetrics);
-        autoExposure = bool(p, "autoExposure", autoExposure);
-        ssao = bool(p, "ssao", ssao);
-        ctrlClickRightClick = bool(p, "ctrlClickRightClick", ctrlClickRightClick);
+        for (Options.Opt o : Options.all()) {
+            String v = p.getProperty(o.key);
+            if (v != null) o.parse(v);
+        }
         Native.LOG.info("metal189: Ctrl+left click is a {} click (mcmouser installed: {})",
                 ctrlClickRightClick ? "right" : "left", metal189.core.Compat.mcmouserInstalled());
         applyInput();
-        exposure = clamp(integer(p, "exposure", exposure), 25, 400);
-        rtShadows = bool(p, "rtShadows", rtShadows);
-        rtReflections = bool(p, "rtReflections", rtReflections);
-        rtAmbientOcclusion = bool(p, "rtAmbientOcclusion", rtAmbientOcclusion);
-        rtGlobalIllumination = bool(p, "rtGlobalIllumination", rtGlobalIllumination);
-        rtEntities = bool(p, "rtEntities", rtEntities);
-        playerShadow = bool(p, "playerShadow", playerShadow);
     }
 
     public static void save() {
         Properties p = new Properties();
-        p.setProperty("shaders", Boolean.toString(shaders));
-        p.setProperty("shadows", Boolean.toString(shadows));
-        p.setProperty("shadowResolution", Integer.toString(shadowResolution));
-        p.setProperty("shadowDistance", Integer.toString(shadowDistance));
-        p.setProperty("bloom", Boolean.toString(bloom));
-        p.setProperty("bloomStrength", Integer.toString(bloomStrength));
-        p.setProperty("sky", Boolean.toString(sky));
-        p.setProperty("water", Boolean.toString(water));
-        p.setProperty("waving", Boolean.toString(waving));
-        p.setProperty("taa", Boolean.toString(taa));
-        p.setProperty("clouds", Boolean.toString(clouds));
-        p.setProperty("volumetrics", Boolean.toString(volumetrics));
-        p.setProperty("autoExposure", Boolean.toString(autoExposure));
-        p.setProperty("ssao", Boolean.toString(ssao));
-        p.setProperty("ctrlClickRightClick", Boolean.toString(ctrlClickRightClick));
-        p.setProperty("exposure", Integer.toString(exposure));
-        p.setProperty("rtShadows", Boolean.toString(rtShadows));
-        p.setProperty("rtReflections", Boolean.toString(rtReflections));
-        p.setProperty("rtAmbientOcclusion", Boolean.toString(rtAmbientOcclusion));
-        p.setProperty("rtGlobalIllumination", Boolean.toString(rtGlobalIllumination));
-        p.setProperty("rtEntities", Boolean.toString(rtEntities));
-        p.setProperty("playerShadow", Boolean.toString(playerShadow));
+        for (Options.Opt o : Options.all()) p.setProperty(o.key, o.format());
         File f = file();
         f.getParentFile().mkdirs();
         OutputStream out = null;
@@ -132,23 +111,6 @@ public final class Config {
     public static void applyInput() {
         Native.setOption(5, ctrlClickRightClick ? 1 : 0);
     }
-
-    private static boolean bool(Properties p, String k, boolean def) {
-        String v = p.getProperty(k);
-        return v == null ? def : Boolean.parseBoolean(v.trim());
-    }
-
-    private static int integer(Properties p, String k, int def) {
-        String v = p.getProperty(k);
-        if (v == null) return def;
-        try {
-            return Integer.parseInt(v.trim());
-        } catch (NumberFormatException e) {
-            return def;
-        }
-    }
-
-    private static int clamp(int v, int lo, int hi) { return Math.max(lo, Math.min(hi, v)); }
 
     /** The allowed value closest to v. */
     public static int pick(int v, int[] allowed) {

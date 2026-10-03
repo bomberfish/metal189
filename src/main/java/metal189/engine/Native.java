@@ -99,6 +99,8 @@ public final class Native {
     public static native void advSetTables(long materials, long emissions);
     public static native boolean rtSupported();
     public static native void advSetPbr(int normalTex, int specularTex);
+    /** Continuous shader settings: {@code count} floats at {@code addr} (Pipeline.TUNE_*). */
+    public static native void advSetTuning(long addr, int count);
 
     // ---- window / input ----
     public static native boolean windowCreate(int w, int h, String title, int flags);

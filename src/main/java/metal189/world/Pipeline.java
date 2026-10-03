@@ -66,9 +66,53 @@ public final class Pipeline {
         boolean rtOn = advanced && (features & (RT_SHADOWS | RT_REFLECTIONS | RT_AO | RT_GI)) != 0;
         if (rtWasOn && !rtOn) Native.setOption(OPT_RT_RELEASE, 1); // free acceleration structures
         rtWasOn = rtOn;
+        pushTuning();
         Native.advSetFeatures(features);
         Native.advSetEnabled(advanced);
         applied = true;
+    }
+
+    // Continuous settings for the shaders (adv.metal WATER_* / fr.tune), 4 floats per group.
+    private static final int TUNING = 64;
+    private static final int WATER_FLAG_BIOME_TINT = 1, WATER_FLAG_CALM_INDOORS = 2;
+    private static long tuning;
+
+    private static void pushTuning() {
+        if (tuning == 0) tuning = metal189.engine.Mem.malloc(TUNING * 4);
+        float[] t = new float[TUNING];
+        // waves: strength, size, speed, style
+        t[0] = Config.waterWaveStrength / 100f;
+        t[1] = Config.waterWaveSize / 100f;
+        t[2] = Config.waterWaveSpeed / 100f;
+        t[3] = Config.waterStyle;
+        // surface: reflectance at normal incidence, sun reflection, refraction, foam
+        t[4] = Config.waterReflectivity / 100f;
+        t[5] = Config.waterSunReflection / 100f;
+        t[6] = Config.waterRefraction / 100f;
+        t[7] = Config.waterFoam / 100f;
+        // water body: the deep-water colour, and absorption derived from it and the clarity.
+        // The mean extinction halves the light over the clarity distance; channels the colour
+        // keeps are absorbed less (a quarter of the extinction is scattering).
+        float[] col = {0.020f * Config.waterColorR / 100f, 0.140f * Config.waterColorG / 100f, 0.220f * Config.waterColorB / 100f};
+        float max = Math.max(col[0], Math.max(col[1], col[2]));
+        float[] w = new float[3];
+        float mean = 0;
+        for (int i = 0; i < 3; i++) {
+            w[i] = 0.25f - (float) Math.log(Math.max(col[i] / max, 1e-3f));
+            mean += w[i] / 3;
+        }
+        float sigma = (float) Math.log(2) / Math.max(Config.waterClarity, 1);
+        for (int i = 0; i < 3; i++) t[8 + i] = 0.75f * sigma * w[i] / mean;
+        t[11] = 0.25f * sigma;
+        System.arraycopy(col, 0, t, 12, 3);
+        t[15] = 1f;   // caustics
+        // underwater visibility, distortion, flags, foam band width (blocks)
+        t[16] = Config.underwaterVisibility;
+        t[17] = 1f;
+        t[18] = (Config.waterBiomeTint ? WATER_FLAG_BIOME_TINT : 0) | (Config.waterCalmIndoors ? WATER_FLAG_CALM_INDOORS : 0);
+        t[19] = 2.0f * Config.waterFoamWidth / 100f;
+        for (int i = 0; i < TUNING; i++) metal189.engine.Mem.putFloat(tuning + i * 4L, t[i]);
+        Native.advSetTuning(tuning, TUNING);
     }
 
     public static void ensureApplied() { if (!applied) apply(); }
