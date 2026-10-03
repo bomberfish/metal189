@@ -1379,6 +1379,11 @@ static void advCollect(Exec& x, CmdReader rd, AdvWorld& w, TargetCmd& target, bo
                 gm.item.normal = simd_make_float4(m.attrib.normal[0], m.attrib.normal[1], m.attrib.normal[2], 0);
                 gm.item.lightmap = simd_make_float4(m.attrib.tex1[0], m.attrib.tex1[1], 0, 0);
                 gm.item.alpha = simd_make_float4(m.frag.alphaRef, (float)(m.frag.alphaFunc - 0x200), 0, 7);
+                // vanilla's hurt flash and creeper flash: unit 1 set to GL_COMBINE / GL_INTERPOLATE
+                // between its constant colour and the textured colour, weighted by the constant's alpha
+                const UnitState& u1 = m.units[1];
+                if (u1.enabled && u1.mode == 0x8570 && u1.combineRGB == 0x8575 && u1.srcRGB[0] == 0x8576 && u1.srcRGB[2] == 0x8576)
+                    gm.item.overlay = simd_make_float4(u1.envColor[0], u1.envColor[1], u1.envColor[2], u1.envColor[3]);
                 w.geometry.push_back(gm);
                 break;
             }

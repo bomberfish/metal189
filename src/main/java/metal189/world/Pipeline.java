@@ -110,7 +110,7 @@ public final class Pipeline {
         t[16] = Config.underwaterVisibility;
         t[17] = 1f;
         t[18] = (Config.waterBiomeTint ? WATER_FLAG_BIOME_TINT : 0) | (Config.waterCalmIndoors ? WATER_FLAG_CALM_INDOORS : 0);
-        t[19] = 2.0f * Config.waterFoamWidth / 100f;
+        t[19] = 1.2f * Config.waterFoamWidth / 100f;
         for (int i = 0; i < TUNING; i++) metal189.engine.Mem.putFloat(tuning + i * 4L, t[i]);
         Native.advSetTuning(tuning, TUNING);
     }

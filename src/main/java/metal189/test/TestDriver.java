@@ -165,6 +165,14 @@ public final class TestDriver {
                 mc.launchIntegratedServer(a[1], a[1], ws);
                 return false;
             }
+            case "leave":
+                // like the pause menu's Save and Quit to Title (singleplayer)
+                if (mc.theWorld != null) {
+                    mc.theWorld.sendQuittingDisconnectingPacket();
+                    mc.loadWorld((net.minecraft.client.multiplayer.WorldClient) null);
+                    mc.displayGuiScreen(new net.minecraft.client.gui.GuiMainMenu());
+                }
+                return true;
             case "cmd": {
                 String c = line.substring(4).trim();
                 final net.minecraft.server.MinecraftServer srv = net.minecraft.server.MinecraftServer.getServer();
@@ -255,10 +263,12 @@ public final class TestDriver {
                 repo.updateRepositoryEntriesAll();
                 java.util.List<net.minecraft.client.resources.ResourcePackRepository.Entry> sel =
                         new java.util.ArrayList<net.minecraft.client.resources.ResourcePackRepository.Entry>();
-                String packName = line.substring("resourcepack".length()).trim();   // names may contain spaces
-                for (net.minecraft.client.resources.ResourcePackRepository.Entry e : repo.getRepositoryEntriesAll())
-                    if (e.getResourcePackName().equals(packName)) sel.add(e);
-                if (sel.isEmpty() && !"none".equals(packName)) Native.LOG.warn("metal189-test: no resource pack {}", packName);
+                // names may contain spaces; several packs are separated by " | " (highest priority first)
+                String packNames = line.substring("resourcepack".length()).trim();
+                for (String packName : packNames.split(" \\| "))
+                    for (net.minecraft.client.resources.ResourcePackRepository.Entry e : repo.getRepositoryEntriesAll())
+                        if (e.getResourcePackName().equals(packName.trim())) sel.add(e);
+                if (sel.isEmpty() && !"none".equals(packNames)) Native.LOG.warn("metal189-test: no resource pack {}", packNames);
                 repo.setRepositories(sel);
                 mc.refreshResources();
                 return true;

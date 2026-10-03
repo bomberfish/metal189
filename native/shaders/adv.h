@@ -57,4 +57,5 @@ struct AdvItem {
     m189_float4 normal;     // current normal (when the layout has none), w unused
     m189_float4 lightmap;   // xy: current lightmap coords (0..240) for layouts without them
     m189_float4 alpha;      // x: alpha ref, y: alpha func (GL enum - 0x200), z: emissive, w: material id
+    m189_float4 overlay;    // rgb: colour the albedo is blended towards (hurt flash, creeper flash), a: amount
 };

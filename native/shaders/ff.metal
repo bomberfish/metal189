@@ -404,6 +404,9 @@ fragment FFFragOut ff_fragment(FFOut in [[stage_in]],
         float4 c = primary;
         if (f & FF_TEX0) {
             float4 t0 = tex0.sample(s0, uv0);
+            // combine setups may name the unit explicitly (GL_TEXTURE0, as vanilla's entity
+            // brightness code leaves unit 0): that source reads texels[0]
+            texels[0] = t0;
             c = fc_modulate ? primary * t0 : texEnv(u.env[0], u.envScale[0], t0, primary, primary, u.envColor[0], texels);
         }
         c.a *= coverage;

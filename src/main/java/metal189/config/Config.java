@@ -56,6 +56,7 @@ public final class Config {
     public static boolean waterBiomeTint = true;
     public static int underwaterVisibility = 40;  // blocks until the fog hides half the view
     public static boolean underwaterOverlay = true;  // vanilla's water texture over the screen (both renderers)
+    public static boolean hideUnderwaterParticles = true;   // shaders mode: no vanilla suspended particles in water
 
     public static final int[] SHADOW_RESOLUTIONS = {2048, 4096, 8192};
     public static final int[] SHADOW_DISTANCES = {64, 96, 112, 128, 160, 192};

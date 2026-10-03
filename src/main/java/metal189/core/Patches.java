@@ -102,6 +102,11 @@ public final class Patches {
             Asm.beforeCall("renderWorldPass", "func_175068_a", rwp, "dispatchRenderLast", "dispatchRenderLast", "metal189/world/Phases", "renderLast", -1),
             Asm.beforeCall("renderWorldPass", "func_175068_a", rwp, "renderHand", "func_78476_b", "metal189/world/Phases", "hand", -1)));
 
+        // shaders mode can hide vanilla's underwater "suspended" particles
+        register("net.minecraft.client.particle.EffectRenderer",
+            Asm.injectHeadCancel("addEffect", "func_78873_a", "(Lnet/minecraft/client/particle/EntityFX;)V",
+                "metal189/world/Particles", "cancel", "(Lnet/minecraft/client/particle/EntityFX;)Z", false));
+
         register("net.minecraft.client.gui.FontRenderer",
             Asm.injectTailThis("readFontTexture", "func_111272_d", "()V",
                 "metal189/gui/HdFont", "afterReadFontTexture", "(Lnet/minecraft/client/gui/FontRenderer;)V"));

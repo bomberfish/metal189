@@ -178,6 +178,7 @@ public final class Options {
         slider("water", "waterFoamWidth", S, 25, 300, 5, "%");
         slider("water", "underwaterVisibility", S, 8, 128, 4, " blocks");
         toggle("water", "underwaterOverlay", 0);
+        toggle("water", "hideUnderwaterParticles", S);
 
         toggle("sky", "sky", S);
         toggle("sky", "clouds", S);

@@ -1,0 +1,43 @@
+sleep 3
+resourcepack Nostalgia PBR 1.2.0.zip | §bAVPBR-1-6-5.zip
+sleep 8
+world handpbr 1234567
+waitWorld
+cmd /gamerule doMobSpawning false
+cmd /time set 3000
+cmd /weather clear
+config rtReflections true
+config shadowDistance 128
+cmd /tp @p 78 67 -199 160 30
+sleep 8
+slot 3
+capture CAPTURE_A
+cmd /replaceitem entity @p slot.hotbar.0 stone
+cmd /replaceitem entity @p slot.hotbar.1 torch
+slot 0
+cmd /particle blockcrack_12 79 67 -201 0.5 0.5 0.5 0.1 200
+cmd /particle flame 77 67 -201 0.3 0.3 0.3 0.01 50
+sleep 1
+capture CAPTURE_B
+leave
+sleep 4
+world handpbr 1234567
+waitWorld
+sleep 6
+slot 3
+capture CAPTURE_C
+slot 1
+cmd /particle blockcrack_12 79 67 -201 0.5 0.5 0.5 0.1 200
+sleep 1
+capture CAPTURE_D
+leave
+sleep 4
+world handpbr 1234567
+waitWorld
+sleep 6
+slot 0
+capture CAPTURE_E
+perspective 1
+sleep 2
+capture CAPTURE_F
+quit

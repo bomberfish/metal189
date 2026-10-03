@@ -258,7 +258,7 @@ fragment GBufferOut gbuf_generic_fragment(GGenericOut in [[stage_in]], bool fron
     float a = t.a * in.color.a;
     if (ac_alphaTest && a <= item.alpha.x) discard_fragment();
     GBufferOut o;
-    o.albedo = float4(saturate(t.rgb * in.color.rgb), 1.0);
+    o.albedo = float4(mix(saturate(t.rgb * in.color.rgb), item.overlay.rgb, item.overlay.a), 1.0);
     float3 n = front ? in.normalView : -in.normalView;
     o.normal = float4(n, item.alpha.z);
     o.light = float4(in.lm.x, in.lm.y, item.alpha.w / 255.0, 0.7);
@@ -1514,15 +1514,17 @@ vertex WaterOut water_vertex(uint vid [[vertex_id]],
 
 // Wave texture, generated once by wave_texture_kernel: a tileable height field built from
 // random integer-frequency waves (so it repeats seamlessly), stored as xy = slope (unit
-// RMS), z = height on the same scale (slope = its gradient), w = squared slope. Filtering
-// averages the slope away with distance; w's mips keep the variance that was averaged
-// away, which widens the sun glint instead of letting distant water shimmer.
+// RMS), z = height (unit RMS; kWaveHeightRatio times that is the height on the slope's
+// scale), w = squared slope. Filtering averages the slope away with distance; w's mips
+// keep the variance that was averaged away, which widens the sun glint instead of
+// letting distant water shimmer.
+constant float kWaveHeightRatio = 0.05;   // RMS height / RMS slope of the generated spectrum (about 1 / (2 pi k))
 kernel void wave_texture_kernel(texture2d<float, access::write> out [[texture(0)]],
                                 uint2 gid [[thread_position_in_grid]]) {
     uint W = out.get_width();
     if (gid.x >= W || gid.y >= W) return;
     float2 p = (float2(gid) + 0.5) / float(W);
-    float h = 0.0, norm = 0.0;
+    float h = 0.0, norm = 0.0, hnorm = 0.0;
     float2 g = float2(0.0);
     for (int i = 0; i < 48; i++) {
         float2 r = hash22(float2(float(i) * 7.31 + 1.7, float(i) * 3.17 + 9.2));
@@ -1536,10 +1538,10 @@ kernel void wave_texture_kernel(texture2d<float, access::write> out [[texture(0)
         g += amp * 6.2831853 * k * cos(a);
         float sk = amp * 6.2831853 * km;
         norm += 0.5 * sk * sk;
+        hnorm += 0.5 * amp * amp;
     }
-    float s = rsqrt(norm);
-    g *= s;
-    h *= s;
+    g *= rsqrt(norm);
+    h *= rsqrt(hnorm);
     out.write(float4(g, h, dot(g, g)), gid);
 }
 
@@ -1570,7 +1572,7 @@ static WaterWaves waterWaves(constant AdvFrame& fr, texture2d<float> waveTex, sa
         q.y += t * WATER_WAVES.z * 0.25 * sqrt(L);
         float4 smp = waveTex.sample(wrep, q / L, gradient2d(toLocal * dX / L, toLocal * dY / L));
         w.slope += float2(c * smp.x - s * smp.y, s * smp.x + c * smp.y) * weights[i];
-        w.height += smp.z * weights[i] * L;
+        w.height += smp.z * kWaveHeightRatio * weights[i] * L;
         w.variance += max(smp.w - dot(smp.xy, smp.xy), 0.0) * weights[i] * weights[i];
     }
     float k = 0.072 * WATER_WAVES.x;
@@ -1747,17 +1749,21 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
     float3 Tw = exp(-thickness * sigT);
     float3 below = refr * Tw + inLight * waterCol * (1.0 - Tw);
 
-    // shoreline foam where terrain comes within a (noisy) band below the surface; full-height
-    // surfaces only, so flowing water's lower levels stay clear
+    // shoreline foam: lacy patches that are dense where terrain reaches the surface and
+    // thin out to scattered bubbles over shallow ground (full-height surfaces only, so
+    // flowing water's lower levels stay clear)
     float foam = 0.0;
     if (top && WATER_SURFACE.w > 0.0) {
         float3 sceneWorld0 = (fr.invView * float4(sceneEye0, 1.0)).xyz;
         float depthBelow = sceneD0 >= 1.0 ? 64.0 : max(in.world.y - sceneWorld0.y, 0.0);
-        float noise = waveTex.sample(wrep, (xz + float2(0.21, -0.13) * time) / 4.7).z * 0.5 + 0.5;
-        float width = WATER_UNDER.w * (0.35 + 0.65 * noise);
+        float shore = saturate(1.0 - depthBelow / max(WATER_UNDER.w, 1e-3));
         float level = saturate((fract(in.world.y + fr.camera.y) - 0.7) * 10.0);
-        float f = saturate(1.0 - depthBelow / max(width, 1e-3));
-        foam = f * f * level * min(WATER_SURFACE.w, 1.0);
+        if (shore * level > 0.0) {
+            float n1 = waveTex.sample(wrep, (xz + float2(0.11, -0.07) * time) / 1.7).z;
+            float n2 = waveTex.sample(wrep, (xz - float2(0.05, 0.09) * time) / 0.9).z;
+            float pattern = saturate(0.5 + 0.18 * (n1 + 0.6 * n2));
+            foam = smoothstep(1.0 - shore, 1.0 - shore + 0.1, pattern) * shore * level * min(WATER_SURFACE.w, 1.0) * 0.8;
+        }
     }
 
     // reflection: direction from the wave normal, weight from the flat normal's Fresnel

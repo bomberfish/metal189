@@ -151,6 +151,43 @@ public final class Asm {
         };
     }
 
+    /**
+     * Inserts at the head of a void method {@code if (hook(this?, args...)) return;}: the
+     * static hook (descriptor ending in Z) cancels the call by returning true.
+     */
+    public static ClassPatch injectHeadCancel(final String mcp, final String srg, final String desc,
+                                              final String hookOwner, final String hookName, final String hookDesc,
+                                              final boolean passThis) {
+        return new ClassPatch() {
+            public boolean apply(ClassNode cn) {
+                MethodNode m = find(cn, mcp, srg, desc);
+                if (m == null) {
+                    Metal189Transformer.LOG.error("metal189: {}.{}{} not found", cn.name, mcp, desc);
+                    return false;
+                }
+                InsnList l = new InsnList();
+                int slot = 0;
+                if ((m.access & Opcodes.ACC_STATIC) == 0) {
+                    if (passThis) l.add(new VarInsnNode(Opcodes.ALOAD, 0));
+                    slot = 1;
+                }
+                for (Type t : Type.getArgumentTypes(desc)) {
+                    l.add(new VarInsnNode(t.getOpcode(Opcodes.ILOAD), slot));
+                    slot += t.getSize();
+                }
+                l.add(new MethodInsnNode(Opcodes.INVOKESTATIC, hookOwner, hookName, hookDesc, false));
+                org.objectweb.asm.tree.LabelNode cont = new org.objectweb.asm.tree.LabelNode();
+                l.add(new org.objectweb.asm.tree.JumpInsnNode(Opcodes.IFEQ, cont));
+                l.add(new InsnNode(Opcodes.RETURN));
+                l.add(cont);
+                m.instructions.insert(l);
+                return true;
+            }
+
+            public boolean needsFrames() { return true; }
+        };
+    }
+
     /** Applies several patches to the same class. */
     public static ClassPatch chain(final ClassPatch... patches) {
         return new ClassPatch() {

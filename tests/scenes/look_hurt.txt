@@ -1,0 +1,30 @@
+sleep 3
+world lookshadow 42 flat
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /weather clear
+cmd /time set 5000
+cmd /tp @p -500.5 5 -500.5 180 25
+sleep 4
+cmd /kill @e[type=!Player]
+cmd /summon Pig -500.5 4 -504.5 {NoAI:1b}
+cmd /summon Zombie -502.5 4 -505.5 {NoAI:1b}
+cmd /summon Creeper -498.5 4 -505.5 {NoAI:1b}
+slot 3
+sleep 3
+capture CAPTURE_A
+hurtall 10
+wait 2
+capture CAPTURE_B
+hurtall 0
+sleep 2
+cmd /particle flame -500.5 5 -502.5 0.3 0.3 0.3 0.01 60
+cmd /particle blockcrack_1 -499.5 5 -502.5 0.4 0.4 0.4 0.1 200
+wait 3
+capture CAPTURE_C
+cmd /replaceitem entity @p slot.hotbar.3 diamond_sword
+sleep 1
+capture CAPTURE_D
+quit
