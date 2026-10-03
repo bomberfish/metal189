@@ -20,7 +20,7 @@ import net.minecraftforge.fml.client.config.GuiSlider;
 public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
     private enum Opt {
         SHADERS, TAA, SHADOWS, SHADOW_RES, SHADOW_DIST, BLOOM, SKY, WATER, WAVING, BLOOM_STRENGTH, CLOUDS, VOLUMETRICS,
-        AUTO_EXP, EXPOSURE, SSAO, RT_SHADOWS, RT_REFL, RT_AO, RT_GI, CTRL_CLICK
+        AUTO_EXP, EXPOSURE, SSAO, RT_SHADOWS, RT_REFL, RT_AO, RT_GI, CTRL_CLICK, PLAYER_SHADOW, RT_ENTITIES
     }
 
     private static final Opt[][] ROWS = {
@@ -31,9 +31,10 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
         {Opt.CLOUDS, Opt.VOLUMETRICS},
         {Opt.WAVING, Opt.BLOOM_STRENGTH},
         {Opt.AUTO_EXP, Opt.EXPOSURE},
-        {Opt.SSAO, Opt.CTRL_CLICK},
+        {Opt.SSAO, Opt.PLAYER_SHADOW},
         {Opt.RT_SHADOWS, Opt.RT_REFL},
         {Opt.RT_AO, Opt.RT_GI},
+        {Opt.RT_ENTITIES, Opt.CTRL_CLICK},
     };
     private static final int DONE = 200;
 
@@ -67,7 +68,9 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
 
     private static String onOff(boolean v) { return v ? I18n.format("options.on") : I18n.format("options.off"); }
 
-    private static boolean isRt(Opt o) { return o == Opt.RT_SHADOWS || o == Opt.RT_REFL || o == Opt.RT_AO || o == Opt.RT_GI; }
+    private static boolean isRt(Opt o) {
+        return o == Opt.RT_SHADOWS || o == Opt.RT_REFL || o == Opt.RT_AO || o == Opt.RT_GI || o == Opt.RT_ENTITIES;
+    }
 
     private void refresh() {
         boolean rt = Pipeline.rtSupported();
@@ -93,6 +96,8 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
                 case RT_REFL: b.displayString = label("rtReflections", rt ? onOff(Config.rtReflections) : unsupported); break;
                 case RT_AO: b.displayString = label("rtAO", rt ? onOff(Config.rtAmbientOcclusion) : unsupported); break;
                 case RT_GI: b.displayString = label("rtGI", rt ? onOff(Config.rtGlobalIllumination) : unsupported); break;
+                case RT_ENTITIES: b.displayString = label("rtEntities", rt ? onOff(Config.rtEntities) : unsupported); break;
+                case PLAYER_SHADOW: b.displayString = label("playerShadow", onOff(Config.playerShadow)); break;
                 default: break;   // sliders draw their own label
             }
             b.enabled = o == Opt.SHADERS || o == Opt.CTRL_CLICK || (Config.shaders && (!isRt(o) || rt));
@@ -122,6 +127,8 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
             case RT_REFL: Config.rtReflections = !Config.rtReflections; break;
             case RT_AO: Config.rtAmbientOcclusion = !Config.rtAmbientOcclusion; break;
             case RT_GI: Config.rtGlobalIllumination = !Config.rtGlobalIllumination; break;
+            case RT_ENTITIES: Config.rtEntities = !Config.rtEntities; break;
+            case PLAYER_SHADOW: Config.playerShadow = !Config.playerShadow; break;
             default: return;
         }
         Config.save();

@@ -1,0 +1,29 @@
+sleep 3
+world lookshadow 42 flat
+waitWorld
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /weather clear
+cmd /time set 2500
+cmd /tp @p -500.5 4 -500.5 90 60
+sleep 4
+cmd /kill @e[type=!Player]
+cmd /fill -512 4 -512 -488 9 -488 air
+cmd /fill -512 3 -512 -488 3 -488 stone
+cmd /fill -498 4 -503 -498 6 -503 planks
+cmd /summon Pig -499.5 4 -497.5 {NoAI:1b,Rotation:[90f,0f]}
+slot 0
+cmd /replaceitem entity @p slot.hotbar.0 diamond_sword
+sleep 3
+capture CAPTURE_A
+cmd /time set 1000
+look 90 40
+sleep 2
+capture CAPTURE_B
+config rtShadows true
+sleep 3
+capture CAPTURE_C
+perspective 1
+sleep 2
+capture CAPTURE_D
+quit

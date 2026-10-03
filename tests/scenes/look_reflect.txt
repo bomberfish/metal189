@@ -1,0 +1,33 @@
+sleep 3
+world lookreflect 42 flat
+waitWorld
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /weather clear
+cmd /time set 4000
+cmd /tp @p -500.5 4 -493.5 180 30
+sleep 4
+cmd /kill @e[type=!Player]
+cmd /fill -512 4 -512 -488 9 -488 air
+cmd /fill -512 3 -512 -488 3 -488 stone
+cmd /fill -506 3 -506 -495 3 -495 water
+cmd /fill -506 2 -506 -495 2 -495 stone
+cmd /fill -503 4 -509 -503 6 -509 planks
+cmd /summon Pig -500.5 4 -507.5 {NoAI:1b,Rotation:[90f,0f]}
+cmd /summon Villager -497.5 4 -508.5 {NoAI:1b,Rotation:[0f,0f]}
+slot 0
+cmd /replaceitem entity @p slot.hotbar.0 diamond_sword
+sleep 3
+capture CAPTURE_A
+config rtReflections true
+sleep 3
+capture CAPTURE_B
+fly
+cmd /tp @p -500.5 5.5 -500.5 180 80
+sleep 3
+capture CAPTURE_C
+perspective 2
+cmd /tp @p -500.5 4 -493.5 0 20
+sleep 3
+capture CAPTURE_D
+quit

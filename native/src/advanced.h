@@ -29,6 +29,7 @@ struct AdvGeometry {
     float alphaRef;
     bool cull;
     uint32_t cullFace, frontFace;
+    bool shadowOnly;       // first-person camera entity: shadow map / ray tracing only
     AdvItem item;
 };
 

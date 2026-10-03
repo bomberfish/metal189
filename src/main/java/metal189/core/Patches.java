@@ -48,7 +48,11 @@ public final class Patches {
         // Terrain: engine-owned section buffers and per-layer draws.
         register("net.minecraft.client.renderer.RenderGlobal", Asm.chain(
             Asm.redirectNew("net/minecraft/client/renderer/RenderList", "metal189/terrain/TerrainContainer"),
-            Asm.redirectNew("net/minecraft/client/renderer/VboRenderList", "metal189/terrain/TerrainContainer")));
+            Asm.redirectNew("net/minecraft/client/renderer/VboRenderList", "metal189/terrain/TerrainContainer"),
+            // shaders mode: the first-person player casts a shadow
+            Asm.injectTail("renderEntities", "func_180446_a",
+                "(Lnet/minecraft/entity/Entity;Lnet/minecraft/client/renderer/culling/ICamera;F)V",
+                "metal189/world/Phases", "afterEntities", "(F)V", 3)));
         register("net.minecraft.client.renderer.chunk.ChunkRenderDispatcher",
             Asm.injectHead("uploadChunk", "func_178503_a",
                 "(Lnet/minecraft/util/EnumWorldBlockLayer;Lnet/minecraft/client/renderer/WorldRenderer;Lnet/minecraft/client/renderer/chunk/RenderChunk;Lnet/minecraft/client/renderer/chunk/CompiledChunk;)Lcom/google/common/util/concurrent/ListenableFuture;",

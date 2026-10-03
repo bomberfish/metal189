@@ -1339,8 +1339,10 @@ static void advCollect(Exec& x, CmdReader rd, AdvWorld& w, TargetCmd& target, bo
             }
             case OP_DRAW: case OP_DRAW_MESH: {
                 uint32_t prim = h->op == OP_DRAW ? payload<DrawCmd>(h).prim : payload<DrawMeshCmd>(h).prim;
-                if (!advConsumes(m, phase, prim)) break;
+                bool shadowOnly = phase == PH_ENTITIES_SHADOW;
+                if (!advConsumes(m, shadowOnly ? PH_ENTITIES : phase, prim)) break;
                 AdvGeometry gm{};
+                gm.shadowOnly = shadowOnly;
                 if (h->op == OP_DRAW) {
                     const DrawCmd& d = payload<DrawCmd>(h);
                     const VertexLayout* L = layout((int)d.format);
@@ -1442,11 +1444,13 @@ void executeFrame(id<MTLCommandBuffer> cb, const uint8_t* cmds, size_t len) {
                 doClear(x, payload<ClearCmd>(h));
                 break;
             case OP_DRAW:
+                if (g_phase == PH_ENTITIES_SHADOW) break;   // never on screen
                 if (x.advReplay && (g_phase == PH_SKY || (g_phase == PH_CLOUDS && advancedCloudsActive()) ||
                                     advConsumes(g, g_phase, payload<DrawCmd>(h).prim))) break;
                 drawArena(x, payload<DrawCmd>(h));
                 break;
             case OP_DRAW_MESH:
+                if (g_phase == PH_ENTITIES_SHADOW) break;
                 if (x.advReplay && (g_phase == PH_SKY || (g_phase == PH_CLOUDS && advancedCloudsActive()) ||
                                     advConsumes(g, g_phase, payload<DrawMeshCmd>(h).prim))) break;
                 drawMesh(x, payload<DrawMeshCmd>(h));

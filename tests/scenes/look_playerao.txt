@@ -1,0 +1,29 @@
+sleep 3
+world lookshadow 42 flat
+waitWorld
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /weather clear
+cmd /time set 6000
+cmd /tp @p -500.5 4 -500.5 90 75
+sleep 4
+cmd /kill @e[type=!Player]
+cmd /fill -512 4 -512 -488 9 -488 air
+cmd /fill -512 3 -512 -488 3 -488 stone
+cmd /summon Pig -498.5 4 -500.5 {NoAI:1b,Rotation:[90f,0f]}
+config rtAmbientOcclusion true
+config shadows false
+sleep 4
+capture CAPTURE_A
+config playerShadow false
+sleep 3
+capture CAPTURE_B
+config playerShadow true
+config rtReflections true
+config shadows true
+sleep 3
+capture CAPTURE_C
+config rtGlobalIllumination true
+sleep 4
+capture CAPTURE_D
+quit

@@ -28,6 +28,7 @@ static float g_shadowDistance = 112.0f;
 static float g_exposure = 1.0f;
 static float g_bloomStrength = 1.0f;
 static bool g_waving = true;
+static bool g_rtEntities = true;
 static int g_pbrNormal = 0, g_pbrSpecular = 0;
 
 void advancedSetPbr(int normalTex, int specularTex) {
@@ -43,6 +44,7 @@ void advancedSetParam(int key, int value) {
         case 13: g_bloomStrength = std::clamp(value, 0, 1000) / 100.0f; break;
         case 14: rtRelease(); break;
         case 15: g_waving = value != 0; break;
+        case 16: g_rtEntities = value != 0; break;
         default: break;
     }
 }
@@ -542,6 +544,45 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         S.prevDim = env.dimension;
         S.historyValid = taaOn;
     }
+    // entities (and the first-person player) for ray-traced reflections, AO and GI
+    RtEntities ents;
+    if (rtOn) {
+        std::vector<RtEntityDraw> draws;   // empty: the placeholder structure is bound
+        if (g_rtEntities && (features & (ADV_RT_REFL | ADV_RT_AO | ADV_RT_GI))) draws.reserve(w.geometry.size());
+        simd_float4x4 rtFromEye = fr.invView;
+        rtFromEye.columns[3] += simd_make_float4(rts.camera, 0);
+        for (const AdvGeometry& g : w.geometry) {
+            if (!g_rtEntities || !(features & (ADV_RT_REFL | ADV_RT_AO | ADV_RT_GI))) break;
+            const VertexLayout* L = layout(g.format);
+            TexEntry* tex = texture(g.tex);
+            if (!L || !tex || !tex->tex || g.prim != 7 || g.count < 4) continue;
+            RtEntityDraw d;
+            d.vb = g.vb;
+            d.offset = g.vbOffset + (size_t)g.firstVertex * L->stride.x;
+            d.layout = L;
+            d.vertices = g.count & ~3u;
+            d.toRt = simd_mul(rtFromEye, g.mv);
+            d.texMat = g.texMat;
+            d.color = g.item.color;
+            d.lightmap = simd_make_float2((float)((int)g.item.lightmap.x & 0xFF) / 240.0f,
+                                          (float)((int)g.item.lightmap.y & 0xFF) / 240.0f);
+            d.tex = tex->tex;
+            d.alphaTest = g.alphaTest;
+            d.alphaRef = g.alphaRef;
+            d.emissive = g.item.alpha.z;
+            draws.push_back(d);
+        }
+        if (rtBuildEntities(cb, draws, ents) && ents.triangles) features |= ADV_RT_ENTITIES;
+    }
+    auto bindEntities = [&](id<MTLRenderCommandEncoder> e) {
+        if (!ents.as) return;
+        [e setFragmentAccelerationStructure:ents.as atBufferIndex:12];
+        [e setFragmentBuffer:ents.verts offset:0 atIndex:13];
+        [e setFragmentBuffer:ents.draws offset:0 atIndex:14];
+        [e setFragmentBuffer:ents.textures offset:0 atIndex:15];
+        if (ents.resources && !ents.resources->empty())
+            [e useResources:ents.resources->data() count:ents.resources->size() usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
+    };
     if (env.dimension != 0 || !S.cloudsPso || !S.cloudNoiseKernel) features &= ~ADV_CLOUDS;
     if (!(features & ADV_SHADOWS) || !S.volPso) features &= ~ADV_VOLUMETRIC;
     if (!S.exposureKernel) features &= ~ADV_AUTOEXP;
@@ -700,7 +741,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         for (const AdvGeometry& g : w.geometry) {
             const VertexLayout* L = layout(g.format);
             TexEntry* tex = texture(g.tex);
-            if (!L || !tex || !tex->tex || g.prim != 7) continue;
+            if (!L || !tex || !tex->tex || g.prim != 7 || g.shadowOnly) continue;
             [e setRenderPipelineState:S.gGeneric[g.alphaTest ? 1 : 0]];
             [e setCullMode:g.cull ? (g.cullFace == 0x404 ? MTLCullModeFront : MTLCullModeBack) : MTLCullModeNone];
             DrawTransform xf;
@@ -771,6 +812,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             [e setFragmentSamplerState:S.pointClamp atIndex:2];
             if (rts.resources)
                 [e useResources:rts.resources->data() count:rts.resources->size() usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
+            bindEntities(e);
         }
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [e endEncoding];
@@ -817,6 +859,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [e setFragmentSamplerState:S.linearClamp atIndex:1];
         if (rts.resources)
             [e useResources:rts.resources->data() count:rts.resources->size() usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
+        bindEntities(e);
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [e endEncoding];
         // temporal accumulation into the history ring
@@ -932,6 +975,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             [e setFragmentSamplerState:S.pointClamp atIndex:2];
             if (rts.resources)
                 [e useResources:rts.resources->data() count:rts.resources->size() usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
+            bindEntities(e);
         }
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [e endEncoding];
@@ -969,6 +1013,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             [e setFragmentSamplerState:S.pointClamp atIndex:3];
             if (rts.resources)
                 [e useResources:rts.resources->data() count:rts.resources->size() usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
+            bindEntities(e);
         }
         [e setDepthStencilState:S.depthTestNoWrite];
         [e setCullMode:MTLCullModeBack];

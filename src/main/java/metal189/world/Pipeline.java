@@ -18,7 +18,7 @@ public final class Pipeline {
     private static final Integer FEATURES_OVERRIDE = Integer.getInteger("metal189.shaderFeatures");
     // native option keys (frame_exec.mm setOption)
     private static final int OPT_SHADOW_RES = 10, OPT_SHADOW_DIST = 11, OPT_EXPOSURE = 12, OPT_BLOOM = 13, OPT_RT_RELEASE = 14,
-            OPT_WAVING = 15;
+            OPT_WAVING = 15, OPT_RT_ENTITIES = 16;
 
     private static boolean advanced;
     private static int features;
@@ -62,6 +62,7 @@ public final class Pipeline {
         Native.setOption(OPT_EXPOSURE, Config.exposure);
         Native.setOption(OPT_BLOOM, Config.bloomStrength);
         Native.setOption(OPT_WAVING, Config.waving ? 1 : 0);
+        Native.setOption(OPT_RT_ENTITIES, Config.rtEntities ? 1 : 0);
         boolean rtOn = advanced && (features & (RT_SHADOWS | RT_REFLECTIONS | RT_AO | RT_GI)) != 0;
         if (rtWasOn && !rtOn) Native.setOption(OPT_RT_RELEASE, 1); // free acceleration structures
         rtWasOn = rtOn;

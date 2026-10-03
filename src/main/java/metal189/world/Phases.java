@@ -23,7 +23,7 @@ public final class Phases {
     // Mirrors native/src/commands.h (Phase enum).
     public static final int UI = 0, WORLD_BEGIN = 1, SKY = 2, CLOUDS = 3, TERRAIN = 4, ENTITIES = 5, OUTLINE = 6,
             DESTROY = 7, LIT_PARTICLES = 8, PARTICLES = 9, WEATHER = 10, WORLD_BORDER = 11, ENTITIES_TRANSLUCENT = 12,
-            RENDER_LAST = 13, HAND = 14, WORLD_END = 15, WORLD_BEGIN_AUX = 16;
+            RENDER_LAST = 13, HAND = 14, WORLD_END = 15, WORLD_BEGIN_AUX = 16, ENTITIES_SHADOW = 17;
 
     public static int current = UI;
 
@@ -42,8 +42,15 @@ public final class Phases {
         // renderWorldPass calls into other framebuffers (mods' picture-in-picture cameras,
         // mirrors) are recorded as auxiliary segments, which the engine draws with the
         // baseline renderer so they cannot disturb the main view's temporal history.
-        begin(isMainTarget() ? WORLD_BEGIN : WORLD_BEGIN_AUX);
+        boolean main = isMainTarget();
+        auxDepth += main ? 0 : 1;
+        auxStack = (auxStack << 1) | (main ? 0 : 1);
+        begin(main ? WORLD_BEGIN : WORLD_BEGIN_AUX);
     }
+
+    // world segments rendering into other framebuffers, nested (bit per open segment)
+    private static int auxDepth;
+    private static long auxStack;
 
     private static boolean isMainTarget() {
         Minecraft mc = Minecraft.getMinecraft();
@@ -51,7 +58,12 @@ public final class Phases {
         int main = fb != null && net.minecraft.client.renderer.OpenGlHelper.isFramebufferEnabled() ? fb.framebufferObject : 0;
         return metal189.gl.Targets.drawFbo == main;
     }
-    public static void worldEnd() { begin(WORLD_END); begin(UI); }
+    public static void worldEnd() {
+        if ((auxStack & 1) != 0) auxDepth--;
+        auxStack >>>= 1;
+        begin(WORLD_END);
+        begin(UI);
+    }
     public static void sky() { begin(SKY); }
     public static void clouds() { begin(CLOUDS); }
     public static void outline() { begin(OUTLINE); }
@@ -65,6 +77,42 @@ public final class Phases {
 
     public static void entities() {
         begin(MinecraftForgeClient.getRenderPass() == 1 ? ENTITIES_TRANSLUCENT : ENTITIES);
+    }
+
+    /**
+     * Tail of RenderGlobal.renderEntities. Vanilla never draws the first-person camera
+     * entity, so in shaders mode it would cast no shadow (and ray-traced reflections would
+     * have nothing to hit). It is drawn once more here, as the ENTITIES_SHADOW phase: the
+     * engine puts it into the shadow map and the ray-tracing scene only, never on screen.
+     */
+    public static void afterEntities(float partialTicks) {
+        if (!Pipeline.advanced() || !metal189.config.Config.playerShadow || auxDepth > 0 || MinecraftForgeClient.getRenderPass() != 0)
+            return;
+        if (metal189.gl.Lists.compiling != null) return;
+        Minecraft mc = Minecraft.getMinecraft();
+        Entity view = mc.getRenderViewEntity();
+        if (view == null || mc.theWorld == null || mc.gameSettings.thirdPersonView != 0 || view.isDead) return;
+        if (view instanceof net.minecraft.entity.EntityLivingBase && ((net.minecraft.entity.EntityLivingBase) view).isPlayerSleeping()) return;
+        if (view instanceof net.minecraft.entity.player.EntityPlayer && ((net.minecraft.entity.player.EntityPlayer) view).isSpectator()) return;
+        net.minecraft.client.renderer.entity.RenderManager rm = mc.getRenderManager();
+        // renderEntities skips its setup for a couple of frames after the renderers reload
+        if (rm.livingPlayer != view || rm.worldObj != mc.theWorld) return;
+        int prev = current;
+        // renderEntities ends with the block-damage overlay's blending still enabled;
+        // entities otherwise render opaque with depth writes (as at the start of the pass)
+        boolean blend = GL.blend, depthTest = GL.depthTest, depthMask = GL.depthMask;
+        net.minecraft.client.renderer.GlStateManager.disableBlend();
+        net.minecraft.client.renderer.GlStateManager.enableDepth();
+        net.minecraft.client.renderer.GlStateManager.depthMask(true);
+        begin(ENTITIES_SHADOW);
+        try {
+            rm.renderEntitySimple(view, partialTicks);
+        } finally {
+            begin(prev);
+            if (blend) net.minecraft.client.renderer.GlStateManager.enableBlend();
+            if (!depthTest) net.minecraft.client.renderer.GlStateManager.disableDepth();
+            net.minecraft.client.renderer.GlStateManager.depthMask(depthMask);
+        }
     }
 
     /**

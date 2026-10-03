@@ -37,6 +37,7 @@ enum Phase : uint32_t {
     PH_DESTROY = 7, PH_LIT_PARTICLES = 8, PH_PARTICLES = 9, PH_WEATHER = 10, PH_WORLD_BORDER = 11,
     PH_ENTITIES_TRANSLUCENT = 12, PH_RENDER_LAST = 13, PH_HAND = 14, PH_WORLD_END = 15,
     PH_WORLD_BEGIN_AUX = 16,   // world render into a non-main framebuffer (always baseline)
+    PH_ENTITIES_SHADOW = 17,   // shaders mode: the first-person camera entity, drawn into the shadow map only
 };
 
 struct PipeState { uint32_t blend, srcRGB, dstRGB, srcA, dstA, eq, colorMask, logicOn, logicOp; float blendColor[4]; };

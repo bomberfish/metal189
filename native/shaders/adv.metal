@@ -781,6 +781,163 @@ static RtHit rtClosest(instance_acceleration_structure tlas, device const RtInst
 
 static float3 skyAmbient(constant AdvFrame& fr, texture2d<float> skyLut, sampler s, float3 nWorld);
 
+// ---------------------------------------------------------------------------
+// ray-traced entities: the frame's captured opaque geometry (mobs, players including the
+// first-person one, block entities) converted to ray tracing space by rt_entity_vertices,
+// in one primitive acceleration structure built every frame (see raytrace.mm)
+
+struct RtEntSource {                 // one per draw (matches EntSource in raytrace.mm)
+    float4x4 toRt;                   // object space -> ray tracing space
+    float4x4 texMat;
+    float4 color;                    // current colour when the layout has none
+    VertexLayout layout;
+    uint4 range;                     // x: first output vertex, y: vertex count, z: draw index
+    device const uchar* vb;          // the draw's first vertex
+    ulong pad;
+};
+
+struct RtEntVertex {
+    packed_float3 pos;
+    uint draw;
+    packed_float2 uv;
+    uchar4 color;
+    uint pad;
+};
+
+struct RtEntDraw {
+    uint tex;                        // index into the texture table
+    uint flags;                      // bit 0: alpha tested
+    float alphaRef;
+    float emissive;
+    float2 lm;                       // block, sky light (0..1)
+    float2 pad;
+};
+
+struct RtEntTex {
+    texture2d<float> tex;
+};
+
+kernel void rt_entity_vertices(device const RtEntSource* src [[buffer(0)]],
+                               constant uint2& counts [[buffer(1)]],   // x: draws, y: vertices
+                               device RtEntVertex* out [[buffer(2)]],
+                               uint id [[thread_position_in_grid]]) {
+    if (id >= counts.y) return;
+    uint lo = 0, hi = counts.x - 1;
+    while (lo < hi) {
+        uint mid = (lo + hi + 1) >> 1;
+        if (src[mid].range.x <= id) lo = mid; else hi = mid - 1;
+    }
+    device const RtEntSource& s = src[lo];
+    device const uchar* v = s.vb + (id - s.range.x) * s.layout.stride.x;
+    float4 p = s.toRt * fetch(v, s.layout.pos, float4(0, 0, 0, 1));
+    float4 t0 = fetch(v, s.layout.tex0, float4(0, 0, 0, 1));
+    float4 c = fetch(v, s.layout.color, s.color);
+    RtEntVertex o;
+    o.pos = packed_float3(p.xyz / p.w);
+    o.draw = s.range.z;
+    o.uv = packed_float2((s.texMat * t0).xy);
+    o.color = uchar4(saturate(c) * 255.0 + 0.5);
+    o.pad = 0;
+    out[id] = o;
+}
+
+constexpr sampler rtEntSampler(filter::nearest, address::repeat);
+
+static bool rtEntOpaqueAt(device const RtEntVertex* ev, device const RtEntDraw* ed, device const RtEntTex* et,
+                          uint prim, float2 bary) {
+    uint3 t = rtTri(prim);
+    RtEntDraw dr = ed[ev[t.x].draw];
+    if ((dr.flags & 1u) == 0) return true;
+    float3 w = rtBary(bary);
+    float2 uv = float2(ev[t.x].uv) * w.x + float2(ev[t.y].uv) * w.y + float2(ev[t.z].uv) * w.z;
+    float a = (float(ev[t.x].color.a) * w.x + float(ev[t.y].color.a) * w.y + float(ev[t.z].color.a) * w.z) * (1.0 / 255.0);
+    return et[dr.tex].tex.sample(rtEntSampler, uv, level(0)).a * a > dr.alphaRef;
+}
+
+static RtHit rtEntClosest(primitive_acceleration_structure as, device const RtEntVertex* ev, device const RtEntDraw* ed,
+                          device const RtEntTex* et, float3 o, float3 d, float tmax) {
+    intersection_query<triangle_data> q;
+    intersection_params p;
+    q.reset(ray(o, d, 0.0, tmax), as, p);
+    while (q.next()) {
+        if (rtEntOpaqueAt(ev, ed, et, q.get_candidate_primitive_id(), q.get_candidate_triangle_barycentric_coord()))
+            q.commit_triangle_intersection();
+    }
+    RtHit h;
+    h.hit = q.get_committed_intersection_type() == intersection_type::triangle;
+    h.t = h.hit ? q.get_committed_distance() : tmax;
+    h.inst = 0;
+    h.geom = 0;
+    h.prim = q.get_committed_primitive_id();
+    h.bary = q.get_committed_triangle_barycentric_coord();
+    return h;
+}
+
+// Occlusion for short AO rays: entity cutouts are treated as solid (no alpha test, so the
+// hardware resolves the query without returning to the shader).
+static bool rtEntOccludedSolid(primitive_acceleration_structure as, float3 o, float3 d, float tmax) {
+    intersection_query<triangle_data> q;
+    intersection_params p;
+    p.accept_any_intersection(true);
+    p.force_opacity(forced_opacity::opaque);
+    q.reset(ray(o, d, 0.0, tmax), as, p);
+    q.next();
+    return q.get_committed_intersection_type() != intersection_type::none;
+}
+
+// Closest hit without alpha testing (diffuse GI rays).
+static RtHit rtEntClosestSolid(primitive_acceleration_structure as, float3 o, float3 d, float tmax) {
+    intersection_query<triangle_data> q;
+    intersection_params p;
+    p.force_opacity(forced_opacity::opaque);
+    q.reset(ray(o, d, 0.0, tmax), as, p);
+    q.next();
+    RtHit h;
+    h.hit = q.get_committed_intersection_type() == intersection_type::triangle;
+    h.t = h.hit ? q.get_committed_distance() : tmax;
+    h.inst = 0;
+    h.geom = 0;
+    h.prim = q.get_committed_primitive_id();
+    h.bary = q.get_committed_triangle_barycentric_coord();
+    return h;
+}
+
+// Entity hit shading, as rtShade does for terrain (entity colours carry no baked face shading).
+static float3 rtEntShade(constant AdvFrame& fr, instance_acceleration_structure tlas, device const RtInstance* insts,
+                         texture2d<float> atlas, sampler s, texture2d<float> skyLut, sampler lin,
+                         device const RtEntVertex* ev, device const RtEntDraw* ed, device const RtEntTex* et,
+                         RtHit h, float3 o, float3 d, bool traceShadow) {
+    uint3 t = rtTri(h.prim);
+    float3 w = rtBary(h.bary);
+    RtEntVertex a = ev[t.x], b = ev[t.y], c3 = ev[t.z];
+    RtEntDraw dr = ed[a.draw];
+    float2 uv = float2(a.uv) * w.x + float2(b.uv) * w.y + float2(c3.uv) * w.z;
+    float4 col = (float4(a.color) * w.x + float4(b.color) * w.y + float4(c3.color) * w.z) * (1.0 / 255.0);
+    float3 albedo = toLinear(et[dr.tex].tex.sample(rtEntSampler, uv, level(0)).rgb * col.rgb);
+    float3 n = cross(float3(b.pos) - float3(a.pos), float3(c3.pos) - float3(a.pos));
+    n = dot(n, n) > 1e-12 ? normalize(n) : -d;
+    if (dot(n, d) > 0.0) n = -n;
+    float3 p = o + d * h.t;
+    bool sunUp = fr.sunDirWorld.w > 0.0;
+    float3 L = sunUp ? fr.sunDirWorld.xyz : -fr.sunDirWorld.xyz;
+    float3 lightCol = sunUp ? fr.sunColor.rgb : fr.moonColor.rgb;
+    float ndl = saturate(dot(n, L));
+    float2 lm = dr.lm;
+    float3 c = float3(0);
+    if (ndl > 0.0 && fr.flags.y == 0) {
+        float vis = traceShadow ? (rtOccluded(tlas, insts, atlas, s, p + n * 0.01, L, 320.0) ? 0.0 : 1.0)
+                                : smoothstep(0.85, 1.0, lm.y);
+        c += lightCol * albedo * ndl * smoothstep(0.35, 0.9, lm.y) * vis;
+    }
+    float daySky = lm.y * lm.y * fr.sunDirWorld.w;
+    c += albedo * skyAmbient(fr, skyLut, lin, n) * lm.y * lm.y;
+    c += albedo * fr.blockLight.rgb * pow(lm.x, fr.blockLight.a) * (1.0 - 0.75 * daySky);
+    c += albedo * (0.004 + dr.emissive * 6.0);
+    return c;
+}
+
+static float3 skyAmbient(constant AdvFrame& fr, texture2d<float> skyLut, sampler s, float3 nWorld);
+
 // Shades a ray-traced terrain hit like the deferred pass does (sun with a shadow ray,
 // sky ambient, block light), used for reflections.
 static float3 rtShade(constant AdvFrame& fr, instance_acceleration_structure tlas, device const RtInstance* insts,
@@ -824,6 +981,10 @@ fragment float4 rtao_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& 
                               texture2d<float> gNormal [[texture(2)]],
                               instance_acceleration_structure tlas [[buffer(10)]],
                               device const RtInstance* rtInst [[buffer(11)]],
+                              primitive_acceleration_structure entAs [[buffer(12)]],
+                              device const RtEntVertex* entV [[buffer(13)]],
+                              device const RtEntDraw* entD [[buffer(14)]],
+                              device const RtEntTex* entT [[buffer(15)]],
                               texture2d<float> atlas [[texture(7)]], sampler pointS [[sampler(2)]]) {
     uint2 fp = min(uint2(in.position.xy) * 2u + 1u, uint2(fr.screen.xy) - 1u);
     float d = depth.read(fp);
@@ -845,7 +1006,9 @@ fragment float4 rtao_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& 
         float u = (float(i) + fract(hash12(in.position.yx + float(i)) + float(fr.flags.z % 16u) * 0.618034)) / float(rays);
         float r = sqrt(u), phi = rot + float(i) * 6.2831853 / float(rays);
         float3 dir = normalize(tx * (r * cos(phi)) + ty * (r * sin(phi)) + nWorld * sqrt(max(0.0, 1.0 - u)));
-        open += rtOccluded(tlas, rtInst, atlas, pointS, o, dir, 2.5) ? 0.0 : 1.0;
+        bool occ = rtOccluded(tlas, rtInst, atlas, pointS, o, dir, 2.5);
+        if (!occ && (fr.flags.x & ADV_RT_ENTITIES)) occ = rtEntOccludedSolid(entAs, o, dir, 2.5);
+        open += occ ? 0.0 : 1.0;
     }
     return float4(open / float(rays), 1.0, 1.0, 1.0);
 }
@@ -860,6 +1023,10 @@ fragment float4 gi_trace_fragment(FullscreenOut in [[stage_in]], constant AdvFra
                                   texture2d<float> gNormal [[texture(2)]], texture2d<float> skyLut [[texture(5)]],
                                   instance_acceleration_structure tlas [[buffer(10)]],
                                   device const RtInstance* rtInst [[buffer(11)]],
+                                  primitive_acceleration_structure entAs [[buffer(12)]],
+                                  device const RtEntVertex* entV [[buffer(13)]],
+                                  device const RtEntDraw* entD [[buffer(14)]],
+                                  device const RtEntTex* entT [[buffer(15)]],
                                   device const uchar* emissions [[buffer(6)]],
                                   texture2d<float> atlas [[texture(7)]], sampler pointS [[sampler(2)]],
                                   sampler lin [[sampler(1)]]) {
@@ -879,6 +1046,10 @@ fragment float4 gi_trace_fragment(FullscreenOut in [[stage_in]], constant AdvFra
     float3 dir = normalize(tx * (r * cos(phi)) + ty * (r * sin(phi)) + nWorld * sqrt(max(0.0, 1.0 - xi.x)));
     float3 o = world + fr.rtCam.xyz + nWorld * (0.01 + length(eye) * 0.0002);
     RtHit h = rtClosest(tlas, rtInst, atlas, pointS, o, dir, 48.0);
+    if (fr.flags.x & ADV_RT_ENTITIES) {
+        RtHit eh = rtEntClosestSolid(entAs, o, dir, h.t);
+        if (eh.hit) return float4(rtEntShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, entV, entD, entT, eh, o, dir, true), 1.0);
+    }
     if (!h.hit) {
         // sky (no sun disc: direct sun is handled by the deferred pass)
         return float4(fr.flags.y != 0 ? toLinear(fr.fogColor.rgb) * 0.3 : skyBase(fr, skyLut, lin, dir), 1.0);
@@ -1082,6 +1253,10 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                                sampler rep [[sampler(3)]],
                                instance_acceleration_structure tlas [[buffer(10), function_constant(ac_rt)]],
                                device const RtInstance* rtInst [[buffer(11), function_constant(ac_rt)]],
+                               primitive_acceleration_structure entAs [[buffer(12), function_constant(ac_rt)]],
+                               device const RtEntVertex* entV [[buffer(13), function_constant(ac_rt)]],
+                               device const RtEntDraw* entD [[buffer(14), function_constant(ac_rt)]],
+                               device const RtEntTex* entT [[buffer(15), function_constant(ac_rt)]],
                                texture2d<float> atlas [[texture(7), function_constant(ac_rt)]],
                                sampler pointS [[sampler(2), function_constant(ac_rt)]]) {
     uint2 px = uint2(in.position.xy);
@@ -1218,9 +1393,13 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
             if (ac_rt && (fr.flags.x & ADV_RT_REFL)) {
                 float3 o = world + fr.rtCam.xyz + nWorld * (0.01 + length(eye) * 0.0002);
                 RtHit rh = rtClosest(tlas, rtInst, atlas, pointS, o, Rrw, 256.0);
-                if (rh.hit) {
-                    traced = rtShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, rh, o, Rrw, smoothW > 0.5);
-                    float hd = length(Rrw * rh.t + world);
+                RtHit eh;
+                eh.hit = false;
+                if (fr.flags.x & ADV_RT_ENTITIES) eh = rtEntClosest(entAs, entV, entD, entT, o, Rrw, rh.t);
+                if (eh.hit || rh.hit) {
+                    traced = eh.hit ? rtEntShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, entV, entD, entT, eh, o, Rrw, smoothW > 0.5)
+                                    : rtShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, rh, o, Rrw, smoothW > 0.5);
+                    float hd = length(Rrw * (eh.hit ? eh.t : rh.t) + world);
                     float hf = saturate((hd - fr.fog.x) / max(fr.fog.y - fr.fog.x, 1.0));
                     traced = mix(traced, skyBase(fr, skyLut, lin, Rrw), hf * hf);
                     hitAny = true;
@@ -1357,6 +1536,10 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
                                texture2d<float> sceneColor [[texture(6)]], depth2d<float> sceneDepth [[texture(7)]],
                                instance_acceleration_structure tlas [[buffer(10), function_constant(ac_rt)]],
                                device const RtInstance* rtInst [[buffer(11), function_constant(ac_rt)]],
+                               primitive_acceleration_structure entAs [[buffer(12), function_constant(ac_rt)]],
+                               device const RtEntVertex* entV [[buffer(13), function_constant(ac_rt)]],
+                               device const RtEntDraw* entD [[buffer(14), function_constant(ac_rt)]],
+                               device const RtEntTex* entT [[buffer(15), function_constant(ac_rt)]],
                                sampler pointS [[sampler(3), function_constant(ac_rt)]],
                                texture2d<float> cloudMap [[texture(8)]]) {
     float4 t = atlas.sample(s, in.uv);
@@ -1440,10 +1623,16 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
         float3 o = in.world + fr.rtCam.xyz + nw * 0.02;
         RtHit rh;
         rh.hit = false;
-        if (fres > 0.03) rh = rtClosest(tlas, rtInst, atlas, pointS, o, rdWorld, 320.0);
-        if (rh.hit) {
-            float3 hc = rtShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, rh, o, rdWorld, fres > 0.15);
-            float hd = length(rh.t * rdWorld + in.world);  // distance from the camera
+        RtHit eh;
+        eh.hit = false;
+        if (fres > 0.03) {
+            rh = rtClosest(tlas, rtInst, atlas, pointS, o, rdWorld, 320.0);
+            if (fr.flags.x & ADV_RT_ENTITIES) eh = rtEntClosest(entAs, entV, entD, entT, o, rdWorld, rh.hit ? rh.t : 320.0);
+        }
+        if (eh.hit || rh.hit) {
+            float3 hc = eh.hit ? rtEntShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, entV, entD, entT, eh, o, rdWorld, fres > 0.15)
+                               : rtShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, rh, o, rdWorld, fres > 0.15);
+            float hd = length((eh.hit ? eh.t : rh.t) * rdWorld + in.world);  // distance from the camera
             float hf = saturate((hd - fr.fog.x) / max(fr.fog.y - fr.fog.x, 1.0));
             refl = mix(hc, skyBase(fr, skyLut, lin, rdWorld), hf * hf);
         }

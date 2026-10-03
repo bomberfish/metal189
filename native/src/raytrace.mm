@@ -15,6 +15,8 @@
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
+#include <unordered_set>
+#include <mach/mach_time.h>
 
 namespace m189 {
 
@@ -394,6 +396,254 @@ bool rtPrepare(id<MTLCommandBuffer> cb, double camX, double camY, double camZ, f
     out.instanceCount = t.count;
     out.resources = g_residency ? nullptr : &t.resources;
     out.camera = simd_make_float3((float)(camX - t.ox), (float)(camY - t.oy), (float)(camZ - t.oz));
+    return true;
+}
+
+// ---- entities ----
+
+namespace {
+
+struct EntSource {             // RtEntSource in adv.metal
+    simd_float4x4 toRt;
+    simd_float4x4 texMat;
+    simd_float4 color;
+    VertexLayout layout;
+    uint32_t first, count, draw, pad;
+    uint64_t vb, pad2;
+};
+static_assert(sizeof(EntSource) == 272, "EntSource layout");
+
+struct EntDraw {               // RtEntDraw in adv.metal
+    uint32_t tex, flags;
+    float alphaRef, emissive;
+    float lm[2];
+    float pad[2];
+};
+static_assert(sizeof(EntDraw) == 32, "EntDraw layout");
+
+constexpr uint32_t kEntVertexStride = 32;               // RtEntVertex
+constexpr uint32_t kMaxEntityVertices = 1u << 20;       // 256k quads
+
+struct EntSlot {
+    id<MTLAccelerationStructure> as = nil;
+    size_t asSize = 0;
+    uint32_t triangles = 0;              // what `as` holds (0: nothing valid)
+    id<MTLBuffer> src = nil, verts = nil, draws = nil, textures = nil, scratch = nil;
+    std::vector<id<MTLResource>> resources;
+    std::unordered_set<void*> buffers;   // vertex buffers the conversion reads
+};
+EntSlot g_ent[kFramesInFlight];
+uint64_t g_entLastFrame = ~0ull;
+int g_entPrev = -1;                      // slot built or refit last
+uint32_t g_entSinceBuild = 0;            // refits since the last full build
+constexpr uint32_t kEntRefitsPerBuild = 15;
+id<MTLComputePipelineState> g_entKernel = nil;
+bool g_entKernelTried = false;
+id<MTLAccelerationStructure> g_entDummy = nil;
+id<MTLBuffer> g_entDummyVerts = nil, g_entDummyDraws = nil, g_entDummyTex = nil;
+bool g_entDummyBuilt = false;
+std::vector<id<MTLResource>> g_entNoResources;
+
+MTLPrimitiveAccelerationStructureDescriptor* entDescriptor(id<MTLBuffer> verts, uint32_t quads) {
+    MTLAccelerationStructureTriangleGeometryDescriptor* gd = [MTLAccelerationStructureTriangleGeometryDescriptor descriptor];
+    gd.vertexBuffer = verts;
+    gd.vertexBufferOffset = 0;
+    gd.vertexStride = kEntVertexStride;
+    gd.vertexFormat = MTLAttributeFormatFloat3;
+    gd.indexBuffer = quadIndices(quads);
+    gd.indexBufferOffset = 0;
+    gd.indexType = MTLIndexTypeUInt32;
+    gd.triangleCount = quads * 2;
+    gd.opaque = NO;   // alpha-tested draws are resolved in the shaders' intersection loops
+    gd.allowDuplicateIntersectionFunctionInvocation = YES;
+    MTLPrimitiveAccelerationStructureDescriptor* pd = [MTLPrimitiveAccelerationStructureDescriptor descriptor];
+    pd.geometryDescriptors = @[gd];
+    pd.usage = MTLAccelerationStructureUsagePreferFastBuild | MTLAccelerationStructureUsageRefit;
+    return pd;
+}
+
+} // namespace
+
+bool rtBuildEntities(id<MTLCommandBuffer> cb, const std::vector<RtEntityDraw>& in, RtEntities& out) {
+    out = RtEntities();
+    if (!rtAvailable()) return false;
+    id<MTLDevice> dev = device();
+    if (!g_entKernelTried) {
+        g_entKernelTried = true;
+        MTLFunctionConstantValues* cv = [MTLFunctionConstantValues new];
+        bool f = false;
+        for (NSUInteger i = 10; i <= 12; i++) [cv setConstantValue:&f type:MTLDataTypeBool atIndex:i];
+        NSError* err = nil;
+        id<MTLFunction> k = [engine().library newFunctionWithName:@"rt_entity_vertices" constantValues:cv error:&err];
+        if (k) g_entKernel = [dev newComputePipelineStateWithFunction:k error:&err];
+        if (!g_entKernel) log("rt: entity kernel: %s", err ? err.localizedDescription.UTF8String : "missing");
+    }
+    if (!g_entKernel) return false;
+
+    // placeholder for frames without entities (the shaders always have something bound)
+    if (!g_entDummyBuilt) {
+        g_entDummyBuilt = true;
+        g_entDummyVerts = [dev newBufferWithLength:kEntVertexStride * 4 options:MTLResourceStorageModeShared];
+        float* v = (float*)g_entDummyVerts.contents;
+        memset(v, 0, kEntVertexStride * 4);
+        for (int i = 0; i < 4; i++) { v[i * 8 + 0] = 1e7f; v[i * 8 + 1] = 1e7f; v[i * 8 + 2] = 1e7f; }
+        g_entDummyDraws = [dev newBufferWithLength:sizeof(EntDraw) options:MTLResourceStorageModeShared];
+        memset(g_entDummyDraws.contents, 0, sizeof(EntDraw));
+        g_entDummyTex = [dev newBufferWithLength:16 options:MTLResourceStorageModeShared];
+        memset(g_entDummyTex.contents, 0, 16);
+        MTLPrimitiveAccelerationStructureDescriptor* pd = entDescriptor(g_entDummyVerts, 1);
+        MTLAccelerationStructureSizes sz = [dev accelerationStructureSizesWithDescriptor:pd];
+        g_entDummy = [dev newAccelerationStructureWithSize:sz.accelerationStructureSize];
+        id<MTLBuffer> scratch = [dev newBufferWithLength:std::max<size_t>(sz.buildScratchBufferSize, 256) options:MTLResourceStorageModePrivate];
+        if (g_entDummy) {
+            id<MTLAccelerationStructureCommandEncoder> e = [cb accelerationStructureCommandEncoder];
+            e.label = @"rt entities (placeholder)";
+            [e buildAccelerationStructure:g_entDummy descriptor:pd scratchBuffer:scratch scratchBufferOffset:0];
+            [e endEncoding];
+            id<MTLBuffer> idx = ((MTLAccelerationStructureTriangleGeometryDescriptor*)pd.geometryDescriptors[0]).indexBuffer;
+            [cb addCompletedHandler:^(id<MTLCommandBuffer>) { (void)scratch; (void)idx; }];
+        }
+    }
+    if (!g_entDummy) return false;
+    out.as = g_entDummy;
+    out.verts = g_entDummyVerts;
+    out.draws = g_entDummyDraws;
+    out.textures = g_entDummyTex;
+    out.resources = &g_entNoResources;
+
+    // one build per engine frame (a slot's buffers are free again once its frame is reused)
+    uint64_t frame = engine().frameIndex;
+    if (frame == g_entLastFrame) return true;
+    g_entLastFrame = frame;
+    EntSlot& s = g_ent[frame % kFramesInFlight];
+    s.triangles = 0;   // this slot is being rewritten (or left unused this frame)
+    if (in.empty()) { g_entPrev = -1; return true; }
+
+    uint64_t t0 = g_optGpuStats ? mach_absolute_time() : 0;
+    // records are written straight into this slot's shared buffers
+    s.src = ensureBuffer(s.src, in.size() * sizeof(EntSource), MTLResourceStorageModeShared);
+    s.draws = ensureBuffer(s.draws, in.size() * sizeof(EntDraw), MTLResourceStorageModeShared);
+    EntSource* src = (EntSource*)s.src.contents;
+    EntDraw* draws = (EntDraw*)s.draws.contents;
+    std::vector<MTLResourceID> texIds;
+    s.resources.clear();
+    s.buffers.clear();
+    id<MTLTexture> lastTex = nil;
+    id<MTLBuffer> lastVb = nil;
+    uint32_t lastTi = 0, count = 0, total = 0;
+    for (const RtEntityDraw& d : in) {
+        if (!d.vb || !d.tex || !d.layout || d.vertices < 4) continue;
+        uint32_t n = d.vertices & ~3u;
+        if (total + n > kMaxEntityVertices) break;
+        if (d.tex != lastTex) {   // consecutive draws mostly share a texture
+            uint32_t ti = 0;
+            while (ti < s.resources.size() && s.resources[ti] != d.tex) ti++;
+            if (ti == s.resources.size()) {
+                s.resources.push_back(d.tex);
+                texIds.push_back(d.tex.gpuResourceID);
+            }
+            lastTex = d.tex;
+            lastTi = ti;
+        }
+        if (d.vb != lastVb) {
+            s.buffers.insert((__bridge void*)d.vb);
+            lastVb = d.vb;
+        }
+        EntSource& e = src[count];
+        e.toRt = d.toRt;
+        e.texMat = d.texMat;
+        e.color = d.color;
+        e.layout = *d.layout;
+        e.first = total;
+        e.count = n;
+        e.draw = count;
+        e.pad = 0;
+        e.vb = d.vb.gpuAddress + d.offset;
+        e.pad2 = 0;
+        EntDraw& dr = draws[count];
+        dr.tex = lastTi;
+        dr.flags = d.alphaTest ? 1u : 0u;
+        dr.alphaRef = d.alphaRef;
+        dr.emissive = d.emissive;
+        dr.lm[0] = d.lightmap.x;
+        dr.lm[1] = d.lightmap.y;
+        dr.pad[0] = dr.pad[1] = 0;
+        count++;
+        total += n;
+    }
+    if (!total) { g_entPrev = -1; return true; }
+    std::vector<id<MTLResource>> buffers;
+    buffers.reserve(s.buffers.size());
+    for (void* b : s.buffers) buffers.push_back((__bridge id<MTLBuffer>)b);
+    s.textures = ensureBuffer(s.textures, texIds.size() * sizeof(MTLResourceID), MTLResourceStorageModeShared);
+    memcpy(s.textures.contents, texIds.data(), texIds.size() * sizeof(MTLResourceID));
+    s.verts = ensureBuffer(s.verts, (size_t)total * kEntVertexStride, MTLResourceStorageModePrivate);
+
+    MTLComputePassDescriptor* cp = [MTLComputePassDescriptor computePassDescriptor];
+    profCompute(cp, "rt entity vertices");
+    id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoderWithDescriptor:cp];
+    ce.label = @"rt entity vertices";
+    [ce setComputePipelineState:g_entKernel];
+    [ce setBuffer:s.src offset:0 atIndex:0];
+    uint32_t counts[2] = {count, total};
+    [ce setBytes:counts length:sizeof counts atIndex:1];
+    [ce setBuffer:s.verts offset:0 atIndex:2];
+    [ce useResources:buffers.data() count:buffers.size() usage:MTLResourceUsageRead];
+    [ce dispatchThreads:MTLSizeMake(total, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+    [ce endEncoding];
+
+    MTLPrimitiveAccelerationStructureDescriptor* pd = entDescriptor(s.verts, total / 4);
+    MTLAccelerationStructureSizes sz = [dev accelerationStructureSizesWithDescriptor:pd];
+    int slot = (int)(frame % kFramesInFlight);
+    // Entities move every frame but mostly keep their triangles: refit last frame's
+    // structure into this slot, with a full rebuild when the count changes and every
+    // few frames (refits loosen the hierarchy as things move).
+    EntSlot* prev = g_entPrev >= 0 && g_entPrev != slot ? &g_ent[g_entPrev] : nullptr;
+    bool refit = prev && prev->as && prev->triangles == total / 2 && g_entSinceBuild < kEntRefitsPerBuild;
+    size_t need = refit ? prev->asSize : sz.accelerationStructureSize;
+    if (!s.as || s.asSize < need) {
+        s.asSize = refit ? prev->asSize : sz.accelerationStructureSize + sz.accelerationStructureSize / 2;
+        s.as = [dev newAccelerationStructureWithSize:s.asSize];
+        if (!s.as) { s.asSize = 0; s.triangles = 0; return true; }
+    }
+    s.scratch = ensureBuffer(s.scratch, std::max<size_t>(std::max(sz.buildScratchBufferSize, sz.refitScratchBufferSize), 256),
+                             MTLResourceStorageModePrivate);
+    MTLAccelerationStructurePassDescriptor* ap = [MTLAccelerationStructurePassDescriptor accelerationStructurePassDescriptor];
+    profAccel(ap, refit ? "rt entities refit" : "rt entities");
+    id<MTLAccelerationStructureCommandEncoder> e = [cb accelerationStructureCommandEncoderWithDescriptor:ap];
+    e.label = refit ? @"rt entities refit" : @"rt entities";
+    if (refit) {
+        [e refitAccelerationStructure:prev->as descriptor:pd destination:s.as scratchBuffer:s.scratch scratchBufferOffset:0];
+        g_entSinceBuild++;
+    } else {
+        [e buildAccelerationStructure:s.as descriptor:pd scratchBuffer:s.scratch scratchBufferOffset:0];
+        g_entSinceBuild = 0;
+    }
+    [e endEncoding];
+    s.triangles = total / 2;
+    g_entPrev = slot;
+    id<MTLBuffer> idx = ((MTLAccelerationStructureTriangleGeometryDescriptor*)pd.geometryDescriptors[0]).indexBuffer;
+    [cb addCompletedHandler:^(id<MTLCommandBuffer>) { (void)idx; }];
+
+    out.as = s.as;
+    out.verts = s.verts;
+    out.draws = s.draws;
+    out.textures = s.textures;
+    out.resources = &s.resources;
+    out.triangles = total / 2;
+    if (g_optGpuStats) {
+        static double cpuMs = 0;
+        static uint32_t samples = 0;
+        mach_timebase_info_data_t tb;
+        mach_timebase_info(&tb);
+        cpuMs += (double)(mach_absolute_time() - t0) * tb.numer / tb.denom / 1e6;
+        if (++samples == 600) {
+            log("rt entities: %u draws, %u triangles, %zu textures, structure %.1f MB, cpu %.3f ms/frame", count, total / 2,
+                s.resources.size(), s.asSize / 1048576.0, cpuMs / samples);
+            cpuMs = 0;
+            samples = 0;
+        }
+    }
     return true;
 }
 

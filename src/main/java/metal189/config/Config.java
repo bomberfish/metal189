@@ -35,6 +35,10 @@ public final class Config {
     public static boolean rtReflections = false;
     public static boolean rtAmbientOcclusion = false;
     public static boolean rtGlobalIllumination = false;
+    /** Entities (and the first-person player) in ray-traced reflections, AO and GI. */
+    public static boolean rtEntities = true;
+    /** Shaders mode: the first-person player casts a shadow (and appears in ray tracing). */
+    public static boolean playerShadow = true;
 
     public static final int[] SHADOW_RESOLUTIONS = {2048, 4096, 8192};
     public static final int[] SHADOW_DISTANCES = {64, 96, 112, 128, 160, 192};
@@ -83,6 +87,8 @@ public final class Config {
         rtReflections = bool(p, "rtReflections", rtReflections);
         rtAmbientOcclusion = bool(p, "rtAmbientOcclusion", rtAmbientOcclusion);
         rtGlobalIllumination = bool(p, "rtGlobalIllumination", rtGlobalIllumination);
+        rtEntities = bool(p, "rtEntities", rtEntities);
+        playerShadow = bool(p, "playerShadow", playerShadow);
     }
 
     public static void save() {
@@ -107,6 +113,8 @@ public final class Config {
         p.setProperty("rtReflections", Boolean.toString(rtReflections));
         p.setProperty("rtAmbientOcclusion", Boolean.toString(rtAmbientOcclusion));
         p.setProperty("rtGlobalIllumination", Boolean.toString(rtGlobalIllumination));
+        p.setProperty("rtEntities", Boolean.toString(rtEntities));
+        p.setProperty("playerShadow", Boolean.toString(playerShadow));
         File f = file();
         f.getParentFile().mkdirs();
         OutputStream out = null;

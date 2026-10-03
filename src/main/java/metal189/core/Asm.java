@@ -126,6 +126,31 @@ public final class Asm {
         };
     }
 
+    /** Inserts {@code hook(arg)} before every return of a void method, passing the float argument in {@code floatSlot}. */
+    public static ClassPatch injectTail(final String mcp, final String srg, final String desc,
+                                        final String hookOwner, final String hookName, final String hookDesc, final int floatSlot) {
+        return new ClassPatch() {
+            public boolean apply(ClassNode cn) {
+                MethodNode m = find(cn, mcp, srg, desc);
+                if (m == null) {
+                    Metal189Transformer.LOG.error("metal189: {}.{}{} not found", cn.name, mcp, desc);
+                    return false;
+                }
+                for (org.objectweb.asm.tree.AbstractInsnNode n = m.instructions.getFirst(); n != null; n = n.getNext()) {
+                    if (n.getOpcode() == Opcodes.RETURN) {
+                        InsnList l = new InsnList();
+                        l.add(new VarInsnNode(Opcodes.FLOAD, floatSlot));
+                        l.add(new MethodInsnNode(Opcodes.INVOKESTATIC, hookOwner, hookName, hookDesc, false));
+                        m.instructions.insertBefore(n, l);
+                    }
+                }
+                return true;
+            }
+
+            public boolean needsFrames() { return false; }
+        };
+    }
+
     /** Applies several patches to the same class. */
     public static ClassPatch chain(final ClassPatch... patches) {
         return new ClassPatch() {
