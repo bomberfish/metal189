@@ -56,6 +56,8 @@ public final class TestDriver {
 
     private static int hurtTicks;
     private static boolean leavingDimension;
+    private static net.minecraft.server.MinecraftServer quitServer;
+    private static int quitWait;
     private static float spinRate;
     private static int spinFrames;
 
@@ -282,9 +284,32 @@ public final class TestDriver {
                 fpsFrames = 0;
                 fpsLabel = a.length > 2 ? a[2] : "run";
                 return false;
-            case "quit":
+            case "quit": {
+                // like Save and Quit to Title first, so the world is saved by the server thread
+                // alone (vanilla races its shutdown hook against it when quitting in-world)
+                net.minecraft.server.MinecraftServer srv = net.minecraft.server.MinecraftServer.getServer();
+                if (mc.theWorld != null) {
+                    quitServer = srv;
+                    mc.theWorld.sendQuittingDisconnectingPacket();
+                    mc.loadWorld(null);
+                    mc.displayGuiScreen(new net.minecraft.client.gui.GuiMainMenu());
+                    pc--;
+                    return false;
+                }
+                if (quitServer != null && !quitServer.isServerStopped() && quitWait++ < 600) {
+                    pc--;
+                    return false;
+                }
                 mc.shutdown();
                 return false;
+            }
+            case "screenshot": {
+                // the F2 path (ScreenShotHelper reads the framebuffer through the GL layer)
+                net.minecraft.util.IChatComponent msg = net.minecraft.util.ScreenShotHelper.saveScreenshot(
+                        mc.mcDataDir, a.length > 1 ? a[1] : null, mc.displayWidth, mc.displayHeight, mc.getFramebuffer());
+                Native.LOG.info("metal189-test screenshot: {}", msg == null ? "null" : msg.getUnformattedText());
+                return true;
+            }
             default:
                 Native.LOG.warn("metal189-test: unknown command {}", line);
                 return true;
