@@ -98,6 +98,10 @@ public final class Patches {
             Asm.beforeCall("renderWorldPass", "func_175068_a", rwp, "dispatchRenderLast", "dispatchRenderLast", "metal189/world/Phases", "renderLast", -1),
             Asm.beforeCall("renderWorldPass", "func_175068_a", rwp, "renderHand", "func_78476_b", "metal189/world/Phases", "hand", -1)));
 
+        register("net.minecraft.client.gui.FontRenderer",
+            Asm.injectTailThis("readFontTexture", "func_111272_d", "()V",
+                "metal189/gui/HdFont", "afterReadFontTexture", "(Lnet/minecraft/client/gui/FontRenderer;)V"));
+
         register("net.minecraft.client.renderer.texture.TextureMap",
             Asm.injectTailThis("loadTextureAtlas", "func_110571_b", "(Lnet/minecraft/client/resources/IResourceManager;)V",
                 "metal189/world/PbrAtlas", "onStitched", "(Lnet/minecraft/client/renderer/texture/TextureMap;)V"));
