@@ -56,6 +56,19 @@ public final class TestDriver {
 
     private static int hurtTicks;
     private static boolean leavingDimension;
+    private static int menuFreeze = -1;
+
+    private static void applyMenuFreeze(Minecraft mc) {
+        if (menuFreeze < 0 || !(mc.currentScreen instanceof net.minecraft.client.gui.GuiMainMenu)) return;
+        try {
+            for (java.lang.reflect.Field f : net.minecraft.client.gui.GuiMainMenu.class.getDeclaredFields()) {
+                String n = f.getName();
+                if (n.equals("panoramaTimer") || n.equals("field_73979_m")) { f.setAccessible(true); f.setInt(mc.currentScreen, menuFreeze); }
+                if (n.equals("splashText") || n.equals("field_73975_c")) { f.setAccessible(true); f.set(mc.currentScreen, "metal189"); }
+            }
+        } catch (Exception ignored) {
+        }
+    }
     private static Pip pip;
     private static float spinRate;
     private static int spinFrames;
@@ -64,6 +77,7 @@ public final class TestDriver {
     public static void onFrame() {
         if (!active) return;
         frame++;
+        applyMenuFreeze(Minecraft.getMinecraft());
         if (spinFrames > 0) {
             spinFrames--;
             Minecraft m = Minecraft.getMinecraft();
@@ -277,6 +291,11 @@ public final class TestDriver {
             case "chatvis":
                 // chatvis 0|1|2 : chat visibility (tests normally hide chat)
                 mc.gameSettings.chatVisibility = net.minecraft.entity.player.EntityPlayer.EnumChatVisibility.getEnumChatVisibility(Integer.parseInt(a[1]));
+                mc.gameSettings.sendSettingsToServer();   // the server filters chat by the client's setting
+                return true;
+            case "menufreeze":
+                // menufreeze TIMER : pin the title screen's panorama rotation and splash text
+                menuFreeze = Integer.parseInt(a[1]);
                 return true;
             case "toggle":
                 // same path as the toggle keybind (saves config/metal189.properties)

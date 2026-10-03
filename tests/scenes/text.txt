@@ -1,0 +1,29 @@
+sleep 6
+capture CAPTURE_A
+gui options
+sleep 1
+capture CAPTURE_B
+gui none
+world text1 3 flat
+waitWorld
+chatvis 0
+sleep 1
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /time set 6000
+cmd /tp @p 0.5 4 0.5 180 5
+sleep 3
+cmd /kill @e[type=!Player]
+cmd /setblock 0 4 -3 standing_sign 0 replace {Text1:"{\"text\":\"Sign line\"}",Text2:"{\"text\":\"red text\",\"color\":\"red\"}"}
+cmd /summon ArmorStand 2.5 4 -4 {CustomName:"Nametag text",CustomNameVisible:1}
+cmd /tellraw @p {"text":"plain chat line","color":"white"}
+cmd /tellraw @p {"text":"bold line","bold":true,"color":"gold"}
+cmd /tellraw @p {"text":"italic underlined","italic":true,"underlined":true,"color":"aqua"}
+cmd /tellraw @p {"text":"strikethrough","strikethrough":true,"color":"green"}
+cmd /tellraw @p [{"text":"mixed ","color":"gray"},{"text":"[VIP]","color":"green","bold":true},{"text":" Player: hello there","color":"white"}]
+sleep 2
+capture CAPTURE_C
+f3
+sleep 1
+capture CAPTURE_D
+quit

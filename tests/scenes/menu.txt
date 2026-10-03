@@ -1,0 +1,4 @@
+menufreeze 1200
+sleep 5
+capture CAPTURE_A
+quit

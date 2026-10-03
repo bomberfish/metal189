@@ -20,3 +20,13 @@ fragment float4 blit_fragment(BlitOut in [[stage_in]], texture2d<float> src [[te
                               sampler smp [[sampler(0)]]) {
     return src.sample(smp, in.uv);
 }
+
+// glCopyTexSubImage2D from a top-down (Metal-oriented) source into a bottom-up (GL row
+// order) texture: destination texel (xoff + i, yoff + j) receives source GL row y + j,
+// i.e. source texel (x + i, srcTop - j). p = (x, srcTop, xoff, yoff).
+fragment float4 copy_flip_fragment(BlitOut in [[stage_in]], texture2d<float> src [[texture(0)]],
+                                   constant int4& p [[buffer(0)]]) {
+    int2 d = int2(in.position.xy);
+    int2 s = int2(p.x + (d.x - p.z), p.y - (d.y - p.w));
+    return src.read(uint2(clamp(s, int2(0), int2(src.get_width() - 1, src.get_height() - 1))));
+}

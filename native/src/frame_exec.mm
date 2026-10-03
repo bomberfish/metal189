@@ -1034,6 +1034,22 @@ static void doClear(Exec& x, const ClearCmd& c) {
     [x.enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 }
 
+// Pipeline for copies out of top-down targets (the screen), per destination format.
+static id<MTLRenderPipelineState> copyFlipPipeline(MTLPixelFormat fmt) {
+    static std::unordered_map<uint32_t, id<MTLRenderPipelineState>> cache;
+    auto it = cache.find((uint32_t)fmt);
+    if (it != cache.end()) return it->second;
+    MTLRenderPipelineDescriptor* d = [MTLRenderPipelineDescriptor new];
+    d.vertexFunction = [engine().library newFunctionWithName:@"blit_vertex"];
+    d.fragmentFunction = [engine().library newFunctionWithName:@"copy_flip_fragment"];
+    d.colorAttachments[0].pixelFormat = fmt;
+    NSError* err = nil;
+    id<MTLRenderPipelineState> ps = [device() newRenderPipelineStateWithDescriptor:d error:&err];
+    if (!ps) log("copy pipeline: %s", err.localizedDescription.UTF8String);
+    cache[(uint32_t)fmt] = ps;
+    return ps;
+}
+
 static void copyTex(Exec& x, const CopyTexCmd& c) {
     endPass(x);
     TexEntry* dst = texture((int)c.tex);
@@ -1042,6 +1058,30 @@ static void copyTex(Exec& x, const CopyTexCmd& c) {
     int w = std::min(c.w, std::min(x.cur.w - sx, (int)dst->tex.width - c.xoff));
     int h = std::min(c.h, std::min(x.cur.h - sy, (int)dst->tex.height - c.yoff));
     if (w <= 0 || h <= 0 || sx < 0 || sy < 0) return;
+    if (!x.cur.flip) {
+        // The screen is stored top-down but textures bottom-up (GL row order): GL's copy
+        // takes the region's bottom row first, so the rows are reversed with a draw.
+        id<MTLRenderPipelineState> ps = copyFlipPipeline(dst->tex.pixelFormat);
+        if (!ps) return;
+        MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = dst->tex;
+        rp.colorAttachments[0].level = (NSUInteger)c.level;
+        rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> e = [x.cb renderCommandEncoderWithDescriptor:rp];
+        e.label = @"copyTexSubImage (screen)";
+        [e setRenderPipelineState:ps];
+        [e setViewport:(MTLViewport){(double)c.xoff, (double)c.yoff, (double)w, (double)h, 0, 1}];
+        [e setScissorRect:(MTLScissorRect){(NSUInteger)c.xoff, (NSUInteger)c.yoff, (NSUInteger)w, (NSUInteger)h}];
+        simd_float4 noFlip = simd_make_float4(0, 0, 0, 0);
+        [e setVertexBytes:&noFlip length:sizeof noFlip atIndex:0];
+        simd_int4 p = simd_make_int4(sx, sy + h - 1, c.xoff, c.yoff);
+        [e setFragmentBytes:&p length:sizeof p atIndex:0];
+        [e setFragmentTexture:x.cur.color atIndex:0];
+        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [e endEncoding];
+        return;
+    }
     id<MTLBlitCommandEncoder> b = [x.cb blitCommandEncoder];
     [b copyFromTexture:x.cur.color sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(sx, sy, 0)
             sourceSize:MTLSizeMake(w, h, 1) toTexture:dst->tex destinationSlice:0 destinationLevel:c.level
