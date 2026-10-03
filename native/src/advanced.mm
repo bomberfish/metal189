@@ -76,6 +76,8 @@ struct State {
     int giIndex = 0;
     id<MTLComputePipelineState> exposureKernel;
     id<MTLBuffer> exposureState;
+    AdvLitContext lit;
+    id<MTLTexture> dummyDepth;
     id<MTLTexture> cloudNoise, cloudMap[2];
     id<MTLSamplerState> repeatLinear;
     bool cloudNoiseReady = false, cloudHistory = false;
@@ -456,6 +458,8 @@ simd_float4x4 shadowMatrix(const EnvCmd& env, simd_float3 sunWorld, float radius
 }
 
 } // namespace
+
+const AdvLitContext& advancedLitContext() { return S.lit; }
 
 void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> color, id<MTLTexture> depth) {
     if (!color || !depth || !initState() || !g_materials || !w.hasEnv) return;
@@ -1129,6 +1133,21 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [e setFragmentSamplerState:S.linearClamp atIndex:0];
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [e endEncoding];
+        // remember this frame's lighting for the replayed hand/particle/weather draws
+        S.lit.valid = true;
+        S.lit.frame = fr;
+        if (!S.dummyDepth) {
+            MTLTextureDescriptor* dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                                                                          width:1 height:1 mipmapped:NO];
+            dd.storageMode = MTLStorageModePrivate;
+            dd.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+            S.dummyDepth = [device() newTextureWithDescriptor:dd];
+        }
+        S.lit.shadowMap = (features & ADV_SHADOWS) && S.shadowMap ? S.shadowMap : S.dummyDepth;
+        S.lit.skyLut = S.skyLut;
+        S.lit.exposure = S.exposureState;
+        S.lit.shadowCmp = S.shadowCmp;
+        S.lit.linear = S.linearClamp;
     }
 }
 

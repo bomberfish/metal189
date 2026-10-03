@@ -56,6 +56,17 @@ void advancedSetParam(int key, int value);
 // LabPBR material atlases (texture ids, 0 = none) laid out like the block atlas.
 void advancedSetPbr(int normalTex, int specularTex);
 
+// Lighting inputs of the last advanced frame, for draws the baseline executor replays on
+// top of it in shaders mode (hand, particles, weather: ff_fragment's advLit variant).
+struct AdvLitContext {
+    bool valid = false;
+    AdvFrame frame;
+    id<MTLTexture> shadowMap, skyLut;   // shadowMap may be a 1x1 dummy when shadows are off
+    id<MTLBuffer> exposure;
+    id<MTLSamplerState> shadowCmp, linear;
+};
+const AdvLitContext& advancedLitContext();
+
 // Renders the collected world into `color`/`depth` (GL row order).
 void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> color, id<MTLTexture> depth);
 

@@ -2,6 +2,7 @@
 // captured vanilla draws (GUI, entities, particles, sky, ...).
 #include "common.h"
 #include "ff.h"
+#include "advlight.h"
 
 // Structural variants (pipeline specialisation).
 constant bool fc_alphaTest [[function_constant(0)]];
@@ -9,6 +10,7 @@ constant bool fc_logicOp   [[function_constant(1)]];
 constant bool fc_flat      [[function_constant(2)]];
 constant bool fc_terrain   [[function_constant(3)]];  // per-section modelview in buffer(3)
 constant bool fc_modulate  [[function_constant(4)]];  // every enabled unit uses GL_MODULATE
+constant bool fc_advLit    [[function_constant(5)]];  // shaders mode: lit by the advanced pipeline (advlight.h)
 constant bool fc_smooth = !fc_flat;
 
 struct FFOut {
@@ -19,6 +21,8 @@ struct FFOut {
     float4 tex0;      // projective
     float2 tex1;
     float fogFactor;   // per-vertex fog factor (clamped), as GL implementations compute it
+    float3 eyePos [[function_constant(fc_advLit)]];
+    float3 eyeNormal [[function_constant(fc_advLit)]];   // zero when the format has no normal
 };
 
 // ---------------------------------------------------------------------------
@@ -103,7 +107,13 @@ static FFOut ffProcess(uint vid, device const uchar* vbuf, constant VertexLayout
     o.pointSize = 1.0;
 
     uint f = u.flags.x;
-    if (f & FF_LIGHTING) {
+    if (fc_advLit) {
+        // the advanced pipeline's lighting replaces GL's (applied per fragment)
+        o.eyePos = eye.xyz;
+        float3 n = float3x3(xf.normal0.xyz, xf.normal1.xyz, xf.normal2.xyz) * nrm;
+        o.eyeNormal = layout.normal.x >= 0 && dot(n, n) > 1e-12 ? normalize(n) : float3(0);
+        color = saturate(color);
+    } else if (f & FF_LIGHTING) {
         float3 n = float3x3(xf.normal0.xyz, xf.normal1.xyz, xf.normal2.xyz) * nrm;
         if (f & FF_NORMALIZE) n = normalize(n);
         color = lightVertex(u, color, n, eye.xyz);
@@ -347,11 +357,32 @@ fragment FFFragOut ff_fragment(FFOut in [[stage_in]],
                                sampler s0 [[sampler(0)]],
                                sampler s1 [[sampler(1)]],
                                sampler s2 [[sampler(2)]],
-                               float4 dst [[color(0), function_constant(fc_logicOp)]]) {
+                               float4 dst [[color(0), function_constant(fc_logicOp)]],
+                               constant AdvFrame& fr [[buffer(6), function_constant(fc_advLit)]],
+                               device const float4* expState [[buffer(7), function_constant(fc_advLit)]],
+                               depth2d<float> shadowMap [[texture(3), function_constant(fc_advLit)]],
+                               texture2d<float> skyLut [[texture(4), function_constant(fc_advLit)]],
+                               sampler cmp [[sampler(3), function_constant(fc_advLit)]],
+                               sampler lin [[sampler(4), function_constant(fc_advLit)]]) {
     float4 primary = fc_flat ? in.colorFlat : in.colorSmooth;
     uint f = u.flags.x;
     float4 texels[3] = {float4(1), float4(1), float4(1)};
     float2 uv0 = in.tex0.xy / in.tex0.w;
+    if (fc_advLit) {
+        // albedo from unit 0 only (unit 1 is the lightmap, replaced by the lighting model)
+        float4 c = primary;
+        if (f & FF_TEX0) {
+            float4 t0 = tex0.sample(s0, uv0);
+            c = fc_modulate ? primary * t0 : texEnv(u.env[0], u.envScale[0], t0, primary, primary, u.envColor[0], texels);
+        }
+        if (fc_alphaTest) {
+            if (!alphaPass(u.flags.w, c.a, u.alpha.x)) discard_fragment();
+        }
+        FFFragOut o;
+        o.color = fwdLight(fr, c, in.eyePos, in.eyeNormal, in.tex1, (f & FF_TEX1) != 0, shadowMap, cmp, skyLut, lin,
+                           expState, in.position.xy);
+        return o;
+    }
     if (f & FF_TEX0) texels[0] = tex0.sample(s0, uv0);
     if (f & FF_TEX1) texels[1] = tex1.sample(s1, in.tex1);
     if (f & FF_TEX2) texels[2] = tex2.sample(s2, float2(0.0)); // unit 2 keeps its default coords

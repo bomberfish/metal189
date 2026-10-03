@@ -1,0 +1,35 @@
+sleep 3
+world lookflat 42 flat
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /gamerule doFireTick false
+cmd /weather clear
+cmd /time set 5000
+cmd /tp @p -500.5 5 -500.5 180 20
+sleep 4
+cmd /kill @e[type=!Player]
+cmd /fill -508 4 -512 -492 9 -496 air
+cmd /fill -508 3 -512 -492 3 -496 stone
+cmd /setblock -500 4 -505 netherrack
+cmd /setblock -500 5 -505 fire
+cmd /setblock -502 4 -504 torch
+cmd /setblock -498 4 -504 torch
+cmd /fill -505 4 -508 -495 6 -508 stonebrick
+slot 0
+cmd /replaceitem entity @p slot.hotbar.0 diamond_sword
+sleep 3
+capture CAPTURE_A
+cmd /time set 18000
+sleep 3
+capture CAPTURE_B
+cmd /replaceitem entity @p slot.hotbar.0 torch
+sleep 2
+capture CAPTURE_C
+cmd /time set 6000
+cmd /weather rain
+cmd /replaceitem entity @p slot.hotbar.0 diamond_sword
+sleep 8
+capture CAPTURE_D
+quit

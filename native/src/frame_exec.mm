@@ -70,7 +70,8 @@ struct PipeKey {
     uint32_t blend;      // packed blend state, 0 = disabled
     uint32_t blendEq;
     uint32_t writeMask;
-    uint32_t variant;    // bit0 alphaTest, bit1 logicOp, bit2 flat, bit3 terrain, bit4 modulate, bit5 wide line
+    uint32_t variant;    // bit0 alphaTest, bit1 logicOp, bit2 flat, bit3 terrain, bit4 modulate, bit5 wide line,
+                         // bit6 lit by the advanced pipeline
     bool operator==(const PipeKey& o) const { return memcmp(this, &o, sizeof *this) == 0; }
 };
 struct PipeKeyHash {
@@ -85,6 +86,7 @@ struct PipeKeyHash {
 static std::unordered_map<PipeKey, id<MTLRenderPipelineState>, PipeKeyHash> g_pipes;
 static std::unordered_map<uint32_t, id<MTLDepthStencilState>> g_dss;
 static id<MTLFunction> g_vfn[32], g_ffn[32], g_lineVfn[32];
+static id<MTLFunction> g_litVfn[32], g_litFfn[32];   // fc_advLit variants (non-terrain)
 static id<MTLFunction> g_clearV, g_clearF;
 static id<MTLBuffer> g_quadIndices, g_flatQuadIndices;
 static uint32_t g_quadIndexQuads = 0, g_flatQuadIndexQuads = 0;
@@ -157,6 +159,8 @@ bool executorInit() {
         [cv setConstantValue:&flat type:MTLDataTypeBool atIndex:2];
         [cv setConstantValue:&terrain type:MTLDataTypeBool atIndex:3];
         [cv setConstantValue:&modulate type:MTLDataTypeBool atIndex:4];
+        bool lit = false;
+        [cv setConstantValue:&lit type:MTLDataTypeBool atIndex:5];
         NSError* err = nil;
         g_vfn[v] = [e.library newFunctionWithName:(terrain ? @"terrain_vertex" : @"ff_vertex") constantValues:cv error:&err];
         if (!g_vfn[v]) { log("ff_vertex: %s", err.localizedDescription.UTF8String); return false; }
@@ -165,6 +169,12 @@ bool executorInit() {
         if (!terrain) {
             g_lineVfn[v] = [e.library newFunctionWithName:@"ff_line_vertex" constantValues:cv error:&err];
             if (!g_lineVfn[v]) log("ff_line_vertex: %s", err.localizedDescription.UTF8String);
+            MTLFunctionConstantValues* lv = [cv copy];
+            lit = true;
+            [lv setConstantValue:&lit type:MTLDataTypeBool atIndex:5];
+            g_litVfn[v] = [e.library newFunctionWithName:@"ff_vertex" constantValues:lv error:&err];
+            g_litFfn[v] = [e.library newFunctionWithName:@"ff_fragment" constantValues:lv error:&err];
+            if (!g_litVfn[v] || !g_litFfn[v]) log("ff advLit variant: %s", err.localizedDescription.UTF8String);
         }
     }
     g_clearV = [e.library newFunctionWithName:@"clear_vertex"];
@@ -191,9 +201,11 @@ static id<MTLRenderPipelineState> pipeline(const PipeKey& k) {
     auto it = g_pipes.find(k);
     if (it != g_pipes.end()) return it->second;
     MTLRenderPipelineDescriptor* d = [MTLRenderPipelineDescriptor new];
-    d.vertexFunction = (k.variant & 32) ? g_lineVfn[k.variant & 31] : g_vfn[k.variant & 31];
+    bool lit = (k.variant & 64) != 0;
+    d.vertexFunction = (k.variant & 32) ? g_lineVfn[k.variant & 31] : lit ? g_litVfn[k.variant & 31] : g_vfn[k.variant & 31];
     if (!d.vertexFunction) return nil;
-    d.fragmentFunction = g_ffn[k.variant & 31];
+    d.fragmentFunction = lit ? g_litFfn[k.variant & 31] : g_ffn[k.variant & 31];
+    if (!d.fragmentFunction) return nil;
     MTLRenderPipelineColorAttachmentDescriptor* c = d.colorAttachments[0];
     c.pixelFormat = (MTLPixelFormat)k.color;
     if (k.blend) {
@@ -407,6 +419,7 @@ struct Exec {
     int bCull = -1, bWinding = -1;
     float bBlendColor[4] = {NAN, NAN, NAN, NAN};
     bool wideLine = false;  // the draw being prepared expands lines into quads (glLineWidth > 1)
+    bool bLitBound = false; // advanced lighting inputs bound on this encoder
     float bBiasUnits = NAN, bBiasFactor = NAN;
     bool bViewportValid = false, bScissorValid = false;
     MTLViewport bViewport{};
@@ -523,6 +536,7 @@ static bool beginPass(Exec& x) {
     x.bPso = nil;
     x.bDss = nil;
     x.bCull = x.bWinding = -1;
+    x.bLitBound = false;
     for (float& c : x.bBlendColor) c = NAN;
     x.bBiasUnits = x.bBiasFactor = NAN;
     x.bViewportValid = x.bScissorValid = false;
@@ -734,11 +748,25 @@ static bool prepareDrawFull(Exec& x, uint32_t glPrim, int format, bool terrain) 
     k.writeMask = g.pipe.colorMask;
     bool modulate = true;
     for (int i = 0; i < 3; i++) if ((texMask & (FF_TEX0 << i)) && g.units[i].mode != 0x2100) modulate = false;
+    // shaders mode: the hand, particles and weather are drawn with the advanced lighting
+    const AdvLitContext& litc = advancedLitContext();
+    bool advLit = x.advReplay && x.auxDepth == 0 && litc.valid && !terrain && !x.wideLine && !logic &&
+                  (texMask & FF_TEX0) && g_litFfn[0] &&
+                  (g_phase == PH_HAND || g_phase == PH_PARTICLES || g_phase == PH_LIT_PARTICLES || g_phase == PH_WEATHER);
     k.variant = (g.frag.alphaTest && g.frag.alphaFunc != 0x207 ? 1 : 0) | (logic ? 2 : 0) | (flat ? 4 : 0) |
-                (terrain ? 8 : 0) | (modulate ? 16 : 0) | (x.wideLine ? 32 : 0);
+                (terrain ? 8 : 0) | (modulate ? 16 : 0) | (x.wideLine ? 32 : 0) | (advLit ? 64 : 0);
     id<MTLRenderPipelineState> pso = pipeline(k);
     if (!pso) return false;
     if (pso != x.bPso) { [x.enc setRenderPipelineState:pso]; x.bPso = pso; }
+    if (advLit && !x.bLitBound) {
+        [x.enc setFragmentBytes:&litc.frame length:sizeof litc.frame atIndex:6];
+        [x.enc setFragmentBuffer:litc.exposure offset:0 atIndex:7];
+        [x.enc setFragmentTexture:litc.shadowMap atIndex:3];
+        [x.enc setFragmentTexture:litc.skyLut atIndex:4];
+        [x.enc setFragmentSamplerState:litc.shadowCmp atIndex:3];
+        [x.enc setFragmentSamplerState:litc.linear atIndex:4];
+        x.bLitBound = true;
+    }
 
     id<MTLDepthStencilState> dss = depthState(g.depth.test && x.cur.depth, g.depth.func, g.depth.mask);
     if (dss != x.bDss) { [x.enc setDepthStencilState:dss]; x.bDss = dss; }
@@ -1305,6 +1333,7 @@ void executeFrame(id<MTLCommandBuffer> cb, const uint8_t* cmds, size_t len) {
             case OP_PHASE:
                 flushBatch(x);
                 g_phase = payload<uint32_t>(h);
+                x.stateDirty = true;   // some draws pick their pipeline by phase
                 if (g_phase == PH_WORLD_BEGIN_AUX) {
                     if (x.auxDepth++ == 0) { x.advReplaySaved = x.advReplay; x.advReplay = false; }
                     break;
