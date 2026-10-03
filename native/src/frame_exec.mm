@@ -15,9 +15,12 @@ namespace m189 {
 // Runtime options (set from Java, see metal189.engine.Native.setOption).
 int g_optQuadDiagonal = 1; // 1: split quads along v1-v3 like Apple's GL, 0: along v0-v2
 
+extern bool g_optPresent;
+
 void setOption(int key, int value) {
     switch (key) {
         case 1: g_optQuadDiagonal = value; break;
+        case 2: g_optPresent = value != 0; break;
         default: break;
     }
 }

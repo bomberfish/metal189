@@ -55,6 +55,8 @@ void submitPartial(const uint8_t* cmds, size_t len);
 void arenaGrow(size_t minBytes, int64_t* info);
 void waitIdle();
 void ensureScreenTargets();
+id<MTLTexture> screenForReadback();
+void setVSync(bool on);
 id<CAMetalDrawable> acquireDrawable();
 
 // Implemented by the frame executor.

@@ -48,9 +48,10 @@ void texGetImage(int id, int level, int format, int type, void* dst, size_t size
 void readPixels(int fbo, int x, int y, int w, int h, int format, int type, void* dst, size_t size) {
     Engine& e = engine();
     if (fbo == 0) {
-        if (!e.screenColor) return;
-        int H = (int)e.screenColor.height;
-        readTexture(e.screenColor, 0, x, H - (y + h), w, h, format, type, (uint8_t*)dst, size, true);
+        id<MTLTexture> screen = screenForReadback();
+        if (!screen) return;
+        int H = (int)screen.height;
+        readTexture(screen, 0, x, H - (y + h), w, h, format, type, (uint8_t*)dst, size, true);
     }
     // FBO reads go through the colour texture with GL row order; callers use glGetTexImage.
 }

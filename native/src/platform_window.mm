@@ -6,6 +6,7 @@
 // the Java side once per frame (Display.processMessages).
 
 #import "m189.h"
+#import "engine.h"
 #include <mutex>
 #include <vector>
 #include <mach/mach_time.h>
@@ -342,6 +343,7 @@ void windowSetFullscreen(bool fs) {
 }
 
 void windowSetVSync(bool on) {
+    setVSync(on);
     runOnMain(^{ if (g_layer) g_layer.displaySyncEnabled = on; });
 }
 

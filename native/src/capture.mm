@@ -12,7 +12,7 @@ bool captureToPng(int which, const char* path) {
     Engine& e = engine();
     id<MTLTexture> tex = nil;
     bool flip = false;
-    if (which == 0) tex = e.screenColor;
+    if (which == 0) tex = screenForReadback();
     else { TexEntry* t = texture(which); tex = t ? t->tex : nil; flip = true; }
     if (!tex) return false;
     waitIdle();
