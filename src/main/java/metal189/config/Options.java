@@ -20,7 +20,7 @@ public final class Options {
     public static final int NEEDS_SHADERS = 1, NEEDS_RT = 2;
 
     /** Settings pages after the main page, in menu order. */
-    public static final String[] PAGES = {"lighting", "water", "sky", "post", "rt"};
+    public static final String[] PAGES = {"lighting", "materials", "water", "sky", "post", "rt"};
 
     public static final class Opt {
         public final String key, page;
@@ -161,6 +161,16 @@ public final class Options {
         toggle("lighting", "waving", S);
         toggle("lighting", "autoExposure", S);
         slider("lighting", "exposure", S, 25, 400, 5, "%");
+
+        toggle("materials", "pbr", S);
+        named("materials", "pbrFormat", S, 2);
+        slider("materials", "pbrNormalStrength", S, 0, 200, 5, "%");
+        slider("materials", "pbrSpecularStrength", S, 0, 200, 5, "%");
+        slider("materials", "pbrEmissionStrength", S, 0, 300, 5, "%");
+        toggle("materials", "pom", S);
+        slider("materials", "pomDepth", S, 5, 50, 1, "%");
+        named("materials", "pomQuality", S, 4);
+        slider("materials", "pomDistance", S, 8, 64, 4, " blocks");
 
         toggle("water", "water", S);
         named("water", "waterStyle", S, 3);

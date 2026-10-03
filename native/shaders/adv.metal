@@ -79,6 +79,8 @@ struct GTerrainOut {
     float eyeZ;
     float3 tangentView [[flat]];    // d(position)/du of the quad, eye space
     float3 bitangentView [[flat]];  // d(position)/dv
+    float4 uvBounds [[flat]];       // the quad's atlas rectangle (min xy, max zw): parallax wraps inside it
+    float3 eyePos;
 };
 
 static float3 quadNormal(device const BlockVertex* verts, uint vid) {
@@ -146,15 +148,63 @@ vertex GTerrainOut gbuf_terrain_vertex(uint vid [[vertex_id]],
         float3 T = (e1 * d2.y - e2 * d1.y) * r, B = (e2 * d1.x - e1 * d2.x) * r;
         o.tangentView = (sectionMV * float4(T, 0)).xyz;
         o.bitangentView = (sectionMV * float4(B, 0)).xyz;
+        float2 t3 = float2(verts[b + 3].uv);
+        o.uvBounds = float4(min(min(t0, t1), min(t2, t3)), max(max(t0, t1), max(t2, t3)));
     }
+    o.eyePos = eye.xyz;
     return o;
+}
+
+// user settings (Pipeline.java TUNE_*)
+#define PBR_TUNE fr.tune[6]   // x: normal strength, y: specular strength, z: emission strength, w: format (0 LabPBR, 1 SEUS)
+#define POM_TUNE fr.tune[7]   // x: depth (blocks, 0 = off), y: steps, z: distance (blocks), w: PBR enabled
+
+// Parallax occlusion mapping: march the view ray into the height field (the normal atlas'
+// alpha: 1 = surface, 0 = deepest) until it passes below it, then interpolate between the
+// last two steps. The march stays inside the quad's sprite (wrapping), and samples use the
+// unshifted coordinates' derivatives so the mip level does not jump.
+static float2 parallaxUv(texture2d<float> nAtlas, sampler s, float2 uv, float2 dx, float2 dy, float4 bounds,
+                         float3 eyeDir, float3 T, float3 B, float3 N, float depth, int steps) {
+    float dn = dot(eyeDir, N);   // < 0 when looking at the front
+    if (dn > -0.08 || depth <= 0.0) return uv;
+    float3 lat = eyeDir - dn * N;
+    float2 shift = float2(dot(lat, T) / max(dot(T, T), 1e-12), dot(lat, B) / max(dot(B, B), 1e-12)) * (depth / -dn);
+    float2 size = max(bounds.zw - bounds.xy, float2(1e-6));
+    float stepH = 1.0 / float(steps);
+    float h = 1.0, prevH = 1.0, surf = 1.0, prevSurf = 1.0;
+    float2 cur = uv, prev = uv;
+    for (int i = 0; i < steps; i++) {
+        surf = nAtlas.sample(s, bounds.xy + fract((cur - bounds.xy) / size) * size, gradient2d(dx, dy)).a;
+        if (surf >= h) break;
+        prev = cur;
+        prevH = h;
+        prevSurf = surf;
+        h -= stepH;
+        cur += shift * stepH;
+    }
+    float after = surf - h, before = prevSurf - prevH;
+    float w = after - before != 0.0 ? saturate(after / (after - before)) : 0.0;
+    float2 hit = mix(cur, prev, w);
+    return bounds.xy + fract((hit - bounds.xy) / size) * size;
 }
 
 fragment GBufferOut gbuf_terrain_fragment(GTerrainOut in [[stage_in]], bool front [[front_facing]],
                                           constant AdvFrame& fr [[buffer(1)]],
                                           texture2d<float> atlas [[texture(0)]], sampler s [[sampler(0)]],
                                           texture2d<float> nAtlas [[texture(1)]], texture2d<float> sAtlas [[texture(2)]]) {
-    float4 t = atlas.sample(s, in.uv);
+    float2 dx = dfdx(in.uv), dy = dfdy(in.uv);
+    float2 uv = in.uv;
+    bool pbrOn = (fr.flags.x & ADV_PBR) != 0;
+    float pomDepth = POM_TUNE.x * saturate((POM_TUNE.z - in.eyeZ) / max(POM_TUNE.z * 0.25, 1.0));
+    if (!ac_alphaTest && pbrOn && pomDepth > 0.0) {
+        float lt = length(in.tangentView), lb = length(in.bitangentView);
+        if (lt > 1e-8 && lb > 1e-8) {
+            float3 Nf = front ? in.normalView : -in.normalView;
+            uv = parallaxUv(nAtlas, s, in.uv, dx, dy, in.uvBounds, normalize(in.eyePos), in.tangentView, in.bitangentView,
+                            Nf, pomDepth, int(POM_TUNE.y));
+        }
+    }
+    float4 t = atlas.sample(s, uv, gradient2d(dx, dy));
     if (ac_alphaTest && t.a * in.color.a < 0.1) discard_fragment();
     GBufferOut o;
     float3 c = t.rgb * in.color.rgb / in.shade;
@@ -165,24 +215,42 @@ fragment GBufferOut gbuf_terrain_fragment(GTerrainOut in [[stage_in]], bool fron
     float emission = in.emission * smoothstep(0.35, 0.9, dot(t.rgb, float3(0.299, 0.587, 0.114)));
     float rough = in.material == 4 ? 0.3 : in.material == 2 ? 0.05 : 0.85;
     o.spec = float4(0);
-    if (fr.flags.x & ADV_PBR) {
+    if (pbrOn) {
         // LabPBR: _n = normal xy (OpenGL convention, +y up the texture), AO, height;
         //         _s = smoothness, F0 (>= 230: metal), porosity/SSS, emission (255 = none)
-        float4 nm = nAtlas.sample(s, in.uv);
-        float2 xy = nm.rg * 2.0 - 1.0;
-        float3 ts = float3(xy, sqrt(saturate(1.0 - dot(xy, xy))));
+        // SEUS (older format): _n = normal xyz, height; _s = smoothness, metalness, emission
+        bool seus = PBR_TUNE.w > 0.5;
+        float4 nm = nAtlas.sample(s, uv, gradient2d(dx, dy));
+        float3 ts;
+        if (seus) {
+            ts = nm.rgb * 2.0 - 1.0;
+        } else {
+            float2 xy = nm.rg * 2.0 - 1.0;
+            ts = float3(xy, sqrt(saturate(1.0 - dot(xy, xy))));
+        }
+        ts.xy *= PBR_TUNE.x;   // normal map strength
+        ts = dot(ts, ts) > 1e-8 ? normalize(ts) : float3(0, 0, 1);
         float lt = length(in.tangentView), lb = length(in.bitangentView);
         if (lt > 1e-8 && lb > 1e-8) {
             float3 T = in.tangentView / lt, B = in.bitangentView / lb;
             if (!front) { T = -T; B = -B; }
             n = normalize(T * ts.x - B * ts.y + n * ts.z);
         }
-        o.albedo.a *= nm.b;
-        float4 sp = sAtlas.sample(s, in.uv);
+        if (!seus) o.albedo.a *= mix(1.0, nm.b, saturate(PBR_TUNE.x));
+        float4 sp = sAtlas.sample(s, uv, gradient2d(dx, dy));
         if (any(sp > 0.0)) {
-            rough = (1.0 - sp.r) * (1.0 - sp.r);
-            o.spec = float4(sp.g, sp.b, 1.0, 0.0);
-            if (sp.a < 254.5 / 255.0) emission = max(emission, sp.a);
+            float specK = PBR_TUNE.y;
+            float smooth = saturate(sp.r * specK);
+            rough = mix(rough, (1.0 - smooth) * (1.0 - smooth), saturate(specK));
+            if (seus) {
+                bool metal = sp.g >= 0.5;
+                o.spec = float4(metal ? 1.0 : 0.04 * saturate(specK), 0.0, 1.0, 0.0);
+                emission = max(emission, saturate(sp.b * PBR_TUNE.z));
+            } else {
+                bool metal = sp.g >= 229.5 / 255.0;
+                o.spec = float4(metal ? sp.g : min(sp.g * specK, 229.0 / 255.0), sp.b, 1.0, 0.0);
+                if (sp.a < 254.5 / 255.0) emission = max(emission, saturate(sp.a * PBR_TUNE.z));
+            }
         }
     }
     o.normal = float4(n, emission);

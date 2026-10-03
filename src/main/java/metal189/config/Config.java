@@ -60,6 +60,17 @@ public final class Config {
     public static boolean underwaterOverlay = true;  // vanilla's water texture over the screen (both renderers)
     public static boolean hideUnderwaterParticles = true;   // shaders mode: no vanilla suspended particles in water
 
+    // materials (resource-pack PBR textures)
+    public static boolean pbr = true;
+    public static int pbrFormat = 0;              // 0 LabPBR, 1 SEUS (older format)
+    public static int pbrNormalStrength = 100;    // percent
+    public static int pbrSpecularStrength = 100;
+    public static int pbrEmissionStrength = 100;
+    public static boolean pom = true;             // parallax occlusion mapping
+    public static int pomDepth = 20;              // percent of a block
+    public static int pomQuality = 1;             // 0 low .. 3 ultra (16..128 steps)
+    public static int pomDistance = 24;           // blocks
+
     public static final int[] SHADOW_RESOLUTIONS = {2048, 4096, 8192};
     public static final int[] SHADOW_DISTANCES = {64, 96, 112, 128, 160, 192};
 

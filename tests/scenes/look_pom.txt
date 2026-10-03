@@ -1,0 +1,43 @@
+sleep 3
+resourcepack Nostalgia PBR 1.2.0.zip | §bAVPBR-1-6-5.zip
+sleep 8
+world lookpom 42 flat
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /weather clear
+cmd /time set 3000
+cmd /tp @p -500.5 5.6 -497.5 160 10
+sleep 4
+cmd /kill @e[type=!Player]
+cmd /fill -512 4 -512 -488 9 -488 air
+cmd /fill -512 3 -512 -488 3 -488 cobblestone
+cmd /fill -506 4 -503 -501 6 -503 stonebrick
+cmd /fill -500 4 -503 -496 6 -503 brick_block
+cmd /fill -495 4 -503 -493 6 -503 diamond_ore
+sleep 6
+capture CAPTURE_A
+config pom false
+sleep 2
+capture CAPTURE_B
+config pom true
+config pbr false
+sleep 2
+capture CAPTURE_C
+config pbr true
+config pomDepth 50
+config pomQuality 3
+sleep 2
+capture CAPTURE_D
+config pomDepth 20
+config pomQuality 1
+config pbrNormalStrength 200
+sleep 2
+capture CAPTURE_E
+config pbrNormalStrength 100
+config pbrFormat 1
+sleep 2
+capture CAPTURE_F
+config pbrFormat 0
+quit

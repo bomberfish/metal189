@@ -114,6 +114,16 @@ public final class Pipeline {
         // lighting: foliage translucency, flags (bit 0: plant shadows)
         t[20] = Config.foliageTranslucency / 100f;
         t[21] = Config.plantShadows ? 1 : 0;
+        // materials: normal / specular / emission strength, format; parallax depth, steps,
+        // distance, PBR enabled
+        t[24] = Config.pbrNormalStrength / 100f;
+        t[25] = Config.pbrSpecularStrength / 100f;
+        t[26] = Config.pbrEmissionStrength / 100f;
+        t[27] = Config.pbrFormat;
+        t[28] = Config.pom ? Config.pomDepth / 100f : 0f;
+        t[29] = 16 << Math.max(0, Math.min(3, Config.pomQuality));
+        t[30] = Config.pomDistance;
+        t[31] = Config.pbr ? 1 : 0;
         for (int i = 0; i < TUNING; i++) metal189.engine.Mem.putFloat(tuning + i * 4L, t[i]);
         Native.advSetTuning(tuning, TUNING);
     }

@@ -636,7 +636,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
     if (!S.exposureKernel) features &= ~ADV_AUTOEXP;
     TexEntry* pbrN = g_pbrNormal ? texture(g_pbrNormal) : nullptr;
     TexEntry* pbrS = g_pbrSpecular ? texture(g_pbrSpecular) : nullptr;
-    if (pbrN && pbrN->tex && pbrS && pbrS->tex) features |= ADV_PBR;
+    if (pbrN && pbrN->tex && pbrS && pbrS->tex && g_tuning[31] > 0.5f) features |= ADV_PBR;   // tune[7].w: PBR enabled
     else features &= ~ADV_PBR;
     bool cloudsOn = (features & ADV_CLOUDS) != 0;
     fr.post.y = cloudsOn && S.cloudHistory && fr.taa.w > 0.5f ? 1.0f : 0.0f; // teleports reset the cloud history too
