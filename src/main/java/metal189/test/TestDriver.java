@@ -145,6 +145,20 @@ public final class TestDriver {
                 if (mc.thePlayer != null) mc.thePlayer.sendChatMessage(c);
                 return true;
             }
+            case "dim": {
+                final int dim = Integer.parseInt(a[1]);
+                final net.minecraft.server.MinecraftServer srv = net.minecraft.server.MinecraftServer.getServer();
+                if (srv != null && mc.thePlayer != null) {
+                    final String name = mc.thePlayer.getName();
+                    srv.addScheduledTask(new Runnable() {
+                        public void run() {
+                            net.minecraft.entity.player.EntityPlayerMP p = srv.getConfigurationManager().getPlayerByUsername(name);
+                            if (p != null) p.travelToDimension(dim);
+                        }
+                    });
+                }
+                return true;
+            }
             case "hurtall":
                 hurtTicks = Integer.parseInt(a[1]);
                 return true;

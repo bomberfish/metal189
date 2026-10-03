@@ -1,0 +1,22 @@
+sleep 3
+world dims1 99
+waitWorld
+cmd /gamerule doMobSpawning false
+cmd /gamerule doDaylightCycle false
+cmd /time set 6000
+dim -1
+sleep 20
+waitWorld
+cmd /kill @e[type=!Player]
+cmd /tp @p ~ ~ ~ 45 15
+sleep 8
+cmd /kill @e[type=!Player]
+sleep 2
+capture CAPTURE_A
+dim 1
+sleep 8
+waitWorld
+cmd /tp @p ~ ~ ~ 90 -10
+sleep 6
+capture CAPTURE_B
+quit
