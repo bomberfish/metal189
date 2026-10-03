@@ -48,4 +48,8 @@ public final class GL20 {
     public static void glVertexAttribPointer(int i, int size, int type, boolean norm, int stride, long off) {}
     public static void glDrawBuffers(int b) {}
     public static void glDrawBuffers(IntBuffer b) {}
+    // separate front/back stencil state is applied to both faces
+    public static void glStencilFuncSeparate(int face, int func, int ref, int mask) { metal189.gl.GL.stencilFunc(func, ref, mask); }
+    public static void glStencilOpSeparate(int face, int sfail, int dpfail, int dppass) { metal189.gl.GL.stencilOp(sfail, dpfail, dppass); }
+    public static void glStencilMaskSeparate(int face, int mask) { metal189.gl.GL.stencilMask(mask); }
 }

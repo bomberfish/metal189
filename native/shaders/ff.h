@@ -76,6 +76,7 @@ struct FFUniforms {
     m189_float4 alpha;         // x = alpha ref
     m189_uint4 flags;
     m189_uint4 env[3];
+    m189_float4 raster;        // x: point size, y: line stipple factor (0 = off), z: stipple pattern
 };
 
 // Per-draw transform, bound inline at buffer(3) for every draw.

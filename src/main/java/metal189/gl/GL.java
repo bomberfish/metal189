@@ -30,6 +30,13 @@ public final class GL {
     public static int depthFunc = GL_LESS;
     public static boolean depthMask = true;
     public static boolean stencilTest;
+    // stencil state (GL defaults); front and back share it (glStencil*Separate maps here too)
+    public static int stencilFunc = 0x0207, stencilRef, stencilValueMask = 0xFFFFFFFF;
+    public static int stencilFail = 0x1E00, stencilZFail = 0x1E00, stencilZPass = 0x1E00, stencilWriteMask = 0xFFFFFFFF;
+    public static float pointSize = 1f;
+    public static int polygonMode = 0x1B02;   // GL_FILL (front and back)
+    public static boolean lineStipple, lineSmooth;
+    public static int stippleFactor = 1, stipplePattern = 0xFFFF;
 
     // ---- raster ----
     public static boolean cull;
@@ -134,7 +141,9 @@ public final class GL {
             case GL_POLYGON_OFFSET_LINE: if (polyOffsetLine != on) { polyOffsetLine = on; dirty |= D_RASTER; } return;
             case GL_COLOR_LOGIC_OP: if (logicOpEnable != on) { logicOpEnable = on; dirty |= D_PIPE; } return;
             case GL_SCISSOR_TEST: if (scissorTest != on) { scissorTest = on; dirty |= D_VIEWPORT; } return;
-            case GL_STENCIL_TEST: stencilTest = on; dirty |= D_DEPTH; return;
+            case GL_STENCIL_TEST: if (stencilTest != on) { stencilTest = on; dirty |= D_DEPTH; } return;
+            case 0x0B24 /* GL_LINE_STIPPLE */: if (lineStipple != on) { lineStipple = on; dirty |= D_RASTER; } return;
+            case 0x0B20 /* GL_LINE_SMOOTH */: if (lineSmooth != on) { lineSmooth = on; dirty |= D_RASTER; } return;
             case GL_TEXTURE_GEN_S: case GL_TEXTURE_GEN_T: case GL_TEXTURE_GEN_R: case GL_TEXTURE_GEN_Q: {
                 int c = cap - GL_TEXTURE_GEN_S;
                 if (texGen[activeUnit][c] != on) { texGen[activeUnit][c] = on; dirty |= D_TEXGEN; }
@@ -164,6 +173,9 @@ public final class GL {
             case GL_POLYGON_OFFSET_FILL: return polyOffsetFill;
             case GL_COLOR_LOGIC_OP: return logicOpEnable;
             case GL_SCISSOR_TEST: return scissorTest;
+            case GL_STENCIL_TEST: return stencilTest;
+            case 0x0B24: return lineStipple;
+            case 0x0B20: return lineSmooth;
             default:
                 if (cap >= GL_LIGHT0 && cap < GL_LIGHT0 + 8) return lightOn[cap - GL_LIGHT0];
                 return false;
@@ -190,6 +202,35 @@ public final class GL {
     }
 
     public static void logicOp(int op) { if (op != logicOp) { logicOp = op; dirty |= D_PIPE; } }
+
+    public static void stencilFunc(int func, int ref, int mask) {
+        if (func != stencilFunc || ref != stencilRef || mask != stencilValueMask) {
+            stencilFunc = func; stencilRef = ref; stencilValueMask = mask;
+            dirty |= D_DEPTH;
+        }
+    }
+
+    public static void stencilOp(int fail, int zfail, int zpass) {
+        if (fail != stencilFail || zfail != stencilZFail || zpass != stencilZPass) {
+            stencilFail = fail; stencilZFail = zfail; stencilZPass = zpass;
+            dirty |= D_DEPTH;
+        }
+    }
+
+    public static void stencilMask(int mask) { if (mask != stencilWriteMask) { stencilWriteMask = mask; dirty |= D_DEPTH; } }
+
+    public static void pointSize(float s) { s = Math.max(1f, s); if (s != pointSize) { pointSize = s; dirty |= D_RASTER; } }
+
+    /** Only GL_FRONT_AND_BACK is honoured; separate front/back modes are rare. */
+    public static void polygonMode(int face, int mode) {
+        if (face == 0x0408 /* GL_FRONT_AND_BACK */ && mode != polygonMode) { polygonMode = mode; dirty |= D_RASTER; }
+    }
+
+    public static void lineStipple(int factor, int pattern) {
+        factor = Math.max(1, Math.min(256, factor));
+        pattern &= 0xFFFF;
+        if (factor != stippleFactor || pattern != stipplePattern) { stippleFactor = factor; stipplePattern = pattern; dirty |= D_RASTER; }
+    }
 
     public static void blendColor(float r, float g, float b, float a) {
         r = Math.max(0f, Math.min(1f, r)); g = Math.max(0f, Math.min(1f, g));

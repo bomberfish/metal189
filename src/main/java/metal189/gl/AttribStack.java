@@ -8,13 +8,16 @@ import java.util.ArrayDeque;
 public final class AttribStack {
     private AttribStack() {}
 
-    static final int CURRENT = 0x1, LINE = 0x4, POLYGON = 0x8, LIGHTING = 0x40, FOG = 0x80, DEPTH = 0x100,
+    static final int CURRENT = 0x1, POINT = 0x2, LINE = 0x4, POLYGON = 0x8, LIGHTING = 0x40, FOG = 0x80, DEPTH = 0x100,
+            STENCIL = 0x400,
             VIEWPORT = 0x800, TRANSFORM = 0x1000, ENABLE = 0x2000, COLOR = 0x4000, TEXTURE = 0x40000, SCISSOR = 0x80000;
 
     private static final class Snap {
         int mask;
         boolean blend, alphaTest, depthTest, cull, fog, lighting, colorMaterial, normalize, rescaleNormal,
-                polyOffsetFill, polyOffsetLine, logicOpEnable, scissorTest;
+                polyOffsetFill, polyOffsetLine, logicOpEnable, scissorTest, stencilTest, lineStipple, lineSmooth;
+        int stencilFunc, stencilRef, stencilValueMask, stencilFail, stencilZFail, stencilZPass, stencilWriteMask;
+        float pointSize; int polygonMode, stippleFactor, stipplePattern;
         boolean[] tex2D = new boolean[UNITS], lightOn = new boolean[8];
         boolean[][] texGen = new boolean[UNITS][4];
         int blendSrcRGB, blendDstRGB, blendSrcA, blendDstA, blendEq, colorMask, logicOp, alphaFunc;
@@ -40,6 +43,10 @@ public final class AttribStack {
         s.lighting = lighting; s.colorMaterial = colorMaterial; s.normalize = normalize; s.rescaleNormal = rescaleNormal;
         s.polyOffsetFill = polyOffsetFill; s.polyOffsetLine = polyOffsetLine; s.logicOpEnable = logicOpEnable;
         s.scissorTest = scissorTest;
+        s.stencilTest = stencilTest; s.lineStipple = lineStipple; s.lineSmooth = lineSmooth;
+        s.stencilFunc = stencilFunc; s.stencilRef = stencilRef; s.stencilValueMask = stencilValueMask;
+        s.stencilFail = stencilFail; s.stencilZFail = stencilZFail; s.stencilZPass = stencilZPass; s.stencilWriteMask = stencilWriteMask;
+        s.pointSize = pointSize; s.polygonMode = polygonMode; s.stippleFactor = stippleFactor; s.stipplePattern = stipplePattern;
         System.arraycopy(tex2D, 0, s.tex2D, 0, UNITS);
         System.arraycopy(lightOn, 0, s.lightOn, 0, 8);
         for (int u = 0; u < UNITS; u++) {
@@ -77,6 +84,7 @@ public final class AttribStack {
             lighting = s.lighting; colorMaterial = s.colorMaterial; normalize = s.normalize; rescaleNormal = s.rescaleNormal;
             polyOffsetFill = s.polyOffsetFill; polyOffsetLine = s.polyOffsetLine; logicOpEnable = s.logicOpEnable;
             scissorTest = s.scissorTest;
+            stencilTest = s.stencilTest; lineStipple = s.lineStipple; lineSmooth = s.lineSmooth;
             System.arraycopy(s.tex2D, 0, tex2D, 0, UNITS);
             System.arraycopy(s.lightOn, 0, lightOn, 0, 8);
             for (int u = 0; u < UNITS; u++) System.arraycopy(s.texGen[u], 0, texGen[u], 0, 4);
@@ -92,7 +100,17 @@ public final class AttribStack {
             cull = s.cull; cullFace = s.cullFace; frontFace = s.frontFace;
             polyOffsetFill = s.polyOffsetFill; polyOffsetLine = s.polyOffsetLine; polyFactor = s.polyFactor; polyUnits = s.polyUnits;
         }
-        if ((m & LINE) != 0) lineWidth = s.lineWidth;
+        if ((m & LINE) != 0) {
+            lineWidth = s.lineWidth; lineStipple = s.lineStipple; lineSmooth = s.lineSmooth;
+            stippleFactor = s.stippleFactor; stipplePattern = s.stipplePattern;
+        }
+        if ((m & POINT) != 0) pointSize = s.pointSize;
+        if ((m & POLYGON) != 0) polygonMode = s.polygonMode;
+        if ((m & STENCIL) != 0) {
+            stencilTest = s.stencilTest;
+            stencilFunc = s.stencilFunc; stencilRef = s.stencilRef; stencilValueMask = s.stencilValueMask;
+            stencilFail = s.stencilFail; stencilZFail = s.stencilZFail; stencilZPass = s.stencilZPass; stencilWriteMask = s.stencilWriteMask;
+        }
         if ((m & LIGHTING) != 0) {
             lighting = s.lighting; colorMaterial = s.colorMaterial; shadeModel = s.shadeModel;
             System.arraycopy(s.lightOn, 0, lightOn, 0, 8);

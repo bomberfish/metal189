@@ -297,6 +297,10 @@ public final class TestDriver {
                 // menufreeze TIMER : pin the title screen's panorama rotation and splash text
                 menuFreeze = Integer.parseInt(a[1]);
                 return true;
+            case "compat":
+                // compat on : enable the simple-GL mod test scene (m189compat.CompatScene)
+                if ("on".equals(a[1])) m189compat.CompatScene.enable();
+                return true;
             case "toggle":
                 // same path as the toggle keybind (saves config/metal189.properties)
                 metal189.world.Pipeline.toggle();

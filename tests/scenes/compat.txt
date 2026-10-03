@@ -1,0 +1,19 @@
+sleep 3
+world compat1 11 flat
+waitWorld
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /time set 6000
+cmd /weather clear
+cmd /tp @p 0.5 4 0.5 180 15
+sleep 3
+cmd /kill @e[type=!Player]
+cmd /fill -6 4 -12 6 8 -2 air
+cmd /fill -6 4 -9 6 6 -9 stonebrick
+cmd /summon ArmorStand -3.5 4 -7.5 {NoGravity:1}
+cmd /summon Pig 1.5 4 -11 {NoAI:1,Rotation:[90f,0f]}
+cmd /summon Zombie 4.5 4 -11 {NoAI:1,Rotation:[0f,0f]}
+compat on
+sleep 4
+capture CAPTURE_A
+quit

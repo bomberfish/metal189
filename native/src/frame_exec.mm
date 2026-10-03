@@ -84,7 +84,7 @@ struct PipeKeyHash {
 };
 
 static std::unordered_map<PipeKey, id<MTLRenderPipelineState>, PipeKeyHash> g_pipes;
-static std::unordered_map<uint32_t, id<MTLDepthStencilState>> g_dss;
+static std::unordered_map<uint64_t, id<MTLDepthStencilState>> g_dss;
 static id<MTLFunction> g_vfn[32], g_ffn[32], g_lineVfn[32];
 static id<MTLFunction> g_litVfn[32], g_litFfn[32];   // fc_advLit variants (non-terrain)
 static id<MTLFunction> g_clearV, g_clearF;
@@ -254,13 +254,43 @@ static id<MTLRenderPipelineState> clearPipeline(uint32_t color, uint32_t depth, 
     return ps;
 }
 
-static id<MTLDepthStencilState> depthState(bool test, uint32_t func, bool write) {
-    uint32_t key = (test ? 1 : 0) | (write ? 2 : 0) | (func & 0xF) << 4;
+static MTLStencilOperation stencilOperation(uint32_t gl) {
+    switch (gl) {
+        case 0: return MTLStencilOperationZero;
+        case 0x1E01: return MTLStencilOperationReplace;
+        case 0x1E02: return MTLStencilOperationIncrementClamp;
+        case 0x1E03: return MTLStencilOperationDecrementClamp;
+        case 0x150A: return MTLStencilOperationInvert;
+        case 0x8507: return MTLStencilOperationIncrementWrap;
+        case 0x8508: return MTLStencilOperationDecrementWrap;
+        default: return MTLStencilOperationKeep;   // GL_KEEP
+    }
+}
+
+// st: stencil state to apply (null when the stencil test is off or the target has no stencil).
+static id<MTLDepthStencilState> depthState(bool test, uint32_t func, bool write, const DepthState* st = nullptr) {
+    uint64_t key = (test ? 1 : 0) | (write ? 2 : 0) | (uint64_t)(func & 0xF) << 4;
+    if (st) {
+        key |= 1ull << 8 | (uint64_t)(st->sFunc & 0xF) << 9 | (uint64_t)stencilOperation(st->sFail) << 13 |
+               (uint64_t)stencilOperation(st->sZFail) << 16 | (uint64_t)stencilOperation(st->sZPass) << 19 |
+               (uint64_t)(st->sValueMask & 0xFF) << 22 | (uint64_t)(st->sWriteMask & 0xFF) << 30;
+    }
     auto it = g_dss.find(key);
     if (it != g_dss.end()) return it->second;
     MTLDepthStencilDescriptor* d = [MTLDepthStencilDescriptor new];
     d.depthCompareFunction = test ? compareFn(func) : MTLCompareFunctionAlways;
     d.depthWriteEnabled = test && write; // GL never writes depth with the test disabled
+    if (st) {
+        MTLStencilDescriptor* sd = [MTLStencilDescriptor new];
+        sd.stencilCompareFunction = compareFn(st->sFunc);
+        sd.stencilFailureOperation = stencilOperation(st->sFail);
+        sd.depthFailureOperation = stencilOperation(st->sZFail);
+        sd.depthStencilPassOperation = stencilOperation(st->sZPass);
+        sd.readMask = st->sValueMask & 0xFF;
+        sd.writeMask = st->sWriteMask & 0xFF;
+        d.frontFaceStencil = sd;
+        d.backFaceStencil = sd;
+    }
     id<MTLDepthStencilState> s = [device() newDepthStencilStateWithDescriptor:d];
     g_dss[key] = s;
     return s;
@@ -420,6 +450,7 @@ struct Exec {
     float bBlendColor[4] = {NAN, NAN, NAN, NAN};
     bool wideLine = false;  // the draw being prepared expands lines into quads (glLineWidth > 1)
     bool bLitBound = false; // advanced lighting inputs bound on this encoder
+    int bStencilRef = -1;
     float bBiasUnits = NAN, bBiasFactor = NAN;
     bool bViewportValid = false, bScissorValid = false;
     MTLViewport bViewport{};
@@ -537,6 +568,7 @@ static bool beginPass(Exec& x) {
     x.bDss = nil;
     x.bCull = x.bWinding = -1;
     x.bLitBound = false;
+    x.bStencilRef = -1;
     for (float& c : x.bBlendColor) c = NAN;
     x.bBiasUnits = x.bBiasFactor = NAN;
     x.bViewportValid = x.bScissorValid = false;
@@ -673,6 +705,9 @@ static size_t buildUniforms(Exec& x, uint32_t texMask) {
     uint32_t fogMode = g.frag.fogMode == 0x2601 ? 0 : g.frag.fogMode == 0x0801 ? 2 : 1;
     u->flags = simd_make_uint4(flags, genModes, fogMode, g.frag.alphaFunc - 0x200);
     u->alpha = simd_make_float4(g.frag.alphaRef, (float)g.pipe.logicOp, 0, 0);
+    u->raster = simd_make_float4(std::max(1.0f, g.raster.pointSize),
+                                 g.raster.stipple ? (float)(g.raster.stipple >> 16) : 0.0f,
+                                 (float)(g.raster.stipple & 0xFFFF), 0);
     for (int i = 0; i < 3; i++) {
         const UnitState& s = g.units[i];
         u->envColor[i] = v4(s.envColor);
@@ -768,8 +803,13 @@ static bool prepareDrawFull(Exec& x, uint32_t glPrim, int format, bool terrain) 
         x.bLitBound = true;
     }
 
-    id<MTLDepthStencilState> dss = depthState(g.depth.test && x.cur.depth, g.depth.func, g.depth.mask);
+    bool stencilOn = g.depth.stencil && stencilFormat(x.cur) != (uint32_t)MTLPixelFormatInvalid;
+    id<MTLDepthStencilState> dss = depthState(g.depth.test && x.cur.depth, g.depth.func, g.depth.mask, stencilOn ? &g.depth : nullptr);
     if (dss != x.bDss) { [x.enc setDepthStencilState:dss]; x.bDss = dss; }
+    if (stencilOn && x.bStencilRef != (int)(g.depth.sRef & 0xFF)) {
+        [x.enc setStencilReferenceValue:g.depth.sRef & 0xFF];
+        x.bStencilRef = (int)(g.depth.sRef & 0xFF);
+    }
 
     // lines are never culled, also when expanded into quads
     int cull = g.raster.cull && !x.wideLine ? (g.raster.cullFace == 0x404 ? (int)MTLCullModeFront : (int)MTLCullModeBack)
@@ -848,16 +888,22 @@ static uint32_t* allocIndices(Exec& x, uint32_t count, id<MTLBuffer>* buf, size_
     return p;
 }
 
-// GL's non-antialiased line width in pixels (rounded, at least 1).
-static float lineWidthPx() { return std::max(1.0f, std::round(g.raster.lineWidth)); }
+// GL's line width in pixels: rounded (at least 1) for aliased lines, exact for smooth ones.
+static float lineWidthPx() {
+    return g.raster.lineSmooth ? std::max(0.1f, g.raster.lineWidth) : std::max(1.0f, std::round(g.raster.lineWidth));
+}
 
-static bool isWideLine(uint32_t prim) { return primClass(prim) == PC_LINE && lineWidthPx() > 1.0f && g_lineVfn[0]; }
+// Lines expanded into quads by ff_line_vertex: wider than 1 px, stippled or antialiased.
+static bool expandLines() {
+    return (lineWidthPx() > 1.0f || g.raster.stipple != 0 || g.raster.lineSmooth) && g_lineVfn[0];
+}
+static bool isWideLine(uint32_t prim) { return primClass(prim) == PC_LINE && expandLines(); }
 
-// Draws lines wider than 1 px as quads (ff_line_vertex): segment endpoint pairs go to
-// buffer(4), six vertices per segment.
-static void drawWideLines(Exec& x, id<MTLBuffer> vb, size_t vbOffset, uint32_t prim, uint32_t count, uint32_t base, int format) {
+// Draws n segment endpoint indices (written by `write`) as expanded lines: pairs go to
+// buffer(4), six vertices per segment. `prim` only selects the GL state (a line type).
+template <typename Write>
+static void drawExpandedLines(Exec& x, id<MTLBuffer> vb, size_t vbOffset, uint32_t prim, uint32_t n, int format, Write write) {
     flushBatch(x);
-    uint32_t n = indexCount(prim, count);
     if (n < 2) return;
     x.wideLine = true;
     bool ok = prepareDraw(x, prim, format);
@@ -871,14 +917,82 @@ static void drawWideLines(Exec& x, id<MTLBuffer> vb, size_t vbOffset, uint32_t p
     id<MTLBuffer> ib;
     size_t start;
     uint32_t* idx = allocIndices(x, n, &ib, &start);
-    writeIndices(idx, prim, count, base, false);   // (a, b) pairs in GL order
+    write(idx);
     [x.enc setVertexBuffer:ib offset:start * 4 atIndex:4];
     float vw = (float)std::max(1, std::abs(g.vp.vp[2])), vh = (float)std::max(1, std::abs(g.vp.vp[3]));
-    simd_float4 lp = simd_make_float4(vw, vh, lineWidthPx(), 0);
+    simd_float4 lp = simd_make_float4(vw, vh, lineWidthPx(), g.raster.lineSmooth ? 1.0f : 0.0f);
     [x.enc setVertexBytes:&lp length:sizeof lp atIndex:5];
     [x.enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:(n / 2) * 6];
     g_stats.arenaDraws++;
     x.stateDirty = true;   // the next draw rebinds its own pipeline
+}
+
+static void drawWideLines(Exec& x, id<MTLBuffer> vb, size_t vbOffset, uint32_t prim, uint32_t count, uint32_t base, int format) {
+    uint32_t n = indexCount(prim, count);
+    drawExpandedLines(x, vb, vbOffset, prim, n, format, [&](uint32_t* idx) { writeIndices(idx, prim, count, base, false); });
+}
+
+// glPolygonMode(GL_FRONT_AND_BACK, GL_LINE): the edges GL draws for each polygon.
+static uint32_t edgeIndexCount(uint32_t prim, uint32_t n) {
+    switch (prim) {
+        case 4: return (n / 3) * 6;                        // triangles
+        case 5: case 6: return n >= 3 ? (n - 2) * 6 : 0;   // strip / fan: each triangle's edges
+        case 7: return (n / 4) * 8;                        // quads: four edges, no diagonal
+        case 8: return n >= 4 ? ((n - 2) / 2) * 8 : 0;     // quad strip
+        case 9: return n >= 2 ? n * 2 : 0;                 // polygon: its outline
+        default: return 0;
+    }
+}
+
+static void writeEdgeIndices(uint32_t* o, uint32_t prim, uint32_t n, uint32_t b) {
+    auto edge = [&](uint32_t p, uint32_t q) { *o++ = b + p; *o++ = b + q; };
+    switch (prim) {
+        case 4: for (uint32_t i = 0; i + 2 < n; i += 3) { edge(i, i + 1); edge(i + 1, i + 2); edge(i + 2, i); } break;
+        case 5: for (uint32_t k = 0; k + 2 < n; k++) { edge(k, k + 1); edge(k + 1, k + 2); edge(k + 2, k); } break;
+        case 6: for (uint32_t k = 1; k + 1 < n; k++) { edge(0, k); edge(k, k + 1); edge(k + 1, 0); } break;
+        case 7: for (uint32_t q = 0; q + 3 < n; q += 4) { edge(q, q + 1); edge(q + 1, q + 2); edge(q + 2, q + 3); edge(q + 3, q); } break;
+        case 8: for (uint32_t k = 0; k + 3 < n; k += 2) { edge(k, k + 1); edge(k + 1, k + 3); edge(k + 3, k + 2); edge(k + 2, k); } break;
+        case 9: for (uint32_t i = 0; i < n; i++) edge(i, (i + 1) % n); break;
+        default: break;
+    }
+}
+
+// Polygons drawn in GL_LINE or GL_POINT polygon mode. Returns false for normal fill.
+// (GL would still cull back-facing polygons first; edges are drawn for all of them.)
+static bool drawPolygonMode(Exec& x, id<MTLBuffer> vb, size_t vbOffset, uint32_t prim, uint32_t count, uint32_t base, int format) {
+    uint32_t mode = g.raster.polyMode;
+    if (primClass(prim) != PC_TRI || (mode != 0x1B01 && mode != 0x1B00)) return false;
+    flushBatch(x);
+    if (mode == 0x1B01) {
+        uint32_t n = edgeIndexCount(prim, count);
+        if (n < 2) return true;
+        if (expandLines()) {
+            drawExpandedLines(x, vb, vbOffset, 1, n, format, [&](uint32_t* idx) { writeEdgeIndices(idx, prim, count, base); });
+            return true;
+        }
+        if (!prepareDraw(x, 1, format)) return true;
+        if (vb != x.bVb || x.bVbOffset != vbOffset) {
+            [x.enc setVertexBuffer:vb offset:vbOffset atIndex:0];
+            x.bVb = vb;
+            x.bVbOffset = vbOffset;
+        }
+        id<MTLBuffer> ib;
+        size_t start;
+        uint32_t* idx = allocIndices(x, n, &ib, &start);
+        writeEdgeIndices(idx, prim, count, base);
+        [x.enc drawIndexedPrimitives:MTLPrimitiveTypeLine indexCount:n indexType:MTLIndexTypeUInt32 indexBuffer:ib indexBufferOffset:start * 4];
+    } else {
+        if (!prepareDraw(x, 0, format)) return true;
+        if (vb != x.bVb || x.bVbOffset != vbOffset) {
+            [x.enc setVertexBuffer:vb offset:vbOffset atIndex:0];
+            x.bVb = vb;
+            x.bVbOffset = vbOffset;
+        }
+        [x.enc drawPrimitives:MTLPrimitiveTypePoint vertexStart:base vertexCount:count];
+    }
+    g_stats.arenaDraws++;
+    x.stateDirty = true;
+    return true;
 }
 
 static void drawArena(Exec& x, const DrawCmd& d) {
@@ -889,6 +1003,7 @@ static void drawArena(Exec& x, const DrawCmd& d) {
     id<MTLBuffer> vb = x.fr->arenas[d.chunk];
     uint32_t base = d.offset / L->stride.x;
     if (isWideLine(d.prim)) { drawWideLines(x, vb, 0, d.prim, d.count, base, (int)d.format); return; }
+    if (g.raster.polyMode != 0 && drawPolygonMode(x, vb, 0, d.prim, d.count, base, (int)d.format)) return;
     PrimClass pc = primClass(d.prim);
     bool flat = g.raster.flat != 0;
     bool canMerge = x.batchOpen && x.batchVb == vb && x.batchFormat == (int)d.format && x.batchClass == pc && x.batchFlat == flat;
@@ -935,6 +1050,7 @@ static void drawMesh(Exec& x, const DrawMeshCmd& d) {
     uint32_t n = indexCount(d.prim, d.count);
     if (n == 0) return;
     if (isWideLine(d.prim)) { drawWideLines(x, vb, d.offset, d.prim, d.count, 0, (int)d.format); return; }
+    if (g.raster.polyMode != 0 && drawPolygonMode(x, vb, d.offset, d.prim, d.count, 0, (int)d.format)) return;
     if (!prepareDraw(x, d.prim, (int)d.format)) return;
     if (vb != x.bVb || x.bVbOffset != d.offset) {
         [x.enc setVertexBuffer:vb offset:d.offset atIndex:0];
@@ -1041,9 +1157,15 @@ static void doClear(Exec& x, const ClearCmd& c) {
     [x.enc setRenderPipelineState:ps];
     x.bPso = ps;
     x.stateDirty = true;
-    id<MTLDepthStencilState> dss = depthState(wantDepth, 0x207, wantDepth);
+    DepthState clearStencil{};
+    clearStencil.sFunc = 0x207;
+    clearStencil.sFail = clearStencil.sZFail = clearStencil.sZPass = 0x1E01;   // replace with the clear value
+    clearStencil.sValueMask = 0xFF;
+    clearStencil.sWriteMask = g.depth.sWriteMask;   // glClear honours glStencilMask
+    id<MTLDepthStencilState> dss = depthState(wantDepth, 0x207, wantDepth, wantStencil ? &clearStencil : nullptr);
     [x.enc setDepthStencilState:dss];
     x.bDss = dss;
+    if (wantStencil) { [x.enc setStencilReferenceValue:c.stencil & 0xFF]; x.bStencilRef = (int)(c.stencil & 0xFF); }
     MTLViewport vp{0, 0, (double)x.cur.w, (double)x.cur.h, 0, 1};
     [x.enc setViewport:vp];
     x.bViewportValid = false;
@@ -1298,7 +1420,7 @@ void executeFrame(id<MTLCommandBuffer> cb, const uint8_t* cmds, size_t len) {
         switch (h->op) {
             case OP_STATE_PIPE: flushBatch(x); x.stateDirty = true; g.pipe = payload<PipeState>(h); g.uniformsDirty = true; break;
             case OP_STATE_DEPTH: flushBatch(x); x.stateDirty = true; g.depth = payload<DepthState>(h); break;
-            case OP_STATE_RASTER: flushBatch(x); x.stateDirty = true; g.raster = payload<RasterState>(h); break;
+            case OP_STATE_RASTER: flushBatch(x); x.stateDirty = true; g.raster = payload<RasterState>(h); g.uniformsDirty = true; break;
             case OP_STATE_FRAG: flushBatch(x); x.stateDirty = true; g.frag = payload<FragState>(h); g.uniformsDirty = true; break;
             case OP_STATE_UNITS: flushBatch(x); x.stateDirty = true; memcpy(g.units, h + 1, sizeof g.units); g.uniformsDirty = true; break;
             case OP_STATE_TEXGEN: flushBatch(x); x.stateDirty = true; g.texgen = payload<TexGenState>(h); g.uniformsDirty = true; break;

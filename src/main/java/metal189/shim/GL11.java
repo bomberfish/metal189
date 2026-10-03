@@ -35,15 +35,15 @@ public final class GL11 {
     public static void glFrontFace(int m) { GL.frontFace(m); }
     public static void glPolygonOffset(float f, float u) { GL.polygonOffset(f, u); }
     public static void glLineWidth(float w) { GL.lineWidth(w); }
-    public static void glPointSize(float s) {}
-    public static void glPolygonMode(int face, int mode) {}
+    public static void glPointSize(float s) { GL.pointSize(s); }
+    public static void glPolygonMode(int face, int mode) { GL.polygonMode(face, mode); }
     public static void glShadeModel(int m) { GL.shadeModel(m); }
     public static void glLogicOp(int op) { GL.logicOp(op); }
     public static void glHint(int target, int mode) {}
-    public static void glLineStipple(int f, short p) {}
-    public static void glStencilFunc(int f, int ref, int mask) {}
-    public static void glStencilOp(int f, int zf, int zp) {}
-    public static void glStencilMask(int m) {}
+    public static void glLineStipple(int f, short p) { GL.lineStipple(f, p & 0xFFFF); }
+    public static void glStencilFunc(int f, int ref, int mask) { GL.stencilFunc(f, ref, mask); }
+    public static void glStencilOp(int f, int zf, int zp) { GL.stencilOp(f, zf, zp); }
+    public static void glStencilMask(int m) { GL.stencilMask(m); }
     public static void glClearStencil(int s) { GL.clearStencil = s; }
 
     // ---- fog / lighting ----

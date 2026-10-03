@@ -41,6 +41,13 @@ public final class Draw {
                 Mem.putInt(p + 4, depthFunc);
                 Mem.putInt(p + 8, depthMask ? 1 : 0);
                 Mem.putInt(p + 12, stencilTest ? 1 : 0);
+                Mem.putInt(p + 16, stencilFunc);
+                Mem.putInt(p + 20, stencilRef);
+                Mem.putInt(p + 24, stencilValueMask);
+                Mem.putInt(p + 28, stencilFail);
+                Mem.putInt(p + 32, stencilZFail);
+                Mem.putInt(p + 36, stencilZPass);
+                Mem.putInt(p + 40, stencilWriteMask);
             }
             if ((d & D_RASTER) != 0) {
                 long p = c.begin(Cmd.STATE_RASTER, 1 + Cmd.SZ_RASTER);
@@ -52,6 +59,10 @@ public final class Draw {
                 Mem.putFloat(p + 20, polyUnits);
                 Mem.putFloat(p + 24, lineWidth);
                 Mem.putInt(p + 28, shadeModel == 0x1D00 ? 1 : 0);
+                Mem.putFloat(p + 32, pointSize);
+                Mem.putInt(p + 36, polygonMode);
+                Mem.putInt(p + 40, lineStipple ? (stipplePattern | (stippleFactor << 16)) : 0);
+                Mem.putInt(p + 44, lineSmooth ? 1 : 0);
             }
             if ((d & D_FRAG) != 0) {
                 long p = c.begin(Cmd.STATE_FRAG, 1 + Cmd.SZ_FRAG);

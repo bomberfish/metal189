@@ -24,6 +24,6 @@ public final class Cmd {
     public static final int TERRAIN = 18;        // 3 + 4n: layer, format, n, {section, offX f, offY f, offZ f}*n
     public static final int ENV = 19;            // 64: view mv 16f, proj 16f, camera pos 3x(int, frac f), params (see Phases.terrain)
 
-    public static final int SZ_PIPE = 13, SZ_DEPTH = 4, SZ_RASTER = 8, SZ_FRAG = 13, SZ_UNIT = 31, SZ_UNITS = 3 * 31,
+    public static final int SZ_PIPE = 13, SZ_DEPTH = 11, SZ_RASTER = 12, SZ_FRAG = 13, SZ_UNIT = 31, SZ_UNITS = 3 * 31,
             SZ_TEXGEN = 37, SZ_LIGHT = 33, SZ_ATTRIB = 15, SZ_VIEWPORT = 9;
 }

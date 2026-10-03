@@ -23,6 +23,10 @@ struct FFOut {
     float fogFactor;   // per-vertex fog factor (clamped), as GL implementations compute it
     float3 eyePos [[function_constant(fc_advLit)]];
     float3 eyeNormal [[function_constant(fc_advLit)]];   // zero when the format has no normal
+    float lineDist;    // window-space distance from the segment start (ff_line_vertex), for stipple
+    float lineFlag;    // 1 for fragments of expanded lines, 2 for antialiased (GL_LINE_SMOOTH) ones
+    float lineAcross;  // smooth lines: signed distance from the line centre in pixels
+    float lineHalf [[flat]];   // smooth lines: half the line width in pixels
 };
 
 // ---------------------------------------------------------------------------
@@ -104,7 +108,11 @@ static FFOut ffProcess(uint vid, device const uchar* vbuf, constant VertexLayout
     if (u.flags.x & FF_FLIP_Y) clip.y = -clip.y;
     clip.z = 0.5 * (clip.z + clip.w); // GL [-1,1] depth to Metal [0,1]
     o.position = clip;
-    o.pointSize = 1.0;
+    o.pointSize = u.raster.x;
+    o.lineDist = 0.0;
+    o.lineFlag = 0.0;
+    o.lineAcross = 0.0;
+    o.lineHalf = 0.0;
 
     uint f = u.flags.x;
     if (fc_advLit) {
@@ -184,7 +192,22 @@ vertex FFOut ff_line_vertex(uint vid [[vertex_id]],
     if (db < 0.0) pb = mix(pb, pa, db / (db - da));
     float2 dwin = (pb.xy / pb.w - pa.xy / pa.w) * lp.xy;
     float4 p = atB ? pb : pa;
-    if (abs(dwin.x) >= abs(dwin.y)) p.y += side * (lp.z / lp.y) * p.w;
+    // GL's stipple counter advances one per pixel along the major axis (dwin is in half-pixels)
+    o.lineDist = atB ? max(abs(dwin.x), abs(dwin.y)) * 0.5 : 0.0;
+    o.lineFlag = 1.0;
+    if (lp.w > 0.5) {
+        // GL_LINE_SMOOTH: a rectangle of the exact width perpendicular to the segment, plus
+        // a one-pixel fringe for the coverage falloff
+        float2 dpx = dwin * 0.5;
+        float len = length(dpx);
+        float2 perp = len > 1e-6 ? float2(-dpx.y, dpx.x) / len : float2(0, 1);
+        float halfW = lp.z * 0.5;
+        float ext = max(halfW, 0.5) + 0.5;
+        p.xy += side * perp * ext * 2.0 / lp.xy * p.w;
+        o.lineFlag = 2.0;
+        o.lineAcross = side * ext;
+        o.lineHalf = halfW;
+    } else if (abs(dwin.x) >= abs(dwin.y)) p.y += side * (lp.z / lp.y) * p.w;
     else p.x += side * (lp.z / lp.x) * p.w;
     if (u.flags.x & FF_FLIP_Y) p.y = -p.y;
     p.z = 0.5 * (p.z + p.w);
@@ -368,6 +391,14 @@ fragment FFFragOut ff_fragment(FFOut in [[stage_in]],
     uint f = u.flags.x;
     float4 texels[3] = {float4(1), float4(1), float4(1)};
     float2 uv0 = in.tex0.xy / in.tex0.w;
+    // antialiased lines: coverage across the width multiplies alpha (before the alpha test, as in GL)
+    float coverage = 1.0;
+    if (in.lineFlag > 1.5) coverage = saturate(max(in.lineHalf, 0.5) + 0.5 - abs(in.lineAcross)) * min(in.lineHalf * 2.0, 1.0);
+    if (in.lineFlag > 0.5 && u.raster.y > 0.5) {
+        // glLineStipple: bit (distance / factor) mod 16 of the pattern decides coverage
+        uint bit = uint(floor(in.lineDist / u.raster.y)) & 15u;
+        if (((uint(u.raster.z) >> bit) & 1u) == 0u) discard_fragment();
+    }
     if (fc_advLit) {
         // albedo from unit 0 only (unit 1 is the lightmap, replaced by the lighting model)
         float4 c = primary;
@@ -375,6 +406,7 @@ fragment FFFragOut ff_fragment(FFOut in [[stage_in]],
             float4 t0 = tex0.sample(s0, uv0);
             c = fc_modulate ? primary * t0 : texEnv(u.env[0], u.envScale[0], t0, primary, primary, u.envColor[0], texels);
         }
+        c.a *= coverage;
         if (fc_alphaTest) {
             if (!alphaPass(u.flags.w, c.a, u.alpha.x)) discard_fragment();
         }
@@ -395,10 +427,11 @@ fragment FFFragOut ff_fragment(FFOut in [[stage_in]],
         if (f & FF_TEX2) c = texEnv(u.env[2], u.envScale[2], texels[2], primary, c, u.envColor[2], texels);
     }
 
+    if (f & FF_FOG) c.rgb = mix(u.fogColor.rgb, c.rgb, in.fogFactor);
+    c.a *= coverage;
     if (fc_alphaTest) {
         if (!alphaPass(u.flags.w, c.a, u.alpha.x)) discard_fragment();
     }
-    if (f & FF_FOG) c.rgb = mix(u.fogColor.rgb, c.rgb, in.fogFactor);
     FFFragOut o;
     if (fc_logicOp) o.color = logicOp(u.alpha.y, c, dst);
     else o.color = c;

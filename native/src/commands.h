@@ -40,8 +40,16 @@ enum Phase : uint32_t {
 };
 
 struct PipeState { uint32_t blend, srcRGB, dstRGB, srcA, dstA, eq, colorMask, logicOn, logicOp; float blendColor[4]; };
-struct DepthState { uint32_t test, func, mask, stencil; };
-struct RasterState { uint32_t cull, cullFace, frontFace, polyFill; float factor, units, lineWidth; uint32_t flat; };
+struct DepthState {
+    uint32_t test, func, mask, stencil;                 // stencil: GL_STENCIL_TEST enabled
+    uint32_t sFunc, sRef, sValueMask, sFail, sZFail, sZPass, sWriteMask;
+};
+struct RasterState {
+    uint32_t cull, cullFace, frontFace, polyFill; float factor, units, lineWidth; uint32_t flat;
+    float pointSize; uint32_t polyMode;                  // polyMode: GL_FILL / GL_LINE / GL_POINT (front and back)
+    uint32_t stipple;                                    // 0 = off, else pattern | factor << 16
+    uint32_t lineSmooth;                                 // GL_LINE_SMOOTH (antialiased lines)
+};
 struct FragState {
     uint32_t alphaTest, alphaFunc; float alphaRef;
     uint32_t fog, fogMode, fogDistMode; float fogStart, fogEnd, fogDensity; float fogColor[4];
@@ -63,8 +71,8 @@ struct AttribState { float color[4]; float normal[3]; float tex0[4]; float tex1[
 struct ViewportState { int32_t vp[4]; uint32_t scissor; int32_t sc[4]; };
 
 static_assert(sizeof(PipeState) == 13 * 4, "");
-static_assert(sizeof(DepthState) == 4 * 4, "");
-static_assert(sizeof(RasterState) == 8 * 4, "");
+static_assert(sizeof(DepthState) == 11 * 4, "");
+static_assert(sizeof(RasterState) == 12 * 4, "");
 static_assert(sizeof(FragState) == 13 * 4, "");
 static_assert(sizeof(UnitState) == 31 * 4, "");
 static_assert(sizeof(TexGenState) == 37 * 4, "");
