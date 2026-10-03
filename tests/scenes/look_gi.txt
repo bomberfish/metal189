@@ -1,0 +1,22 @@
+sleep 3
+world lookflat 42 flat
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /time set 4500
+cmd /weather clear
+cmd /tp @p -400.5 5.5 -397.5 180 10
+sleep 4
+cmd /kill @e[type=!Player]
+cmd /fill -410 3 -410 -390 12 -390 air
+cmd /fill -410 3 -410 -390 3 -390 grass
+cmd /fill -408 4 -408 -393 10 -393 stone
+cmd /fill -407 4 -407 -394 9 -394 air
+cmd /fill -407 3 -407 -394 3 -394 planks
+cmd /fill -393 5 -403 -393 8 -398 air
+cmd /fill -406 4 -406 -404 5 -404 wool 14
+cmd /setblock -400 5 -394 air
+sleep 4
+capture CAPTURE_A
+quit

@@ -20,6 +20,7 @@ metal189.gui.exposure=Exposure
 metal189.gui.rtShadows=RT Shadows
 metal189.gui.rtReflections=RT Reflections
 metal189.gui.rtAO=RT Ambient Occlusion
+metal189.gui.rtGI=RT Global Illumination
 metal189.gui.unsupported=Unsupported
 metal189.gui.rtAvailable=hardware ray tracing
 metal189.msg.on=Shaders enabled

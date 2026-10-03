@@ -1,0 +1,139 @@
+sleep 3
+world ref1robust 1234567
+waitWorld
+fly
+config shaders true
+config rtShadows true
+config rtReflections true
+config rtAmbientOcclusion true
+cmd /gamerule doDaylightCycle true
+cmd /tp @p 96 110 0 90 10
+sleep 3
+cmd /tp @p 192 110 48 90 10
+sleep 3
+cmd /tp @p 288 110 96 90 10
+sleep 3
+cmd /tp @p 384 110 144 90 10
+sleep 3
+cmd /tp @p 480 110 192 90 10
+sleep 3
+cmd /tp @p 576 110 240 90 10
+sleep 3
+cmd /tp @p 672 110 288 90 10
+sleep 3
+cmd /tp @p 768 110 0 90 10
+sleep 3
+cmd /tp @p 864 110 48 90 10
+sleep 3
+cmd /tp @p 960 110 96 90 10
+sleep 3
+info
+cmd /tp @p 1056 110 144 90 10
+sleep 3
+cmd /tp @p 1152 110 192 90 10
+sleep 3
+cmd /tp @p 1248 110 240 90 10
+sleep 3
+cmd /tp @p 1344 110 288 90 10
+sleep 3
+cmd /tp @p 1440 110 0 90 10
+sleep 3
+cmd /tp @p 1536 110 48 90 10
+sleep 3
+cmd /tp @p 1632 110 96 90 10
+sleep 3
+cmd /tp @p 1728 110 144 90 10
+sleep 3
+cmd /tp @p 1824 110 192 90 10
+sleep 3
+cmd /tp @p 1920 110 240 90 10
+sleep 3
+info
+cmd /tp @p 2016 110 288 90 10
+sleep 3
+cmd /tp @p 2112 110 0 90 10
+sleep 3
+cmd /tp @p 2208 110 48 90 10
+sleep 3
+cmd /tp @p 2304 110 96 90 10
+sleep 3
+cmd /tp @p 2400 110 144 90 10
+sleep 3
+cmd /tp @p 2496 110 192 90 10
+sleep 3
+cmd /tp @p 2592 110 240 90 10
+sleep 3
+cmd /tp @p 2688 110 288 90 10
+sleep 3
+cmd /tp @p 2784 110 0 90 10
+sleep 3
+cmd /tp @p 2880 110 48 90 10
+sleep 3
+info
+cmd /tp @p 2976 110 96 90 10
+sleep 3
+cmd /tp @p 3072 110 144 90 10
+sleep 3
+cmd /tp @p 3168 110 192 90 10
+sleep 3
+cmd /tp @p 3264 110 240 90 10
+sleep 3
+cmd /tp @p 3360 110 288 90 10
+sleep 3
+cmd /tp @p 3456 110 0 90 10
+sleep 3
+cmd /tp @p 3552 110 48 90 10
+sleep 3
+cmd /tp @p 3648 110 96 90 10
+sleep 3
+cmd /tp @p 3744 110 144 90 10
+sleep 3
+cmd /tp @p 3840 110 192 90 10
+sleep 3
+info
+cmd /tp @p 3936 110 240 90 10
+sleep 3
+cmd /tp @p 4032 110 288 90 10
+sleep 3
+cmd /tp @p 4128 110 0 90 10
+sleep 3
+cmd /tp @p 4224 110 48 90 10
+sleep 3
+cmd /tp @p 4320 110 96 90 10
+sleep 3
+cmd /tp @p 4416 110 144 90 10
+sleep 3
+cmd /tp @p 4512 110 192 90 10
+sleep 3
+cmd /tp @p 4608 110 240 90 10
+sleep 3
+cmd /tp @p 4704 110 288 90 10
+sleep 3
+cmd /tp @p 4800 110 0 90 10
+sleep 3
+info
+cmd /tp @p 4896 110 48 90 10
+sleep 3
+cmd /tp @p 4992 110 96 90 10
+sleep 3
+cmd /tp @p 5088 110 144 90 10
+sleep 3
+cmd /tp @p 5184 110 192 90 10
+sleep 3
+cmd /tp @p 5280 110 240 90 10
+sleep 3
+cmd /tp @p 5376 110 288 90 10
+sleep 3
+cmd /tp @p 5472 110 0 90 10
+sleep 3
+cmd /tp @p 5568 110 48 90 10
+sleep 3
+cmd /tp @p 5664 110 96 90 10
+sleep 3
+cmd /tp @p 5760 110 144 90 10
+sleep 3
+info
+cmd /tp @p 0 110 0 90 10
+sleep 20
+info
+quit

@@ -47,6 +47,12 @@ static inline float hash12(float2 p) {
     return fract((p3.x + p3.y) * p3.z);
 }
 
+static inline float2 hash22(float2 p) {
+    float3 p3 = fract(float3(p.xyx) * float3(0.1031, 0.1030, 0.0973));
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.xx + p3.yz) * p3.zy);
+}
+
 // Material ids (see Materials.java): 0 default, 1 leaves/vines, 2 water, 3 emissive, 4 metal, 5 glass, 6 lava,
 // 7 entity, 8 plant, 9 double plant (lower half), 10 double plant (upper half)
 static inline bool isFoliage(uint m) { return m == 1 || m >= 8; }
@@ -830,6 +836,127 @@ fragment float4 rtao_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& 
     return float4(open / float(rays), 1.0, 1.0, 1.0);
 }
 
+// ---------------------------------------------------------------------------
+// ray-traced global illumination (one diffuse bounce, half resolution)
+
+// One cosine-weighted ray per texel; hits are shaded with sun (shadow ray), sky light and
+// emission, misses see the sky. Output: incoming indirect radiance (Lambert-normalised).
+fragment float4 gi_trace_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
+                                  depth2d<float> depth [[texture(0)]], texture2d<float> gLinZ [[texture(1)]],
+                                  texture2d<float> gNormal [[texture(2)]], texture2d<float> skyLut [[texture(5)]],
+                                  instance_acceleration_structure tlas [[buffer(10)]],
+                                  device const RtInstance* rtInst [[buffer(11)]],
+                                  device const uchar* emissions [[buffer(6)]],
+                                  texture2d<float> atlas [[texture(7)]], sampler pointS [[sampler(2)]],
+                                  sampler lin [[sampler(1)]]) {
+    uint2 fp = min(uint2(in.position.xy) * 2u + 1u, uint2(fr.screen.xy) - 1u);
+    float d = depth.read(fp);
+    if (d >= 1.0) return float4(0.0);
+    float2 ndc = float2((float(fp.x) + 0.5) * fr.screen.z * 2.0 - 1.0, (float(fp.y) + 0.5) * fr.screen.w * 2.0 - 1.0) - fr.jitter.xy;
+    float4 pf = fr.invProj * float4(ndc, 1.0, 1.0);
+    float3 rd = pf.xyz / pf.w;
+    float3 eye = rd * (gLinZ.read(fp).r / -rd.z);
+    float3 world = (fr.invView * float4(eye, 1)).xyz;
+    float3 nWorld = normalize((fr.invView * float4(normalize(gNormal.read(fp).xyz), 0)).xyz);
+    float3 up = abs(nWorld.y) < 0.999 ? float3(0, 1, 0) : float3(1, 0, 0);
+    float3 tx = normalize(cross(up, nWorld)), ty = cross(nWorld, tx);
+    float2 xi = hash22(in.position.xy * 0.73 + float(fr.flags.z % 1024u) * float2(5.17, 11.3));
+    float r = sqrt(xi.x), phi = 6.2831853 * xi.y;
+    float3 dir = normalize(tx * (r * cos(phi)) + ty * (r * sin(phi)) + nWorld * sqrt(max(0.0, 1.0 - xi.x)));
+    float3 o = world + fr.rtCam.xyz + nWorld * (0.01 + length(eye) * 0.0002);
+    RtHit h = rtClosest(tlas, rtInst, atlas, pointS, o, dir, 48.0);
+    if (!h.hit) {
+        // sky (no sun disc: direct sun is handled by the deferred pass)
+        return float4(fr.flags.y != 0 ? toLinear(fr.fogColor.rgb) * 0.3 : skyBase(fr, skyLut, lin, dir), 1.0);
+    }
+    device const BlockVertex* v = rtInst[h.inst].verts[h.geom];
+    uint3 t = rtTri(h.prim);
+    float3 w = rtBary(h.bary);
+    float2 uv = float2(v[t.x].uv) * w.x + float2(v[t.y].uv) * w.y + float2(v[t.z].uv) * w.z;
+    float4 col = (float4(v[t.x].color) * w.x + float4(v[t.y].color) * w.y + float4(v[t.z].color) * w.z) * (1.0 / 255.0);
+    float2 lm = (float2(ushort2(v[t.x].lm) & ushort2(0xFF)) * w.x + float2(ushort2(v[t.y].lm) & ushort2(0xFF)) * w.y +
+                 float2(ushort2(v[t.z].lm) & ushort2(0xFF)) * w.z) * (1.0 / 240.0);
+    ushort2 lmRaw = ushort2(v[t.x].lm);
+    uint state = uint(lmRaw.x >> 8) | (uint(lmRaw.y >> 8) << 8);
+    float3 p0 = float3(v[t.x].pos), p1 = float3(v[t.y].pos), p2 = float3(v[t.z].pos);
+    float3 n = normalize(cross(p1 - p0, p2 - p0));
+    if (dot(n, dir) > 0.0) n = -n;
+    float3 albedo = toLinear(atlas.sample(pointS, uv, level(0)).rgb * col.rgb / faceShade(n));
+    float3 p = o + dir * h.t;
+    bool sunUp = fr.sunDirWorld.w > 0.0;
+    float3 L = sunUp ? fr.sunDirWorld.xyz : -fr.sunDirWorld.xyz;
+    float3 lightCol = sunUp ? fr.sunColor.rgb : fr.moonColor.rgb;
+    float3 c = float3(0);
+    float ndl = saturate(dot(n, L));
+    if (ndl > 0.0 && fr.flags.y == 0 && !rtOccluded(tlas, rtInst, atlas, pointS, p + n * 0.01, L, 256.0))
+        c += lightCol * albedo * ndl;
+    c += albedo * skyAmbient(fr, skyLut, lin, n) * lm.y * lm.y;
+    c += albedo * fr.blockLight.rgb * pow(lm.x, fr.blockLight.a) * 0.5;
+    c += albedo * float(emissions[state]) * (6.0 / 255.0);
+    return float4(c, 1.0);
+}
+
+// Temporal accumulation of the GI samples: reprojects last frame's history with the camera
+// motion, rejects disocclusions by depth, and keeps up to 32 frames (count in alpha).
+struct GiTemporalOut {
+    float4 gi [[color(0)]];
+    float z [[color(1)]];
+};
+
+fragment GiTemporalOut gi_temporal_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
+                                            texture2d<float> sample [[texture(0)]], texture2d<float> hist [[texture(1)]],
+                                            texture2d<float> histZ [[texture(2)]], texture2d<float> gLinZ [[texture(3)]],
+                                            depth2d<float> depth [[texture(4)]], sampler lin [[sampler(0)]]) {
+    GiTemporalOut o;
+    uint2 c = uint2(in.position.xy);
+    uint2 fp = min(c * 2u + 1u, uint2(fr.screen.xy) - 1u);
+    float3 cur = sample.read(c).rgb;
+    float z = gLinZ.read(fp).r;
+    o.z = z;
+    o.gi = float4(cur, 1.0);
+    if (fr.post.w < 0.5 || depth.read(fp) >= 1.0) return o;
+    float2 ndc = float2((float(fp.x) + 0.5) * fr.screen.z * 2.0 - 1.0, (float(fp.y) + 0.5) * fr.screen.w * 2.0 - 1.0) - fr.jitter.xy;
+    float4 pf = fr.invProj * float4(ndc, 1.0, 1.0);
+    float3 rd = pf.xyz / pf.w;
+    float3 eye = rd * (z / -rd.z);
+    float3 rel = (fr.invView * float4(eye, 1.0)).xyz;
+    float4 pc = fr.prevViewProj * float4(rel + fr.taa.xyz, 1.0);
+    if (pc.w <= 0.0) return o;
+    float2 puv = (pc.xy / pc.w) * 0.5 + 0.5;
+    if (any(puv < 0.0) || any(puv > 1.0)) return o;
+    uint2 ph = min(uint2(puv * float2(hist.get_width(), hist.get_height())), uint2(hist.get_width() - 1, hist.get_height() - 1));
+    float pz = histZ.read(ph).r;
+    if (abs(pz - pc.w) > max(pc.w * 0.04, 0.08)) return o;   // disocclusion
+    float4 h = hist.sample(lin, puv);
+    float n = min(h.a + 1.0, 32.0);
+    o.gi = float4(mix(h.rgb, cur, 1.0 / n), n);
+    return o;
+}
+
+// Separable depth/normal-aware blur of the half-resolution GI (rgb), radius 6.
+fragment float4 giblur_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
+                                texture2d<float> src [[texture(0)]], texture2d<float> gLinZ [[texture(1)]],
+                                texture2d<float> gNormal [[texture(2)]], constant float4& p [[buffer(0)]]) {
+    int2 c = int2(in.position.xy);
+    int2 mx = int2(src.get_width(), src.get_height()) - 1;
+    uint2 fpc = min(uint2(c) * 2u + 1u, uint2(fr.screen.xy) - 1u);
+    float z0 = gLinZ.read(fpc).r;
+    float3 n0 = gNormal.read(fpc).xyz;
+    float4 center = src.read(uint2(c));
+    float3 sum = 0.0;
+    float wsum = 0.0;
+    for (int i = -6; i <= 6; i++) {
+        int2 q = clamp(c + int2(p.xy) * i, int2(0), mx);
+        uint2 fq = min(uint2(q) * 2u + 1u, uint2(fr.screen.xy) - 1u);
+        float z = gLinZ.read(fq).r;
+        float3 nq = gNormal.read(fq).xyz;
+        float w = exp(-float(i * i) / 18.0) * exp(-abs(z - z0) / max(z0 * 0.03, 0.05)) * pow(saturate(dot(nq, n0)), 16.0);
+        sum += src.read(uint2(q)).rgb * w;
+        wsum += w;
+    }
+    return float4(sum / max(wsum, 1e-4), center.a);
+}
+
 // Separable depth/normal-aware blur of the half-resolution AO (p.xy: texel step).
 fragment float4 aoblur_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
                                 texture2d<float> ao [[texture(0)]], texture2d<float> gLinZ [[texture(1)]],
@@ -878,12 +1005,6 @@ static float caustics(float2 p, float t) {
 
 static float3 ssr(constant AdvFrame& fr, depth2d<float> depthTex, float3 eyePos, float3 rdView);
 
-static inline float2 hash22(float2 p) {
-    float3 p3 = fract(float3(p.xyx) * float3(0.1031, 0.1030, 0.0973));
-    p3 += dot(p3, p3.yzx + 33.33);
-    return fract((p3.xx + p3.yz) * p3.zy);
-}
-
 fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                                constant AdvFrame& fr [[buffer(1)]],
                                texture2d<float> gAlbedo [[texture(0)]],
@@ -898,6 +1019,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                                texture2d<float> gSpec [[texture(10)]],
                                texture2d<float> history [[texture(11)]],
                                texture2d<float> rtaoTex [[texture(12)]],
+                               texture2d<float> giTex [[texture(13)]],
                                sampler cmp [[sampler(0)]], sampler lin [[sampler(1)]],
                                sampler rep [[sampler(3)]],
                                instance_acceleration_structure tlas [[buffer(10), function_constant(ac_rt)]],
@@ -1010,7 +1132,10 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                                        : skyLut.sample(lin, lutUv(normalize(float3(Rw.x, max(Rw.y, 0.02), Rw.z))), level(rough * 6.0)).rgb;
         envCol *= mix(1.0, 0.3, saturate(-Rw.y * 2.5));
         float3 skyVis = float3(skyLight * skyLight * ao * fr.ambient.a);
-        color += albedo * (1.0 - metal) * skyAmbient(fr, skyLut, lin, nWorld) * skyVis;
+        if (fr.flags.x & ADV_RT_GI)
+            color += albedo * (1.0 - metal) * giTex.sample(lin, in.uv).rgb * ao;   // ray-traced sky light + bounce
+        else
+            color += albedo * (1.0 - metal) * skyAmbient(fr, skyLut, lin, nWorld) * skyVis;
         float3 refl = envCol * skyVis;
         // smooth surfaces: traced reflections (RT closest hit, or screen space into last frame's resolve)
         float smoothW = 1.0 - smoothstep(0.12, 0.4, rough);

@@ -61,6 +61,7 @@ namespace {
 struct Targets {
     int w = 0, h = 0;
     id<MTLTexture> albedo, normal, light, linZ, spec, hdr, sceneColor, sceneDepth, taa[2], vol, ao[2];
+    id<MTLTexture> giSample, giHist[2], giZ[2], giBlur[2];
     std::vector<id<MTLTexture>> bloom;
 };
 
@@ -70,7 +71,9 @@ struct State {
     id<MTLRenderPipelineState> lightPso[2], waterPso[2], tonemapPso, bloomDown, bloomUp, skyLutPso, taaPso, cloudsPso;
     // volumetric clouds
     id<MTLComputePipelineState> cloudNoiseKernel;
-    id<MTLRenderPipelineState> volPso, volCompPso, rtaoPso, aoBlurPso;
+    id<MTLRenderPipelineState> volPso, volCompPso, rtaoPso, aoBlurPso, giTracePso, giTemporalPso, giBlurPso;
+    bool giHistory = false;
+    int giIndex = 0;
     id<MTLComputePipelineState> exposureKernel;
     id<MTLBuffer> exposureState;
     id<MTLTexture> cloudNoise, cloudMap[2];
@@ -206,6 +209,16 @@ bool initState() {
         S.rtaoPso = pso(ad);
         ad.fragmentFunction = fn(@"aoblur_fragment");
         S.aoBlurPso = pso(ad);
+        MTLRenderPipelineDescriptor* gd = [MTLRenderPipelineDescriptor new];
+        gd.vertexFunction = fn(@"fullscreen_vertex");
+        gd.fragmentFunction = fn(@"gi_trace_fragment");
+        gd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+        S.giTracePso = pso(gd);
+        gd.fragmentFunction = fn(@"giblur_fragment");
+        S.giBlurPso = pso(gd);
+        gd.fragmentFunction = fn(@"gi_temporal_fragment");
+        gd.colorAttachments[1].pixelFormat = MTLPixelFormatR32Float;
+        S.giTemporalPso = pso(gd);
     }
 
     MTLRenderPipelineDescriptor* vd = [MTLRenderPipelineDescriptor new];
@@ -322,6 +335,13 @@ void ensureTargets(int w, int h) {
     S.t.vol = rt(MTLPixelFormatRGBA16Float, (w + 1) / 2, (h + 1) / 2, @"volumetric");
     S.t.ao[0] = rt(MTLPixelFormatR16Float, (w + 1) / 2, (h + 1) / 2, @"rtao0");
     S.t.ao[1] = rt(MTLPixelFormatR16Float, (w + 1) / 2, (h + 1) / 2, @"rtao1");
+    S.t.giSample = rt(MTLPixelFormatRGBA16Float, (w + 1) / 2, (h + 1) / 2, @"giSample");
+    for (int i = 0; i < 2; i++) {
+        S.t.giHist[i] = rt(MTLPixelFormatRGBA16Float, (w + 1) / 2, (h + 1) / 2, @"giHistory");
+        S.t.giZ[i] = rt(MTLPixelFormatR32Float, (w + 1) / 2, (h + 1) / 2, @"giDepth");
+        S.t.giBlur[i] = rt(MTLPixelFormatRGBA16Float, (w + 1) / 2, (h + 1) / 2, @"giBlur");
+    }
+    S.giHistory = false;
     S.historyValid = false;
     S.t.sceneColor = rt(MTLPixelFormatRGBA16Float, w, h, @"sceneColor");
     S.t.sceneDepth = rt(MTLPixelFormatDepth32Float, w, h, @"sceneDepth");
@@ -476,9 +496,9 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
     double camX = env.camBlockX + (double)env.camFracX, camY = env.camBlockY + (double)env.camFracY,
            camZ = env.camBlockZ + (double)env.camFracZ;
     RtScene rts;
-    bool rtOn = (features & (ADV_RT_SHADOW | ADV_RT_REFL | ADV_RT_AO)) && S.lightPso[1] && S.waterPso[1] &&
+    bool rtOn = (features & (ADV_RT_SHADOW | ADV_RT_REFL | ADV_RT_AO | ADV_RT_GI)) && S.lightPso[1] && S.waterPso[1] &&
                 rtPrepare(cb, camX, camY, camZ, std::max(env.renderDistance, 32.0f) + 16.0f, rts);
-    if (!rtOn) features &= ~(ADV_RT_SHADOW | ADV_RT_REFL | ADV_RT_AO);
+    if (!rtOn) features &= ~(ADV_RT_SHADOW | ADV_RT_REFL | ADV_RT_AO | ADV_RT_GI);
     fr.rtCam = simd_make_float4(rts.camera, 0);
 
     // TAA: Halton(2,3) sub-pixel jitter; history is reprojected with the camera motion
@@ -491,6 +511,9 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         if (taaOn) fr.jitter = simd_make_float4((h2[k] - 0.5f) * 2.0f / W, (h3[k] - 0.5f) * 2.0f / H, 0, 0);
         double dx = camX - S.prevCam[0], dy = camY - S.prevCam[1], dz = camZ - S.prevCam[2];
         bool valid = taaOn && S.historyValid && S.prevDim == env.dimension && fabs(dx) + fabs(dy) + fabs(dz) < 16.0;
+        bool giOn = (features & ADV_RT_GI) && S.giTracePso && S.giTemporalPso && S.giBlurPso;
+        fr.post.w = giOn && S.giHistory && S.prevDim == env.dimension && fabs(dx) + fabs(dy) + fabs(dz) < 16.0 ? 1.0f : 0.0f;
+        S.giHistory = giOn;
         fr.prevViewProj = S.prevViewProj;
         fr.taa = simd_make_float4((float)dx, (float)dy, (float)dz, valid ? 1.0f : 0.0f);
         S.prevViewProj = simd_mul(fr.proj, fr.view);
@@ -730,6 +753,75 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         }
     }
 
+    // ---- ray-traced global illumination (one bounce, half resolution, denoised) ----
+    if ((features & ADV_RT_GI) && S.giTracePso && S.giTemporalPso && S.giBlurPso) {
+        TexEntry* atlasE = texture(w.atlasTex);
+        MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = S.t.giSample;
+        rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        profRender(rp, "gi trace", true);
+        id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+        e.label = @"gi trace";
+        [e setRenderPipelineState:S.giTracePso];
+        [e setFragmentBytes:&fr length:sizeof fr atIndex:1];
+        [e setFragmentTexture:depth atIndex:0];
+        [e setFragmentTexture:S.t.linZ atIndex:1];
+        [e setFragmentTexture:S.t.normal atIndex:2];
+        [e setFragmentTexture:S.skyLut atIndex:5];
+        [e setFragmentAccelerationStructure:rts.tlas atBufferIndex:10];
+        [e setFragmentBuffer:rts.instances offset:0 atIndex:11];
+        [e setFragmentBuffer:g_emissions offset:0 atIndex:6];
+        [e setFragmentTexture:atlasE && atlasE->tex ? atlasE->tex : S.t.albedo atIndex:7];
+        [e setFragmentSamplerState:S.pointClamp atIndex:2];
+        [e setFragmentSamplerState:S.linearClamp atIndex:1];
+        if (rts.resources)
+            [e useResources:rts.resources->data() count:rts.resources->size() usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
+        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [e endEncoding];
+        // temporal accumulation into the history ring
+        int cur = S.giIndex, prev = S.giIndex ^ 1;
+        S.giIndex ^= 1;
+        MTLRenderPassDescriptor* tp = [MTLRenderPassDescriptor renderPassDescriptor];
+        tp.colorAttachments[0].texture = S.t.giHist[cur];
+        tp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+        tp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        tp.colorAttachments[1].texture = S.t.giZ[cur];
+        tp.colorAttachments[1].loadAction = MTLLoadActionDontCare;
+        tp.colorAttachments[1].storeAction = MTLStoreActionStore;
+        profRender(tp, "gi temporal", true);
+        e = [cb renderCommandEncoderWithDescriptor:tp];
+        e.label = @"gi temporal";
+        [e setRenderPipelineState:S.giTemporalPso];
+        [e setFragmentBytes:&fr length:sizeof fr atIndex:1];
+        [e setFragmentTexture:S.t.giSample atIndex:0];
+        [e setFragmentTexture:S.t.giHist[prev] atIndex:1];
+        [e setFragmentTexture:S.t.giZ[prev] atIndex:2];
+        [e setFragmentTexture:S.t.linZ atIndex:3];
+        [e setFragmentTexture:depth atIndex:4];
+        [e setFragmentSamplerState:S.linearClamp atIndex:0];
+        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [e endEncoding];
+        // spatial: horizontal then vertical edge-aware blur
+        for (int pass = 0; pass < 2; pass++) {
+            MTLRenderPassDescriptor* bp = [MTLRenderPassDescriptor renderPassDescriptor];
+            bp.colorAttachments[0].texture = S.t.giBlur[pass];
+            bp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+            bp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            profRender(bp, "gi blur", true);
+            id<MTLRenderCommandEncoder> b = [cb renderCommandEncoderWithDescriptor:bp];
+            [b setRenderPipelineState:S.giBlurPso];
+            [b setFragmentBytes:&fr length:sizeof fr atIndex:1];
+            simd_float4 step = pass == 0 ? simd_make_float4(1, 0, 0, 0) : simd_make_float4(0, 1, 0, 0);
+            [b setFragmentBytes:&step length:sizeof step atIndex:0];
+            [b setFragmentTexture:pass == 0 ? S.t.giHist[cur] : S.t.giBlur[0] atIndex:0];
+            [b setFragmentTexture:S.t.linZ atIndex:1];
+            [b setFragmentTexture:S.t.normal atIndex:2];
+            [b drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            [b endEncoding];
+        }
+    }
+
     // ---- volumetric clouds -> direction-space cloud map ----
     id<MTLTexture> cloudMap = S.skyLut;   // placeholder binding when clouds are off
     if (cloudsOn) {
@@ -790,6 +882,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         // last frame's resolved image (screen-space reflections on smooth surfaces)
         [e setFragmentTexture:taaOn ? S.t.taa[S.taaIndex ^ 1] : S.t.hdr atIndex:11];
         [e setFragmentTexture:(features & ADV_RT_AO) ? S.t.ao[0] : S.t.light atIndex:12];
+        [e setFragmentTexture:(features & ADV_RT_GI) ? S.t.giBlur[1] : S.t.light atIndex:13];
         [e setFragmentSamplerState:S.repeatLinear atIndex:3];
         if (rtLight) {
             TexEntry* atlas = texture(w.atlasTex);

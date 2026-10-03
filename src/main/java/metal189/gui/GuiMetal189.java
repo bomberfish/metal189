@@ -20,7 +20,7 @@ import net.minecraftforge.fml.client.config.GuiSlider;
 public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
     private enum Opt {
         SHADERS, TAA, SHADOWS, SHADOW_RES, SHADOW_DIST, BLOOM, SKY, WATER, WAVING, BLOOM_STRENGTH, CLOUDS, VOLUMETRICS,
-        AUTO_EXP, EXPOSURE, RT_SHADOWS, RT_REFL, RT_AO
+        AUTO_EXP, EXPOSURE, RT_SHADOWS, RT_REFL, RT_AO, RT_GI
     }
 
     private static final Opt[][] ROWS = {
@@ -32,7 +32,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
         {Opt.WAVING, Opt.BLOOM_STRENGTH},
         {Opt.AUTO_EXP, Opt.EXPOSURE},
         {Opt.RT_SHADOWS, Opt.RT_REFL},
-        {Opt.RT_AO, null},
+        {Opt.RT_AO, Opt.RT_GI},
     };
     private static final int DONE = 200;
 
@@ -66,7 +66,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
 
     private static String onOff(boolean v) { return v ? I18n.format("options.on") : I18n.format("options.off"); }
 
-    private static boolean isRt(Opt o) { return o == Opt.RT_SHADOWS || o == Opt.RT_REFL || o == Opt.RT_AO; }
+    private static boolean isRt(Opt o) { return o == Opt.RT_SHADOWS || o == Opt.RT_REFL || o == Opt.RT_AO || o == Opt.RT_GI; }
 
     private void refresh() {
         boolean rt = Pipeline.rtSupported();
@@ -89,6 +89,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
                 case RT_SHADOWS: b.displayString = label("rtShadows", rt ? onOff(Config.rtShadows) : unsupported); break;
                 case RT_REFL: b.displayString = label("rtReflections", rt ? onOff(Config.rtReflections) : unsupported); break;
                 case RT_AO: b.displayString = label("rtAO", rt ? onOff(Config.rtAmbientOcclusion) : unsupported); break;
+                case RT_GI: b.displayString = label("rtGI", rt ? onOff(Config.rtGlobalIllumination) : unsupported); break;
                 default: break;   // sliders draw their own label
             }
             b.enabled = o == Opt.SHADERS || (Config.shaders && (!isRt(o) || rt));
@@ -115,6 +116,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
             case RT_SHADOWS: Config.rtShadows = !Config.rtShadows; break;
             case RT_REFL: Config.rtReflections = !Config.rtReflections; break;
             case RT_AO: Config.rtAmbientOcclusion = !Config.rtAmbientOcclusion; break;
+            case RT_GI: Config.rtGlobalIllumination = !Config.rtGlobalIllumination; break;
             default: return;
         }
         Config.save();
