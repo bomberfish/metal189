@@ -1,0 +1,14 @@
+sleep 3
+world outline1 7 flat
+waitWorld
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /time set 6000
+cmd /tp @p 0.5 4 0.5 180 35
+sleep 4
+cmd /kill @e[type=!Player]
+cmd /fill -4 4 -6 4 8 -1 air
+cmd /setblock 0 4 -2 stone
+sleep 3
+capture CAPTURE_A
+quit

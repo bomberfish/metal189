@@ -38,7 +38,7 @@ enum Phase : uint32_t {
     PH_ENTITIES_TRANSLUCENT = 12, PH_RENDER_LAST = 13, PH_HAND = 14, PH_WORLD_END = 15,
 };
 
-struct PipeState { uint32_t blend, srcRGB, dstRGB, srcA, dstA, eq, colorMask, logicOn, logicOp; };
+struct PipeState { uint32_t blend, srcRGB, dstRGB, srcA, dstA, eq, colorMask, logicOn, logicOp; float blendColor[4]; };
 struct DepthState { uint32_t test, func, mask, stencil; };
 struct RasterState { uint32_t cull, cullFace, frontFace, polyFill; float factor, units, lineWidth; uint32_t flat; };
 struct FragState {
@@ -61,7 +61,7 @@ struct LightState {
 struct AttribState { float color[4]; float normal[3]; float tex0[4]; float tex1[4]; };
 struct ViewportState { int32_t vp[4]; uint32_t scissor; int32_t sc[4]; };
 
-static_assert(sizeof(PipeState) == 9 * 4, "");
+static_assert(sizeof(PipeState) == 13 * 4, "");
 static_assert(sizeof(DepthState) == 4 * 4, "");
 static_assert(sizeof(RasterState) == 8 * 4, "");
 static_assert(sizeof(FragState) == 13 * 4, "");

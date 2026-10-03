@@ -20,6 +20,7 @@ public final class GL {
     public static boolean blend;
     public static int blendSrcRGB = GL_ONE, blendDstRGB = GL_ZERO, blendSrcA = GL_ONE, blendDstA = GL_ZERO;
     public static int blendEq = 0x8006; // GL_FUNC_ADD
+    public static float blendColorR, blendColorG, blendColorB, blendColorA; // GL_BLEND_COLOR
     public static int colorMask = 0xF;
     public static boolean logicOpEnable;
     public static int logicOp = GL_COPY;
@@ -189,6 +190,15 @@ public final class GL {
     }
 
     public static void logicOp(int op) { if (op != logicOp) { logicOp = op; dirty |= D_PIPE; } }
+
+    public static void blendColor(float r, float g, float b, float a) {
+        r = Math.max(0f, Math.min(1f, r)); g = Math.max(0f, Math.min(1f, g));
+        b = Math.max(0f, Math.min(1f, b)); a = Math.max(0f, Math.min(1f, a));
+        if (r != blendColorR || g != blendColorG || b != blendColorB || a != blendColorA) {
+            blendColorR = r; blendColorG = g; blendColorB = b; blendColorA = a;
+            dirty |= D_PIPE;
+        }
+    }
     public static void depthFunc(int f) { if (f != depthFunc) { depthFunc = f; dirty |= D_DEPTH; } }
     public static void depthMask(boolean m) { if (m != depthMask) { depthMask = m; dirty |= D_DEPTH; } }
     public static void cullFace(int m) { if (m != cullFace) { cullFace = m; dirty |= D_RASTER; } }

@@ -70,7 +70,7 @@ struct PipeKey {
     uint32_t blend;      // packed blend state, 0 = disabled
     uint32_t blendEq;
     uint32_t writeMask;
-    uint32_t variant;    // bit0 alphaTest, bit1 logicOp, bit2 flat
+    uint32_t variant;    // bit0 alphaTest, bit1 logicOp, bit2 flat, bit3 terrain, bit4 modulate, bit5 wide line
     bool operator==(const PipeKey& o) const { return memcmp(this, &o, sizeof *this) == 0; }
 };
 struct PipeKeyHash {
@@ -84,7 +84,7 @@ struct PipeKeyHash {
 
 static std::unordered_map<PipeKey, id<MTLRenderPipelineState>, PipeKeyHash> g_pipes;
 static std::unordered_map<uint32_t, id<MTLDepthStencilState>> g_dss;
-static id<MTLFunction> g_vfn[32], g_ffn[32];
+static id<MTLFunction> g_vfn[32], g_ffn[32], g_lineVfn[32];
 static id<MTLFunction> g_clearV, g_clearF;
 static id<MTLBuffer> g_quadIndices, g_flatQuadIndices;
 static uint32_t g_quadIndexQuads = 0, g_flatQuadIndexQuads = 0;
@@ -162,6 +162,10 @@ bool executorInit() {
         if (!g_vfn[v]) { log("ff_vertex: %s", err.localizedDescription.UTF8String); return false; }
         g_ffn[v] = [e.library newFunctionWithName:@"ff_fragment" constantValues:cv error:&err];
         if (!g_ffn[v]) { log("ff_fragment: %s", err.localizedDescription.UTF8String); return false; }
+        if (!terrain) {
+            g_lineVfn[v] = [e.library newFunctionWithName:@"ff_line_vertex" constantValues:cv error:&err];
+            if (!g_lineVfn[v]) log("ff_line_vertex: %s", err.localizedDescription.UTF8String);
+        }
     }
     g_clearV = [e.library newFunctionWithName:@"clear_vertex"];
     g_clearF = [e.library newFunctionWithName:@"clear_fragment"];
@@ -187,7 +191,8 @@ static id<MTLRenderPipelineState> pipeline(const PipeKey& k) {
     auto it = g_pipes.find(k);
     if (it != g_pipes.end()) return it->second;
     MTLRenderPipelineDescriptor* d = [MTLRenderPipelineDescriptor new];
-    d.vertexFunction = g_vfn[k.variant & 31];
+    d.vertexFunction = (k.variant & 32) ? g_lineVfn[k.variant & 31] : g_vfn[k.variant & 31];
+    if (!d.vertexFunction) return nil;
     d.fragmentFunction = g_ffn[k.variant & 31];
     MTLRenderPipelineColorAttachmentDescriptor* c = d.colorAttachments[0];
     c.pixelFormat = (MTLPixelFormat)k.color;
@@ -400,6 +405,8 @@ struct Exec {
     id<MTLRenderPipelineState> bPso = nil;
     id<MTLDepthStencilState> bDss = nil;
     int bCull = -1, bWinding = -1;
+    float bBlendColor[4] = {NAN, NAN, NAN, NAN};
+    bool wideLine = false;  // the draw being prepared expands lines into quads (glLineWidth > 1)
     float bBiasUnits = NAN, bBiasFactor = NAN;
     bool bViewportValid = false, bScissorValid = false;
     MTLViewport bViewport{};
@@ -514,6 +521,7 @@ static bool beginPass(Exec& x) {
     x.bPso = nil;
     x.bDss = nil;
     x.bCull = x.bWinding = -1;
+    for (float& c : x.bBlendColor) c = NAN;
     x.bBiasUnits = x.bBiasFactor = NAN;
     x.bViewportValid = x.bScissorValid = false;
     for (int i = 0; i < 3; i++) x.bTex[i] = x.bSmp[i] = nil;
@@ -671,8 +679,8 @@ static bool prepareDrawFull(Exec& x, uint32_t glPrim, int format, bool terrain);
 // Fast path: when only the modelview changed since the previous prepared draw
 // (typical for consecutive entity model parts), rebind just the transform.
 static bool prepareDraw(Exec& x, uint32_t glPrim, int format, bool terrain = false) {
-    PrimClass pc0 = primClass(glPrim);
-    if (!x.stateDirty && x.enc && x.lastOk && x.lastPrimClass == (uint32_t)pc0 && x.lastFormat == format && x.lastTerrain == terrain) {
+    uint32_t pc0 = (uint32_t)primClass(glPrim) | (x.wideLine ? 4u : 0u);
+    if (!x.stateDirty && x.enc && x.lastOk && x.lastPrimClass == pc0 && x.lastFormat == format && x.lastTerrain == terrain) {
         if (!terrain && x.xfDirty) {
             DrawTransform xf;
             xf.modelview = g.mv;
@@ -687,7 +695,7 @@ static bool prepareDraw(Exec& x, uint32_t glPrim, int format, bool terrain = fal
     bool ok = prepareDrawFull(x, glPrim, format, terrain);
     x.stateDirty = false;
     x.lastOk = ok;
-    x.lastPrimClass = (uint32_t)pc0;
+    x.lastPrimClass = pc0;
     x.lastFormat = format;
     x.lastTerrain = terrain;
     return ok;
@@ -725,7 +733,7 @@ static bool prepareDrawFull(Exec& x, uint32_t glPrim, int format, bool terrain) 
     bool modulate = true;
     for (int i = 0; i < 3; i++) if ((texMask & (FF_TEX0 << i)) && g.units[i].mode != 0x2100) modulate = false;
     k.variant = (g.frag.alphaTest && g.frag.alphaFunc != 0x207 ? 1 : 0) | (logic ? 2 : 0) | (flat ? 4 : 0) |
-                (terrain ? 8 : 0) | (modulate ? 16 : 0);
+                (terrain ? 8 : 0) | (modulate ? 16 : 0) | (x.wideLine ? 32 : 0);
     id<MTLRenderPipelineState> pso = pipeline(k);
     if (!pso) return false;
     if (pso != x.bPso) { [x.enc setRenderPipelineState:pso]; x.bPso = pso; }
@@ -733,7 +741,9 @@ static bool prepareDrawFull(Exec& x, uint32_t glPrim, int format, bool terrain) 
     id<MTLDepthStencilState> dss = depthState(g.depth.test && x.cur.depth, g.depth.func, g.depth.mask);
     if (dss != x.bDss) { [x.enc setDepthStencilState:dss]; x.bDss = dss; }
 
-    int cull = g.raster.cull ? (g.raster.cullFace == 0x404 ? (int)MTLCullModeFront : (int)MTLCullModeBack) : (int)MTLCullModeNone;
+    // lines are never culled, also when expanded into quads
+    int cull = g.raster.cull && !x.wideLine ? (g.raster.cullFace == 0x404 ? (int)MTLCullModeFront : (int)MTLCullModeBack)
+                                             : (int)MTLCullModeNone;
     if (cull != x.bCull) { [x.enc setCullMode:(MTLCullMode)cull]; x.bCull = cull; }
     bool ccw = g.raster.frontFace == 0x901;
     if (x.cur.flip) ccw = !ccw;
@@ -744,6 +754,10 @@ static bool prepareDrawFull(Exec& x, uint32_t glPrim, int format, bool terrain) 
         [x.enc setDepthBias:bu slopeScale:bf clamp:0];
         x.bBiasUnits = bu;
         x.bBiasFactor = bf;
+    }
+    if (k.blend && memcmp(x.bBlendColor, g.pipe.blendColor, sizeof x.bBlendColor) != 0) {
+        [x.enc setBlendColorRed:g.pipe.blendColor[0] green:g.pipe.blendColor[1] blue:g.pipe.blendColor[2] alpha:g.pipe.blendColor[3]];
+        memcpy(x.bBlendColor, g.pipe.blendColor, sizeof x.bBlendColor);
     }
     bool skip = false;
     applyViewportScissor(x, skip);
@@ -804,6 +818,39 @@ static uint32_t* allocIndices(Exec& x, uint32_t count, id<MTLBuffer>* buf, size_
     return p;
 }
 
+// GL's non-antialiased line width in pixels (rounded, at least 1).
+static float lineWidthPx() { return std::max(1.0f, std::round(g.raster.lineWidth)); }
+
+static bool isWideLine(uint32_t prim) { return primClass(prim) == PC_LINE && lineWidthPx() > 1.0f && g_lineVfn[0]; }
+
+// Draws lines wider than 1 px as quads (ff_line_vertex): segment endpoint pairs go to
+// buffer(4), six vertices per segment.
+static void drawWideLines(Exec& x, id<MTLBuffer> vb, size_t vbOffset, uint32_t prim, uint32_t count, uint32_t base, int format) {
+    flushBatch(x);
+    uint32_t n = indexCount(prim, count);
+    if (n < 2) return;
+    x.wideLine = true;
+    bool ok = prepareDraw(x, prim, format);
+    x.wideLine = false;
+    if (!ok) return;
+    if (vb != x.bVb || x.bVbOffset != vbOffset) {
+        [x.enc setVertexBuffer:vb offset:vbOffset atIndex:0];
+        x.bVb = vb;
+        x.bVbOffset = vbOffset;
+    }
+    id<MTLBuffer> ib;
+    size_t start;
+    uint32_t* idx = allocIndices(x, n, &ib, &start);
+    writeIndices(idx, prim, count, base, false);   // (a, b) pairs in GL order
+    [x.enc setVertexBuffer:ib offset:start * 4 atIndex:4];
+    float vw = (float)std::max(1, std::abs(g.vp.vp[2])), vh = (float)std::max(1, std::abs(g.vp.vp[3]));
+    simd_float4 lp = simd_make_float4(vw, vh, lineWidthPx(), 0);
+    [x.enc setVertexBytes:&lp length:sizeof lp atIndex:5];
+    [x.enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:(n / 2) * 6];
+    g_stats.arenaDraws++;
+    x.stateDirty = true;   // the next draw rebinds its own pipeline
+}
+
 static void drawArena(Exec& x, const DrawCmd& d) {
     const VertexLayout* L = layout((int)d.format);
     if (!L || L->stride.x == 0 || d.chunk >= x.fr->arenas.size()) return;
@@ -811,6 +858,7 @@ static void drawArena(Exec& x, const DrawCmd& d) {
     if (n == 0) return;
     id<MTLBuffer> vb = x.fr->arenas[d.chunk];
     uint32_t base = d.offset / L->stride.x;
+    if (isWideLine(d.prim)) { drawWideLines(x, vb, 0, d.prim, d.count, base, (int)d.format); return; }
     PrimClass pc = primClass(d.prim);
     bool flat = g.raster.flat != 0;
     bool canMerge = x.batchOpen && x.batchVb == vb && x.batchFormat == (int)d.format && x.batchClass == pc && x.batchFlat == flat;
@@ -856,6 +904,7 @@ static void drawMesh(Exec& x, const DrawMeshCmd& d) {
     if (!vb) return;
     uint32_t n = indexCount(d.prim, d.count);
     if (n == 0) return;
+    if (isWideLine(d.prim)) { drawWideLines(x, vb, d.offset, d.prim, d.count, 0, (int)d.format); return; }
     if (!prepareDraw(x, d.prim, (int)d.format)) return;
     if (vb != x.bVb || x.bVbOffset != d.offset) {
         [x.enc setVertexBuffer:vb offset:d.offset atIndex:0];

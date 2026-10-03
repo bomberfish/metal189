@@ -110,6 +110,10 @@ public final class Draw {
         Mem.putInt(p + 24, colorMask);
         Mem.putInt(p + 28, logicOpEnable ? 1 : 0);
         Mem.putInt(p + 32, logicOp);
+        Mem.putFloat(p + 36, GL.blendColorR);
+        Mem.putFloat(p + 40, GL.blendColorG);
+        Mem.putFloat(p + 44, GL.blendColorB);
+        Mem.putFloat(p + 48, GL.blendColorA);
     }
 
     private static void writeUnits(CmdBuffer c) {

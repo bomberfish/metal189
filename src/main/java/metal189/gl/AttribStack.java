@@ -18,6 +18,7 @@ public final class AttribStack {
         boolean[] tex2D = new boolean[UNITS], lightOn = new boolean[8];
         boolean[][] texGen = new boolean[UNITS][4];
         int blendSrcRGB, blendDstRGB, blendSrcA, blendDstA, blendEq, colorMask, logicOp, alphaFunc;
+        float blendColorR, blendColorG, blendColorB, blendColorA;
         float alphaRef;
         int depthFunc; boolean depthMask;
         int cullFace, frontFace, shadeModel; float polyFactor, polyUnits, lineWidth;
@@ -47,6 +48,7 @@ public final class AttribStack {
         }
         s.blendSrcRGB = blendSrcRGB; s.blendDstRGB = blendDstRGB; s.blendSrcA = blendSrcA; s.blendDstA = blendDstA;
         s.blendEq = blendEq; s.colorMask = colorMask; s.logicOp = logicOp; s.alphaFunc = alphaFunc; s.alphaRef = alphaRef;
+        s.blendColorR = blendColorR; s.blendColorG = blendColorG; s.blendColorB = blendColorB; s.blendColorA = blendColorA;
         s.depthFunc = depthFunc; s.depthMask = depthMask;
         s.cullFace = cullFace; s.frontFace = frontFace; s.shadeModel = shadeModel;
         s.polyFactor = polyFactor; s.polyUnits = polyUnits; s.lineWidth = lineWidth;
@@ -82,6 +84,7 @@ public final class AttribStack {
         if ((m & COLOR) != 0) {
             blend = s.blend; alphaTest = s.alphaTest; logicOpEnable = s.logicOpEnable;
             blendSrcRGB = s.blendSrcRGB; blendDstRGB = s.blendDstRGB; blendSrcA = s.blendSrcA; blendDstA = s.blendDstA;
+            blendColorR = s.blendColorR; blendColorG = s.blendColorG; blendColorB = s.blendColorB; blendColorA = s.blendColorA;
             blendEq = s.blendEq; colorMask = s.colorMask; logicOp = s.logicOp; alphaFunc = s.alphaFunc; alphaRef = s.alphaRef;
         }
         if ((m & DEPTH) != 0) { depthTest = s.depthTest; depthFunc = s.depthFunc; depthMask = s.depthMask; }

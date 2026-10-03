@@ -82,11 +82,10 @@ static float4 lightVertex(constant FFUniforms& u, float4 color, float3 n, float3
     return float4(saturate(c), saturate(matDiffuse.a));
 }
 
-vertex FFOut ff_vertex(uint vid [[vertex_id]],
-                       device const uchar* vbuf [[buffer(0)]],
-                       constant VertexLayout& layout [[buffer(1)]],
-                       constant FFUniforms& u [[buffer(2)]],
-                       constant DrawTransform& xf [[buffer(3)]]) {
+// Fixed-function vertex processing of vertex `vid` (shared by points/lines/triangles
+// and the wide-line expansion below). Returns GL clip space in `glClip` as well.
+static FFOut ffProcess(uint vid, device const uchar* vbuf, constant VertexLayout& layout,
+                       constant FFUniforms& u, constant DrawTransform& xf, thread float4& glClip) {
     device const uchar* v = vbuf + vid * layout.stride.x;
     float4 objPos = fetch(v, layout.pos, float4(0, 0, 0, 1));
     float4 color = fetch(v, layout.color, u.color);
@@ -97,6 +96,7 @@ vertex FFOut ff_vertex(uint vid [[vertex_id]],
     float4 eye = xf.modelview * objPos;
     FFOut o;
     float4 clip = u.proj * eye;
+    glClip = clip;
     if (u.flags.x & FF_FLIP_Y) clip.y = -clip.y;
     clip.z = 0.5 * (clip.z + clip.w); // GL [-1,1] depth to Metal [0,1]
     o.position = clip;
@@ -134,6 +134,51 @@ vertex FFOut ff_vertex(uint vid [[vertex_id]],
     } else {
         o.fogFactor = 1.0;
     }
+    return o;
+}
+
+vertex FFOut ff_vertex(uint vid [[vertex_id]],
+                       device const uchar* vbuf [[buffer(0)]],
+                       constant VertexLayout& layout [[buffer(1)]],
+                       constant FFUniforms& u [[buffer(2)]],
+                       constant DrawTransform& xf [[buffer(3)]]) {
+    float4 glClip;
+    return ffProcess(vid, vbuf, layout, u, xf, glClip);
+}
+
+// Wide lines (glLineWidth > 1): each segment becomes a quad of 6 vertices. Like GL's
+// non-antialiased wide lines, the quad is widened along the line's minor axis in window
+// space (x-major lines grow vertically), after clipping the segment against the near
+// plane. seg holds the segment endpoint indices; lp = (viewport w, h, width px, 0).
+// Flat shading takes GL's provoking vertex, the segment's second vertex.
+vertex FFOut ff_line_vertex(uint vid [[vertex_id]],
+                            device const uchar* vbuf [[buffer(0)]],
+                            constant VertexLayout& layout [[buffer(1)]],
+                            constant FFUniforms& u [[buffer(2)]],
+                            constant DrawTransform& xf [[buffer(3)]],
+                            device const uint* seg [[buffer(4)]],
+                            constant float4& lp [[buffer(5)]]) {
+    uint s = vid / 6u, c = vid % 6u;
+    uint ia = seg[s * 2u], ib = seg[s * 2u + 1u];
+    // quad corners q0 = A-, q1 = A+, q2 = B+, q3 = B-; triangles (q0 q1 q2) (q0 q2 q3)
+    bool atB = c == 2u || c == 4u || c == 5u;
+    float side = (c == 1u || c == 2u || c == 4u) ? 1.0 : -1.0;
+    float4 pa, pb;
+    FFOut o = ffProcess(atB ? ib : ia, vbuf, layout, u, xf, atB ? pb : pa);
+    FFOut other = ffProcess(atB ? ia : ib, vbuf, layout, u, xf, atB ? pa : pb);
+    if (fc_flat) o.colorFlat = atB ? o.colorFlat : other.colorFlat;
+    // clip against the near plane (z + w >= 0 in GL clip space)
+    float da = pa.z + pa.w, db = pb.z + pb.w;
+    if (da < 0.0 && db < 0.0) { o.position = float4(0, 0, 2, 1); return o; }
+    if (da < 0.0) pa = mix(pa, pb, da / (da - db));
+    if (db < 0.0) pb = mix(pb, pa, db / (db - da));
+    float2 dwin = (pb.xy / pb.w - pa.xy / pa.w) * lp.xy;
+    float4 p = atB ? pb : pa;
+    if (abs(dwin.x) >= abs(dwin.y)) p.y += side * (lp.z / lp.y) * p.w;
+    else p.x += side * (lp.z / lp.x) * p.w;
+    if (u.flags.x & FF_FLIP_Y) p.y = -p.y;
+    p.z = 0.5 * (p.z + p.w);
+    o.position = p;
     return o;
 }
 
