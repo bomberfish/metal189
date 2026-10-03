@@ -80,6 +80,27 @@ public final class Asm {
         };
     }
 
+    /** Inserts {@code hook(this)} at the head of a method. */
+    public static ClassPatch injectHeadThisOnly(final String mcp, final String srg, final String desc,
+                                                final String hookOwner, final String hookName, final String hookDesc) {
+        return new ClassPatch() {
+            public boolean apply(ClassNode cn) {
+                MethodNode m = find(cn, mcp, srg, desc);
+                if (m == null) {
+                    Metal189Transformer.LOG.error("metal189: {}.{}{} not found", cn.name, mcp, desc);
+                    return false;
+                }
+                InsnList l = new InsnList();
+                l.add(new VarInsnNode(Opcodes.ALOAD, 0));
+                l.add(new MethodInsnNode(Opcodes.INVOKESTATIC, hookOwner, hookName, hookDesc, false));
+                m.instructions.insert(l);
+                return true;
+            }
+
+            public boolean needsFrames() { return false; }
+        };
+    }
+
     /** Applies several patches to the same class. */
     public static ClassPatch chain(final ClassPatch... patches) {
         return new ClassPatch() {

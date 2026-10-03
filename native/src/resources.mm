@@ -316,9 +316,14 @@ Section* section(int sid) {
     return it == g_sections.end() ? nullptr : &it->second;
 }
 
-void sectionUpload(int sid, int layer, const void* data, size_t bytes, uint32_t vertexCount) {
+const std::unordered_map<int, Section>& allSections() { return g_sections; }
+
+void sectionUpload(int sid, int layer, const void* data, size_t bytes, uint32_t vertexCount, int ox, int oy, int oz) {
     if (layer < 0 || layer > 3) return;
     Section& s = g_sections[sid];
+    s.ox = ox;
+    s.oy = oy;
+    s.oz = oz;
     if (s.layers[layer]) g_deferredReleases.push_back(s.layers[layer]);
     s.layers[layer] = nil;
     s.vertices[layer] = 0;

@@ -98,9 +98,11 @@ public final class Patches {
             Asm.beforeCall("renderWorldPass", "func_175068_a", rwp, "dispatchRenderLast", "dispatchRenderLast", "metal189/world/Phases", "renderLast", -1),
             Asm.beforeCall("renderWorldPass", "func_175068_a", rwp, "renderHand", "func_78476_b", "metal189/world/Phases", "hand", -1)));
 
-        register("net.minecraft.client.renderer.chunk.RenderChunk",
+        register("net.minecraft.client.renderer.chunk.RenderChunk", Asm.chain(
             Asm.injectHead("deleteGlResources", "func_178566_a", "()V",
-                "metal189/terrain/Terrain", "delete", "(Lnet/minecraft/client/renderer/chunk/RenderChunk;)V", true));
+                "metal189/terrain/Terrain", "delete", "(Lnet/minecraft/client/renderer/chunk/RenderChunk;)V", true),
+            Asm.injectHeadThisOnly("setPosition", "func_178576_a", "(Lnet/minecraft/util/BlockPos;)V",
+                "metal189/terrain/Terrain", "moved", "(Lnet/minecraft/client/renderer/chunk/RenderChunk;)V")));
     }
 
     static ClassPatch forClass(String name) { return PATCHES.get(name); }

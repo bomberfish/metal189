@@ -1,6 +1,7 @@
 sleep 3
 world ref1 1234567
 waitWorld
+fly
 cmd /gamerule doDaylightCycle false
 cmd /gamerule doMobSpawning false
 cmd /weather clear
@@ -10,19 +11,23 @@ sleep 12
 cmd /kill @e[type=!Player]
 sleep 1
 capture CAPTURE_A
-cmd /tp @p 64 78 -32 135 10
+cmd /tp @p 64 96 -32 135 12
 sleep 6
 capture CAPTURE_B
 cmd /time set 12300
-cmd /tp @p 64 82 -32 90 5
+cmd /tp @p 64 96 -32 90 8
 sleep 3
 capture CAPTURE_C
-cmd /time set 6000
-cmd /tp @p 145 76 64 -45 50
-sleep 4
-capture CAPTURE_D
 cmd /time set 18000
-cmd /tp @p 64 82 -32 135 10
+cmd /tp @p 64 96 -32 135 8
 sleep 3
 capture CAPTURE_E
+cmd /time set 6000
+cmd /tp @p 78 67 -199 160 14
+sleep 10
+capture CAPTURE_D
+cmd /time set 12300
+cmd /tp @p 104 66 -222 90 6
+sleep 3
+capture CAPTURE_F
 quit

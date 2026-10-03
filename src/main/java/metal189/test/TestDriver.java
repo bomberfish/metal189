@@ -204,6 +204,13 @@ public final class TestDriver {
             case "slot":
                 if (mc.thePlayer != null) mc.thePlayer.inventory.currentItem = Integer.parseInt(a[1]);
                 return true;
+            case "fly":
+                // keep the camera where /tp put it (creative flight)
+                if (mc.thePlayer != null) {
+                    mc.thePlayer.capabilities.isFlying = !"off".equals(a.length > 1 ? a[1] : "on");
+                    mc.thePlayer.sendPlayerAbilities();
+                }
+                return true;
             case "perspective":
                 mc.gameSettings.thirdPersonView = Integer.parseInt(a[1]);
                 return true;

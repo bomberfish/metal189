@@ -2,6 +2,7 @@
 #pragma once
 #import "engine.h"
 #include "ff.h"
+#include <unordered_map>
 
 namespace m189 {
 
@@ -40,9 +41,11 @@ void meshDelete(int id);
 struct Section {
     id<MTLBuffer> layers[4] = {nil, nil, nil, nil};
     uint32_t vertices[4] = {0, 0, 0, 0};
+    int32_t ox = 0, oy = 0, oz = 0;   // world block coordinates of the section origin
 };
 Section* section(int id);
-void sectionUpload(int id, int layer, const void* data, size_t bytes, uint32_t vertexCount);
+const std::unordered_map<int, Section>& allSections();
+void sectionUpload(int id, int layer, const void* data, size_t bytes, uint32_t vertexCount, int ox, int oy, int oz);
 void sectionDelete(int id);
 
 StagingAlloc stagingAlloc(size_t bytes);

@@ -11,6 +11,7 @@
 #include <cmath>
 
 namespace m189 {
+extern int g_optAdvDebug;
 
 extern int g_optQuadDiagonal;
 
@@ -31,14 +32,15 @@ namespace {
 
 struct Targets {
     int w = 0, h = 0;
-    id<MTLTexture> albedo, normal, light, hdr;
+    id<MTLTexture> albedo, normal, light, hdr, sceneColor, sceneDepth;
     std::vector<id<MTLTexture>> bloom;
 };
 
 struct State {
     bool init = false;
     id<MTLRenderPipelineState> gTerrain[4], gGeneric[2], shadowTerrain[2], shadowGeneric[2];
-    id<MTLRenderPipelineState> lightPso, waterPso, tonemapPso, bloomDown, bloomUp;
+    id<MTLRenderPipelineState> lightPso, waterPso, tonemapPso, bloomDown, bloomUp, skyLutPso;
+    id<MTLTexture> skyLut;
     id<MTLDepthStencilState> depthWrite, depthTestNoWrite, depthAlways;
     id<MTLSamplerState> shadowCmp, linearClamp;
     id<MTLTexture> shadowMap;
@@ -99,6 +101,16 @@ bool initState() {
     ld.fragmentFunction = fn(@"light_fragment");
     ld.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
     S.lightPso = pso(ld);
+
+    MTLRenderPipelineDescriptor* sl = [MTLRenderPipelineDescriptor new];
+    sl.vertexFunction = fn(@"fullscreen_vertex");
+    sl.fragmentFunction = fn(@"skylut_fragment");
+    sl.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+    S.skyLutPso = pso(sl);
+    MTLTextureDescriptor* ltd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:256 height:128 mipmapped:YES];
+    ltd.storageMode = MTLStorageModePrivate;
+    ltd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    S.skyLut = [device() newTextureWithDescriptor:ltd];
 
     MTLRenderPipelineDescriptor* wd = [MTLRenderPipelineDescriptor new];
     wd.vertexFunction = fn(@"water_vertex");
@@ -170,6 +182,8 @@ void ensureTargets(int w, int h) {
     S.t.normal = rt(MTLPixelFormatRGBA16Float, w, h, @"gNormal");
     S.t.light = rt(MTLPixelFormatRGBA8Unorm, w, h, @"gLight");
     S.t.hdr = rt(MTLPixelFormatRGBA16Float, w, h, @"hdr");
+    S.t.sceneColor = rt(MTLPixelFormatRGBA16Float, w, h, @"sceneColor");
+    S.t.sceneDepth = rt(MTLPixelFormatDepth32Float, w, h, @"sceneDepth");
     S.t.bloom.clear();
     int bw = w, bh = h;
     for (int i = 0; i < 6 && bw > 8 && bh > 8; i++) {
@@ -225,6 +239,27 @@ void sectionMatrix(const simd_float4x4& mv, float ox, float oy, float oz, float*
 
 simd_float3 normalize3(simd_float3 v) { float l = simd_length(v); return l > 0 ? v / l : v; }
 
+// Transmittance of the atmosphere towards `dir` from the ground (matches adv.metal's model).
+simd_float3 transmittance(simd_float3 dir) {
+    const double Re = 6360e3, Ra = 6460e3;
+    double ox = 0, oy = Re + 120.0, oz = 0;
+    double b = oy * dir.y, c = oy * oy - Ra * Ra;
+    double t = -b + sqrt(std::max(0.0, b * b - c));
+    double bg = oy * dir.y, cg = oy * oy - Re * Re, hg = bg * bg - cg;
+    if (dir.y < 0 && hg > 0 && -bg - sqrt(hg) > 0) return simd_make_float3(0, 0, 0);
+    const int N = 32;
+    double ds = t / N, odR = 0, odM = 0;
+    for (int i = 0; i < N; i++) {
+        double s = (i + 0.5) * ds;
+        double px = ox + dir.x * s, py = oy + dir.y * s, pz = oz + dir.z * s;
+        double h = sqrt(px * px + py * py + pz * pz) - Re;
+        odR += exp(-h / 8000.0) * ds;
+        odM += exp(-h / 1200.0) * ds;
+    }
+    return simd_make_float3((float)exp(-(5.8e-6 * odR + 21e-6 * 1.1 * odM)), (float)exp(-(13.5e-6 * odR + 21e-6 * 1.1 * odM)),
+                            (float)exp(-(33.1e-6 * odR + 21e-6 * 1.1 * odM)));
+}
+
 // Orthographic light projection centred on the camera, snapped to shadow texels
 // in absolute world space so shadows do not shimmer as the camera moves.
 simd_float4x4 shadowMatrix(const EnvCmd& env, simd_float3 sunWorld, float radius, int res) {
@@ -272,10 +307,9 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
     fr.sunDirView = simd_make_float4(normalize3(sunViewDir), day > 0.001f ? 1.0f : 0.0f);
     fr.moonDirView = simd_make_float4(normalize3(-sunViewDir), 0);
     fr.sunDirWorld = simd_make_float4(sun, day);
-    float warm = std::clamp(sunH / 0.35f, 0.0f, 1.0f);
-    simd_float3 sunCol = simd_mix(simd_make_float3(1.0f, 0.50f, 0.24f), simd_make_float3(1.0f, 0.94f, 0.86f), simd_make_float3(warm, warm, warm));
-    fr.sunColor = simd_make_float4(sunCol * 2.1f * day * (1.0f - rain * 0.85f), 1);
-    fr.moonColor = simd_make_float4(simd_make_float3(0.20f, 0.25f, 0.36f) * night * (1.0f - rain * 0.7f), 1);
+    simd_float3 sunCol = transmittance(simd_make_float3(sun.x, std::max(sun.y, 0.02f), sun.z));
+    fr.sunColor = simd_make_float4(sunCol * 2.5f * day * (1.0f - rain * 0.85f), 1);
+    fr.moonColor = simd_make_float4(simd_make_float3(0.13f, 0.16f, 0.25f) * night * (1.0f - rain * 0.7f), 1);
     auto lin = [](float c) { return powf(std::max(c, 0.0f), 2.2f); };
     simd_float3 skyV = simd_make_float3(lin(env.skyR), lin(env.skyG), lin(env.skyB));
     simd_float3 fogV = simd_make_float3(lin(w.fogColor[0]), lin(w.fogColor[1]), lin(w.fogColor[2]));
@@ -286,17 +320,18 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
     float skyLum = simd_dot(skyMix, simd_make_float3(0.2126f, 0.7152f, 0.0722f));
     simd_float3 amb = simd_mix(simd_make_float3(skyLum, skyLum, skyLum), skyMix, simd_make_float3(0.45f, 0.45f, 0.45f)) * 0.75f;
     amb += simd_make_float3(0.030f, 0.036f, 0.052f) * night;   // moonlit sky
-    fr.ambient = simd_make_float4(amb, 1);
+    fr.ambient = simd_make_float4(amb, 1.0f);
     fr.blockLight = simd_make_float4(1.0f * 1.7f, 0.60f * 1.7f, 0.30f * 1.7f, 2.2f);
     fr.fog = simd_make_float4(w.fogStart, w.fogEnd, rain, (float)env.inFluid);
     fr.fogColor = simd_make_float4(w.fogColor[0], w.fogColor[1], w.fogColor[2], 1);
     float shadowRadius = 112.0f;
     fr.params = simd_make_float4(env.timeSeconds, rain, 1.0f, shadowRadius);
     fr.screen = simd_make_float4(W, H, 1.0f / W, 1.0f / H);
-    fr.camera = simd_make_float4(env.camFracX + (float)(env.camBlockX & 1023), env.camFracY, env.camFracZ + (float)(env.camBlockZ & 1023), 0);
+    fr.camera = simd_make_float4(env.camFracX + (float)(env.camBlockX & 1023), env.camFracY, env.camFracZ + (float)(env.camBlockZ & 1023),
+                                 env.starBrightness);
     uint32_t features = g_features;
     if (env.dimension != 0) features &= ~ADV_SHADOWS; // no sun in the Nether / End
-    fr.flags = simd_make_uint4(features, (uint32_t)env.dimension, (uint32_t)S.frame, 0);
+    fr.flags = simd_make_uint4(features, (uint32_t)env.dimension, (uint32_t)S.frame, (uint32_t)g_optAdvDebug);
     int shadowRes = 4096;
     if (features & ADV_SHADOWS) {
         ensureShadowMap(shadowRes);
@@ -320,16 +355,22 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [e setVertexBuffer:g_materials offset:0 atIndex:5];
         TexEntry* atlas = texture(w.atlasTex);
         if (atlas && atlas->tex) [e setFragmentTexture:atlas->tex atIndex:0];
+        // Every loaded section near the camera casts shadows, not just the visible ones.
+        double camX = env.camBlockX + (double)env.camFracX, camY = env.camBlockY + (double)env.camFracY,
+               camZ = env.camBlockZ + (double)env.camFracZ;
+        float reach = shadowRadius + 24.0f;
         for (int layer = 0; layer < 3; layer++) {
             bool alpha = layer > 0;
             [e setRenderPipelineState:S.shadowTerrain[alpha ? 1 : 0]];
             const uint32_t* sp = w.layerSampler[layer];
             [e setFragmentSamplerState:samplerFor((int)sp[0], (int)sp[1], (int)sp[2], (int)sp[3], (int)sp[4],
                                                   *(const float*)&sp[5], *(const float*)&sp[6], *(const float*)&sp[7]) atIndex:0];
-            for (const AdvTerrainEntry& t : w.terrain[layer]) {
-                Section* s = section((int)t.section);
-                if (!s || !s->layers[layer]) continue;
-                simd_float4 off = simd_make_float4(t.x, t.y, t.z, 0);
+            for (const auto& kv : allSections()) {
+                const Section* s = &kv.second;
+                if (!s->layers[layer]) continue;
+                float tx = (float)(s->ox - camX), ty = (float)(s->oy - camY), tz = (float)(s->oz - camZ);
+                if (fabsf(tx + 8) > reach || fabsf(tz + 8) > reach || fabsf(ty + 8) > reach + 64) continue;
+                simd_float4 off = simd_make_float4(tx, ty, tz, 0);
                 [e setVertexBytes:&off length:sizeof off atIndex:4];
                 [e setVertexBuffer:s->layers[layer] offset:0 atIndex:0];
                 uint32_t quads = s->vertices[layer] / 4;
@@ -418,6 +459,23 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [e endEncoding];
     }
 
+    // ---- sky-view LUT (+ mips used as ambient irradiance) ----
+    {
+        MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = S.skyLut;
+        rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+        e.label = @"skylut";
+        [e setRenderPipelineState:S.skyLutPso];
+        [e setFragmentBytes:&fr length:sizeof fr atIndex:1];
+        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [e endEncoding];
+        id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+        [b generateMipmapsForTexture:S.skyLut];
+        [b endEncoding];
+    }
+
     // ---- lighting + sky -> HDR ----
     {
         MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -433,13 +491,20 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [e setFragmentTexture:S.t.light atIndex:2];
         [e setFragmentTexture:depth atIndex:3];
         [e setFragmentTexture:(features & ADV_SHADOWS) ? S.shadowMap : depth atIndex:4];
+        [e setFragmentTexture:S.skyLut atIndex:5];
         [e setFragmentSamplerState:S.shadowCmp atIndex:0];
+        [e setFragmentSamplerState:S.linearClamp atIndex:1];
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [e endEncoding];
     }
 
     // ---- translucent terrain (water, glass, ice) ----
     if (!w.terrain[3].empty()) {
+        // refraction and screen-space reflections read the opaque scene from copies
+        id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+        [b copyFromTexture:S.t.hdr toTexture:S.t.sceneColor];
+        if (depth.pixelFormat == S.t.sceneDepth.pixelFormat) [b copyFromTexture:depth toTexture:S.t.sceneDepth];
+        [b endEncoding];
         MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.colorAttachments[0].texture = S.t.hdr;
         rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
@@ -463,6 +528,10 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [e setVertexBuffer:g_materials offset:0 atIndex:5];
         [e setFragmentTexture:(features & ADV_SHADOWS) ? S.shadowMap : depth atIndex:4];
         [e setFragmentSamplerState:S.shadowCmp atIndex:1];
+        [e setFragmentTexture:S.skyLut atIndex:5];
+        [e setFragmentSamplerState:S.linearClamp atIndex:2];
+        [e setFragmentTexture:S.t.sceneColor atIndex:6];
+        [e setFragmentTexture:S.t.sceneDepth atIndex:7];
         TexEntry* atlas = texture(w.atlasTex);
         if (atlas && atlas->tex) [e setFragmentTexture:atlas->tex atIndex:0];
         const uint32_t* sp = w.layerSampler[3];
@@ -511,7 +580,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             rp.colorAttachments[0].storeAction = MTLStoreActionStore;
             id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
             [e setRenderPipelineState:S.bloomUp];
-            simd_float4 p = simd_make_float4(0, 0, 1.0f / s.width, 1.0f / s.height);
+            simd_float4 p = simd_make_float4(0.75f, 0, 1.0f / s.width, 1.0f / s.height); // x: weight of the coarser level
             [e setFragmentBytes:&p length:sizeof p atIndex:0];
             [e setFragmentTexture:s atIndex:0];
             [e setFragmentSamplerState:S.linearClamp atIndex:0];

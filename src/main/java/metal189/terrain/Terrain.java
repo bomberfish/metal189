@@ -46,7 +46,9 @@ public final class Terrain {
         if (!Minecraft.getMinecraft().isCallingFromMinecraftThread()) return null;
         int count = wr.getVertexCount();
         int stride = wr.getVertexFormat().getNextOffset();
-        Native.sectionUpload(idFor(rc), layer.ordinal(), Mem.address(wr.getByteBuffer()), count * stride, count);
+        BlockPos pos = rc.getPosition();
+        Native.sectionUpload(idFor(rc), layer.ordinal(), Mem.address(wr.getByteBuffer()), count * stride, count,
+            pos.getX(), pos.getY(), pos.getZ());
         wr.setTranslation(0.0, 0.0, 0.0);
         return Futures.immediateFuture(null);
     }
@@ -78,6 +80,12 @@ public final class Terrain {
             Mem.U.putByte(a + 1, lo);
             Mem.U.putByte(a + 3, hi);
         }
+    }
+
+    /** Head of RenderChunk.setPosition: the old geometry no longer describes the world there. */
+    public static void moved(RenderChunk rc) {
+        Integer id = ids.get(rc);
+        if (id != null) Native.sectionDelete(id);
     }
 
     /** Head of RenderChunk.deleteGlResources. */

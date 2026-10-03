@@ -23,12 +23,14 @@ int g_optQuadDiagonal = 1; // 1: split quads along v1-v3 like Apple's GL, 0: alo
 
 extern bool g_optPresent;
 extern bool g_optGpuStats;
+int g_optAdvDebug = 0; // advanced pipeline debug view (see light_fragment)
 
 void setOption(int key, int value) {
     switch (key) {
         case 1: g_optQuadDiagonal = value; break;
         case 2: g_optPresent = value != 0; break;
         case 3: g_optGpuStats = value != 0; break;
+        case 4: g_optAdvDebug = value; break;
         default: break;
     }
 }
