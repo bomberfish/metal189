@@ -76,7 +76,9 @@ struct Targets {
 
 struct State {
     bool init = false;
-    id<MTLRenderPipelineState> gTerrain[4], gGeneric[2], shadowTerrain[4], shadowGeneric[2];
+    id<MTLRenderPipelineState> gTerrain[4], gGeneric[2], shadowTerrain[4], shadowGeneric[2], shadowWater;
+    id<MTLTexture> waterShadow;          // water surfaces in light space (half the shadow map's resolution)
+    int waterShadowRes = 0;
     id<MTLRenderPipelineState> lightPso[2], waterPso[2], tonemapPso, bloomDown, bloomUp, skyLutPso, taaPso, cloudsPso;
     // volumetric clouds
     id<MTLComputePipelineState> cloudNoiseKernel;
@@ -156,6 +158,13 @@ bool initState() {
         sd.fragmentFunction = fn(@"shadow_fragment", alpha);
         sd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
         S.shadowTerrain[i] = pso(sd);
+    }
+    {
+        MTLRenderPipelineDescriptor* sd = [MTLRenderPipelineDescriptor new];
+        sd.vertexFunction = fn(@"shadow_water_vertex");
+        sd.fragmentFunction = fn(@"shadow_water_fragment");
+        sd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+        S.shadowWater = pso(sd);
     }
     for (int i = 0; i < 2; i++) {
         S.gGeneric[i] = pso(gbufDesc(fn(@"gbuf_generic_vertex", i), fn(@"gbuf_generic_fragment", i)));
@@ -397,6 +406,16 @@ void ensureTargets(int w, int h) {
         bh = std::max(1, bh / 2);
         S.t.bloom.push_back(rt(MTLPixelFormatRGBA16Float, bw, bh, @"bloom"));
     }
+}
+
+void ensureWaterShadow(int res) {
+    if (S.waterShadow && S.waterShadowRes == res) return;
+    MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:res height:res mipmapped:NO];
+    d.storageMode = MTLStorageModePrivate;
+    d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    S.waterShadow = [device() newTextureWithDescriptor:d];
+    S.waterShadow.label = @"water shadow";
+    S.waterShadowRes = res;
 }
 
 void ensureShadowMap(int res) {
@@ -712,6 +731,40 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
                          indexBuffer:quadIndices(quads) indexBufferOffset:0];
         }
         [e endEncoding];
+
+        // ---- water shadow map: how deep under water (along the light) everything is ----
+        if ((features & ADV_WATER) && S.shadowWater) {
+            ensureWaterShadow(std::max(512, shadowRes / 2));
+            MTLRenderPassDescriptor* wp = [MTLRenderPassDescriptor renderPassDescriptor];
+            wp.depthAttachment.texture = S.waterShadow;
+            wp.depthAttachment.loadAction = MTLLoadActionClear;
+            wp.depthAttachment.clearDepth = 1.0;
+            wp.depthAttachment.storeAction = MTLStoreActionStore;
+            profRender(wp, "water shadow");
+            id<MTLRenderCommandEncoder> we = [cb renderCommandEncoderWithDescriptor:wp];
+            we.label = @"water shadow";
+            [we setRenderPipelineState:S.shadowWater];
+            [we setDepthStencilState:S.depthWrite];
+            [we setCullMode:MTLCullModeNone];
+            [we setVertexBytes:&fr length:sizeof fr atIndex:1];
+            [we setVertexBuffer:g_materials offset:0 atIndex:5];
+            for (const auto& kv : allSections()) {
+                const Section* s = &kv.second;
+                if (!s->layers[3]) continue;
+                float tx = (float)(s->ox - camX), ty = (float)(s->oy - camY), tz = (float)(s->oz - camZ);
+                if (fabsf(tx + 8) > cullReach || fabsf(tz + 8) > cullReach) continue;
+                if (outsideShadowBox(tx, ty, tz)) continue;
+                simd_float4 off = simd_make_float4(tx, ty, tz, 0);
+                [we setVertexBytes:&off length:sizeof off atIndex:4];
+                [we setVertexBuffer:s->layers[3] offset:0 atIndex:0];
+                uint32_t quads = s->vertices[3] / 4;
+                [we drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:quads * 6 indexType:MTLIndexTypeUInt32
+                              indexBuffer:quadIndices(quads) indexBufferOffset:0];
+            }
+            [we endEncoding];
+            features |= ADV_WATER_SHADOW;
+            fr.flags.x = features;
+        }
     }
 
     // ---- G-buffer ----
@@ -997,7 +1050,10 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [e setFragmentTexture:taaOn ? S.t.taa[S.taaIndex ^ 1] : S.t.hdr atIndex:11];
         [e setFragmentTexture:(features & (ADV_RT_AO | ADV_SSAO)) ? S.t.ao[0] : S.t.light atIndex:12];
         [e setFragmentTexture:(features & ADV_RT_GI) ? S.t.giBlur[1] : S.t.light atIndex:13];
+        [e setFragmentTexture:(features & ADV_WATER_SHADOW) ? S.waterShadow : depth atIndex:14];
+        [e setFragmentTexture:S.waveTex atIndex:15];
         [e setFragmentSamplerState:S.repeatLinear atIndex:3];
+        [e setFragmentSamplerState:S.waveSampler atIndex:4];
         if (rtLight) {
             TexEntry* atlas = texture(w.atlasTex);
             [e setFragmentAccelerationStructure:rts.tlas atBufferIndex:10];
@@ -1031,7 +1087,12 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         profBlit(bp, "scene copy");
         id<MTLBlitCommandEncoder> b = [cb blitCommandEncoderWithDescriptor:bp];
         [b copyFromTexture:S.t.hdr toTexture:S.t.sceneColor];
-        if (depth.pixelFormat == S.t.sceneDepth.pixelFormat) [b copyFromTexture:depth toTexture:S.t.sceneDepth];
+        // the copy matches the world's depth format (depth + stencil when a mod enabled
+        // Minecraft's framebuffer stencil), so it is never silently skipped
+        if (S.t.sceneDepth.pixelFormat != depth.pixelFormat || S.t.sceneDepth.width != depth.width ||
+            S.t.sceneDepth.height != depth.height)
+            S.t.sceneDepth = rt(depth.pixelFormat, (int)depth.width, (int)depth.height, @"sceneDepth");
+        [b copyFromTexture:depth toTexture:S.t.sceneDepth];
         [b endEncoding];
         MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.colorAttachments[0].texture = S.t.hdr;
@@ -1073,6 +1134,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [e setFragmentTexture:cloudMap atIndex:8];
         [e setFragmentTexture:S.waveTex atIndex:9];
         [e setFragmentSamplerState:S.waveSampler atIndex:4];
+        [e setFragmentTexture:S.t.light atIndex:10];
         TexEntry* atlas = texture(w.atlasTex);
         if (atlas && atlas->tex) [e setFragmentTexture:atlas->tex atIndex:0];
         const uint32_t* sp = w.layerSampler[3];

@@ -44,6 +44,13 @@ public final class Terrain {
     /** Head of ChunkRenderDispatcher.uploadChunk: uploads on the client thread, else lets vanilla queue it. */
     public static ListenableFuture<Object> upload(EnumWorldBlockLayer layer, WorldRenderer wr, RenderChunk rc, CompiledChunk cc) {
         if (!Minecraft.getMinecraft().isCallingFromMinecraftThread()) return null;
+        // A translucency re-sort with nothing to sort (no saved sort state) still "uploads" its
+        // worker's buffer, which holds whatever chunk that worker built last: vanilla never
+        // draws it, but the engine keeps every section's data for shadows and ray tracing, so
+        // such an upload is dropped and the section keeps its own data (layers that really
+        // became empty are cleared by compiled()).
+        if (wr.getVertexFormat() == null) return Futures.immediateFuture(null);
+        if (layer == EnumWorldBlockLayer.TRANSLUCENT && (cc == null || cc.getState() == null)) return Futures.immediateFuture(null);
         int count = wr.getVertexCount();
         int stride = wr.getVertexFormat().getNextOffset();
         BlockPos pos = rc.getPosition();

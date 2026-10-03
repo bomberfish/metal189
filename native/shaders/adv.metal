@@ -276,6 +276,31 @@ struct ShadowOut {
     float alpha;
 };
 
+// Water surfaces in light space (the water shadow map): only water writes depth, so the
+// lighting can tell how far sunlight travelled through water to reach a point.
+struct WaterShadowOut {
+    float4 position [[position]];
+    uint material [[flat]];
+};
+
+vertex WaterShadowOut shadow_water_vertex(uint vid [[vertex_id]],
+                                          device const BlockVertex* verts [[buffer(0)]],
+                                          constant AdvFrame& fr [[buffer(1)]],
+                                          constant float4& sectionWorld [[buffer(4)]],
+                                          device const uchar* materials [[buffer(5)]]) {
+    BlockVertex v = verts[vid];
+    ushort2 lmRaw = ushort2(v.lm);
+    uint state = uint(lmRaw.x >> 8) | (uint(lmRaw.y >> 8) << 8);
+    WaterShadowOut o;
+    o.position = fr.shadowViewProj * float4(float3(v.pos) + sectionWorld.xyz, 1.0);
+    o.material = materials[state];
+    return o;
+}
+
+fragment void shadow_water_fragment(WaterShadowOut in [[stage_in]]) {
+    if (in.material != 2) discard_fragment();
+}
+
 vertex ShadowOut shadow_terrain_vertex(uint vid [[vertex_id]],
                                        device const BlockVertex* verts [[buffer(0)]],
                                        constant AdvFrame& fr [[buffer(1)]],
@@ -1232,19 +1257,21 @@ static inline float underwaterFog(constant AdvFrame& fr, float d) {
     return 1.0 - exp(-0.6931 * r * r);
 }
 
-// Animated caustics on underwater surfaces (warped interference pattern).
-static float caustics(float2 p, float t) {
-    float2 q = p * 0.55;
-    float c = 0.0;
-    for (int i = 0; i < 3; i++) {
-        q += float2(sin(q.y * 1.7 + t * 0.9), cos(q.x * 1.3 - t * 0.7)) * 0.4;
-        c += abs(sin(q.x * 2.1) * sin(q.y * 2.3));
-    }
-    c /= 3.0;
-    return c * c * c * 4.0;
-}
-
 static float3 ssr(constant AdvFrame& fr, depth2d<float> depthTex, float3 eyePos, float3 rdView, float jitter);
+static float waterCaustics(constant AdvFrame& fr, texture2d<float> waveTex, sampler wrep, float2 p, float2 dX, float2 dY, float d);
+
+// Distance sunlight travelled through water before reaching `world` (camera-relative), in
+// blocks along the light direction; 0 when no water lies between it and the sun.
+static float waterLightPath(constant AdvFrame& fr, depth2d<float> waterShadow, sampler s, float3 world, float3 nWorld) {
+    float4 sc = fr.shadowViewProj * float4(world + nWorld * 0.05, 1.0);
+    float2 uv = float2(sc.x * 0.5 + 0.5, 0.5 - sc.y * 0.5);
+    if (any(uv < 0.0) || any(uv > 1.0) || sc.z > 1.0) return 0.0;
+    // the nearest water surface among the 4 texels around (filtering would blend in the
+    // "no water" texels next to walls and lose the water at its edges)
+    float4 g = waterShadow.gather(s, uv);
+    float wz = min(min(g.x, g.y), min(g.z, g.w));
+    return max((sc.z - wz) * 512.0 - 0.02, 0.0);   // light-space depth spans 512 blocks
+}
 
 fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                                constant AdvFrame& fr [[buffer(1)]],
@@ -1261,8 +1288,10 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                                texture2d<float> history [[texture(11)]],
                                texture2d<float> rtaoTex [[texture(12)]],
                                texture2d<float> giTex [[texture(13)]],
+                               depth2d<float> waterShadow [[texture(14)]],
+                               texture2d<float> waveTex [[texture(15)]],
                                sampler cmp [[sampler(0)]], sampler lin [[sampler(1)]],
-                               sampler rep [[sampler(3)]],
+                               sampler rep [[sampler(3)]], sampler wrep [[sampler(4)]],
                                instance_acceleration_structure tlas [[buffer(10), function_constant(ac_rt)]],
                                device const RtInstance* rtInst [[buffer(11), function_constant(ac_rt)]],
                                primitive_acceleration_structure entAs [[buffer(12), function_constant(ac_rt)]],
@@ -1325,6 +1354,20 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     // ray-traced ambient occlusion (half resolution, denoised; see rtao_fragment)
     if (fr.flags.x & ADV_RT_AO) ao *= mix(1.0, rtaoTex.sample(lin, in.uv).r, 0.85);
     else if (fr.flags.x & ADV_SSAO) ao *= mix(1.0, rtaoTex.sample(lin, in.uv).r, 0.7);
+    // sunlight that reached this point through water: absorbed over its path (red first)
+    // and focused into caustics by the waves it came through (water shadow map)
+    float2 wpX = dfdx(world.xz), wpY = dfdy(world.xz);   // outside the branch: derivatives need uniform flow
+    float waterPath = 0.0;
+    float3 waterSun = float3(1.0);
+    if ((fr.flags.x & ADV_WATER_SHADOW) && fr.flags.y == 0) {
+        waterPath = waterLightPath(fr, waterShadow, lin, world, nWorld);
+        if (waterPath > 0.0) {
+            float3 Lw = fr.sunDirView.w > 0.0 ? fr.sunDirWorld.xyz : -fr.sunDirWorld.xyz;
+            float3 entry = world + fr.camera.xyz + Lw * waterPath;
+            waterSun = exp(-(WATER_ABSORB.xyz + WATER_ABSORB.w) * waterPath) *
+                       waterCaustics(fr, waveTex, wrep, entry.xz, wpX, wpY, waterPath);
+        }
+    }
     float3 color = float3(0);
     float3 lightDir = fr.sunDirView.w > 0.0 ? fr.sunDirView.xyz : fr.moonDirView.xyz;
     float3 lightCol = fr.sunDirView.w > 0.0 ? fr.sunColor.rgb : fr.moonColor.rgb;
@@ -1344,7 +1387,8 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
             shadow = rtShadow;
             if (fr.flags.x & ADV_SHADOWS) shadow *= sampleShadow(fr, shadowMap, cmp, world, nWorld, saturate(ndl));
         } else if (fr.flags.x & ADV_SHADOWS) shadow = sampleShadow(fr, shadowMap, cmp, world, nWorld, saturate(ndl));
-        float skyGate = smoothstep(0.35, 0.9, skyLight); // no direct light deep inside caves
+        // no direct light deep inside caves; under water the light path above decides instead
+        float skyGate = waterPath > 0.0 ? 1.0 : smoothstep(0.35, 0.9, skyLight);
         if (fr.flags.x & ADV_CLOUDS) {
             float3 Lw = fr.sunDirView.w > 0.0 ? fr.sunDirWorld.xyz : -fr.sunDirWorld.xyz;
             shadow *= cloudShadow(fr, cloudNoise, rep, world + fr.camera.xyz, Lw);
@@ -1361,8 +1405,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
         float3 F = F0 + (1.0 - F0) * pow(1.0 - vh, 5.0);
         // lightCol is scaled so that Lambert is albedo * N.L; the specular lobe gets the matching pi
         float3 specular = 3.14159 * D * G * F / (4.0 * nv);
-        if (fr.fog.w > 0.5 && fr.fog.w < 1.5) shadow *= 0.3 + caustics((world + fr.camera.xyz).xz, fr.params.x);
-        color += lightCol * (albedo * diffuse * (1.0 - F) * (1.0 - metal) + specular * nl) * shadow * skyGate;
+        color += lightCol * waterSun * (albedo * diffuse * (1.0 - F) * (1.0 - metal) + specular * nl) * shadow * skyGate;
     }
     // sky light: diffuse irradiance + split-sum specular reflection (Lazarov's environment BRDF fit)
     {
@@ -1382,6 +1425,8 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
             color += albedo * (1.0 - metal) * giTex.sample(lin, in.uv).rgb * ao;   // ray-traced sky light + bounce
         else
             color += albedo * (1.0 - metal) * skyAmbient(fr, skyLut, lin, nWorld) * skyVis;
+        if (waterPath > 0.0)
+            color += albedo * (1.0 - metal) * underwaterInscatter(fr, skyLut, lin) * exp(-WATER_ABSORB.xyz * waterPath * 0.5) * 0.6 * ao;
         float3 refl = envCol * skyVis;
         // smooth surfaces: traced reflections (RT closest hit, or screen space into last frame's resolve)
         float smoothW = 1.0 - smoothstep(0.12, 0.4, rough);
@@ -1449,7 +1494,8 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     if (int(fr.flags.y) == -1) color += albedo * 0.03; // Nether ambient
     if (int(fr.flags.y) == 1) color += albedo * float3(0.045, 0.038, 0.06); // the End's dim violet ambient
 
-    // debug views: 1 no fog, 2 albedo, 3 normals, 4 white albedo lighting, 5 shadow term
+    // debug views: 1 no fog, 2 albedo, 3 normals, 4 white albedo lighting, 5 shadow term, 6 RT shadow,
+    // 7 sunlight's path through water (yellow shallow, red deep), 8 lightmap (red sky, green block)
     uint dbg = fr.flags.w;
     if (dbg == 1) return float4(color, 1.0);
     if (dbg == 2) return float4(albedo, 1.0);
@@ -1457,6 +1503,8 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     if (dbg == 4) return float4(color / max(albedo, 0.02), 1.0);
     if (dbg == 5) return float4(float3((fr.flags.x & ADV_SHADOWS) ? sampleShadow(fr, shadowMap, cmp, world, nWorld, saturate(ndl)) : 1.0), 1.0);
     if (dbg == 6) return float4(float3(rtShadow), 1.0);
+    if (dbg == 7) return float4(waterPath > 0.0 ? float3(1.0, 1.0 - saturate(waterPath / 16.0), 0.2) : float3(0.0), 1.0);
+    if (dbg == 8) return float4(skyLight, blockL, 0.0, 1.0);    // G-buffer lightmap: red sky, green block
 
     float dist = length(eye);
     if (fr.fog.w > 1.5) {
@@ -1582,6 +1630,34 @@ static WaterWaves waterWaves(constant AdvFrame& fr, texture2d<float> waveTex, sa
     return w;
 }
 
+// Caustics where sunlight entered the water at world xz `p` and travelled d blocks: the
+// waves' curvature (the divergence of their slope, from the two finer octaves) focuses the
+// refracted light into bright lines or spreads it. 1 + 0.25 d lap is the change in the
+// light's footprint (the refracted ray bends by about a quarter of the slope); intensity
+// is its inverse. Fades with depth as the pattern blurs out.
+static float waterCaustics(constant AdvFrame& fr, texture2d<float> waveTex, sampler wrep, float2 p, float2 dX, float2 dY, float d) {
+    const float tiles[2] = {2.3, 7.6};
+    const float angles[2] = {0.0, 0.65};
+    const float weights[2] = {0.45, 0.8};
+    const float e = 0.06;   // blocks
+    float size = max(WATER_WAVES.y, 0.05), t = fr.params.x;
+    float lap = 0.0;
+    for (int i = 0; i < 2; i++) {
+        float L = tiles[i] * size;
+        float c = cos(angles[i]), s = sin(angles[i]);
+        float2x2 toLocal = float2x2(float2(c, -s), float2(s, c));
+        float2 q = toLocal * p;
+        q.y += t * WATER_WAVES.z * 0.25 * sqrt(L);
+        gradient2d gr = gradient2d(toLocal * dX / L, toLocal * dY / L);
+        float gx1 = waveTex.sample(wrep, (q + float2(e, 0)) / L, gr).x, gx0 = waveTex.sample(wrep, (q - float2(e, 0)) / L, gr).x;
+        float gy1 = waveTex.sample(wrep, (q + float2(0, e)) / L, gr).y, gy0 = waveTex.sample(wrep, (q - float2(0, e)) / L, gr).y;
+        lap += (gx1 - gx0 + gy1 - gy0) / (2.0 * e) * weights[i];
+    }
+    lap *= 0.072 * WATER_WAVES.x;
+    float I = 1.0 / max(1.0 + 0.25 * min(d, 8.0) * lap, 0.3);
+    return mix(1.0, min(I, 3.0), saturate(WATER_COLOR.w * exp(-d / 16.0)));
+}
+
 // Screen-space ray march against the opaque depth: exponentially growing steps, then a
 // binary search on the first crossing. Returns the hit uv (xy) and a confidence (z).
 static float3 ssr(constant AdvFrame& fr, depth2d<float> depthTex, float3 eyePos, float3 rdView, float jitter) {
@@ -1647,6 +1723,7 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
                                texture2d<float> skyLut [[texture(5)]], sampler lin [[sampler(2)]],
                                texture2d<float> sceneColor [[texture(6)]], depth2d<float> sceneDepth [[texture(7)]],
                                texture2d<float> waveTex [[texture(9)]], sampler wrep [[sampler(4)]],
+                               texture2d<float> gLight [[texture(10)]],
                                instance_acceleration_structure tlas [[buffer(10), function_constant(ac_rt)]],
                                device const RtInstance* rtInst [[buffer(11), function_constant(ac_rt)]],
                                primitive_acceleration_structure entAs [[buffer(12), function_constant(ac_rt)]],
@@ -1745,6 +1822,7 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
     float3 refr = sceneColor.read(uint2(refrPx)).rgb;
     float thickness = sceneD >= 1.0 ? 64.0 : max(length(sceneEye) - dist, 0.0);
 
+    if (fr.flags.w != 0) return float4(refr, 1.0);   // debug views show through the water
     // the water column: absorption (red first) and light scattered back by the water itself
     float3 Tw = exp(-thickness * sigT);
     float3 below = refr * Tw + inLight * waterCol * (1.0 - Tw);
@@ -1753,7 +1831,8 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
     // thin out to scattered bubbles over shallow ground (full-height surfaces only, so
     // flowing water's lower levels stay clear)
     float foam = 0.0;
-    if (top && WATER_SURFACE.w > 0.0) {
+    uint behind = uint(gLight.read(ipx).z * 255.0 + 0.5);   // material of the opaque pixel below
+    if (top && WATER_SURFACE.w > 0.0 && behind != 7) {      // terrain makes foam, mobs swimming by do not
         float3 sceneWorld0 = (fr.invView * float4(sceneEye0, 1.0)).xyz;
         float depthBelow = sceneD0 >= 1.0 ? 64.0 : max(in.world.y - sceneWorld0.y, 0.0);
         float shore = saturate(1.0 - depthBelow / max(WATER_UNDER.w, 1e-3));

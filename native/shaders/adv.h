@@ -50,6 +50,7 @@ struct AdvFrame {
 #define ADV_RT_AO     (1u << 13)
 #define ADV_RT_GI     (1u << 14)
 #define ADV_RT_ENTITIES (1u << 15) // engine-set: this frame's entity acceleration structure is bound
+#define ADV_WATER_SHADOW (1u << 16) // engine-set: the water shadow map (water surfaces in light space) is valid
 
 // Per-item data for G-buffer/shadow draws of captured (non-terrain) geometry.
 struct AdvItem {
