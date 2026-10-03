@@ -83,7 +83,7 @@ struct State {
     id<MTLRenderPipelineState> lightPso[2], waterPso[2], tonemapPso, bloomDown, bloomUp, skyLutPso, taaPso, cloudsPso;
     // volumetric clouds
     id<MTLComputePipelineState> cloudNoiseKernel;
-    id<MTLRenderPipelineState> volPso, volCompPso, rtaoPso, aoBlurPso, giTracePso, giTemporalPso, giBlurPso, ssaoPso;
+    id<MTLRenderPipelineState> volPso, volCompPso, rtaoPso, aoBlurPso, giTracePso, giVoxPso, giTemporalPso, giBlurPso, ssaoPso;
     bool giHistory = false;
     int giIndex = 0;
     id<MTLComputePipelineState> exposureKernel, waveKernel;
@@ -257,6 +257,14 @@ bool initState() {
         gd.fragmentFunction = fn(@"gi_trace_fragment");
         gd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
         S.giTracePso = pso(gd);
+    }
+    {
+        // GI denoising, and world-space GI (no ray tracing needed)
+        MTLRenderPipelineDescriptor* gd = [MTLRenderPipelineDescriptor new];
+        gd.vertexFunction = fn(@"fullscreen_vertex");
+        gd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+        gd.fragmentFunction = fn(@"gi_voxel_fragment");
+        S.giVoxPso = pso(gd);
         gd.fragmentFunction = fn(@"giblur_fragment");
         S.giBlurPso = pso(gd);
         gd.fragmentFunction = fn(@"gi_temporal_fragment");
@@ -578,6 +586,24 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
     if (!rtOn) features &= ~(ADV_RT_SHADOW | ADV_RT_REFL | ADV_RT_AO | ADV_RT_GI);
     fr.rtCam = simd_make_float4(rts.camera, 0);
 
+    // world-space reflections and GI without ray tracing (and where ray tracing is asked for but
+    // unavailable, for GI): keep the voxel volume around the camera current
+    VoxelScene vox;
+    {
+        int giMode = (int)(g_tuning[60] + 0.5f);
+        bool wantWsr = (int)(g_tuning[48] + 0.5f) == 2 && !(features & ADV_RT_REFL);
+        bool wantWsgi = (giMode == 1 || (giMode == 2 && !(features & ADV_RT_GI))) && S.giVoxPso && S.giTemporalPso && S.giBlurPso;
+        TexEntry* atlasV = (wantWsr || wantWsgi) ? texture(w.atlasTex) : nullptr;
+        if (atlasV && atlasV->tex && voxelsUpdate(cb, camX, camY, camZ, (int)atlasV->tex.width, (int)atlasV->tex.height, vox)) {
+            if (wantWsr) features |= ADV_WSR;
+            if (wantWsgi) features |= ADV_WSGI;
+            fr.voxel = vox.wrap;
+            fr.voxCam = vox.cam;
+        } else if (!wantWsr && !wantWsgi) {
+            voxelsRelease();
+        }
+    }
+
     // TAA: Halton(2,3) sub-pixel jitter; history is reprojected with the camera motion
     bool taaOn = (features & ADV_TAA) && S.taaPso;
     if (!taaOn) features &= ~ADV_TAA;
@@ -588,7 +614,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         if (taaOn) fr.jitter = simd_make_float4((h2[k] - 0.5f) * 2.0f / W, (h3[k] - 0.5f) * 2.0f / H, 0, 0);
         double dx = camX - S.prevCam[0], dy = camY - S.prevCam[1], dz = camZ - S.prevCam[2];
         bool valid = taaOn && S.historyValid && S.prevDim == env.dimension && fabs(dx) + fabs(dy) + fabs(dz) < 16.0;
-        bool giOn = (features & ADV_RT_GI) && S.giTracePso && S.giTemporalPso && S.giBlurPso;
+        bool giOn = ((features & ADV_RT_GI) && S.giTracePso && S.giTemporalPso && S.giBlurPso) || (features & ADV_WSGI);
         fr.post.w = giOn && S.giHistory && S.prevDim == env.dimension && fabs(dx) + fabs(dy) + fabs(dz) < 16.0 ? 1.0f : 0.0f;
         S.giHistory = giOn;
         fr.prevViewProj = S.prevViewProj;
@@ -627,18 +653,6 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             draws.push_back(d);
         }
         if (rtBuildEntities(cb, draws, ents) && ents.triangles) features |= ADV_RT_ENTITIES;
-    }
-    // world-space reflections without ray tracing: keep the voxel volume around the camera current
-    VoxelScene vox;
-    if ((int)(g_tuning[48] + 0.5f) == 2 && !(features & ADV_RT_REFL)) {
-        TexEntry* atlasV = texture(w.atlasTex);
-        if (atlasV && atlasV->tex && voxelsUpdate(cb, camX, camY, camZ, (int)atlasV->tex.width, (int)atlasV->tex.height, vox)) {
-            features |= ADV_WSR;
-            fr.voxel = vox.wrap;
-            fr.voxCam = vox.cam;
-        }
-    } else {
-        voxelsRelease();
     }
     auto bindEntities = [&](id<MTLRenderCommandEncoder> e) {
         if (!ents.as) return;
@@ -937,8 +951,10 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         }
     }
 
-    // ---- ray-traced global illumination (one bounce, half resolution, denoised) ----
-    if ((features & ADV_RT_GI) && S.giTracePso && S.giTemporalPso && S.giBlurPso) {
+    // ---- global illumination (one bounce, half resolution, denoised): ray traced, or
+    // world-space through the voxel volume ----
+    bool rtGi = (features & ADV_RT_GI) && S.giTracePso && S.giTemporalPso && S.giBlurPso;
+    if (rtGi || (features & ADV_WSGI)) {
         TexEntry* atlasE = texture(w.atlasTex);
         MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.colorAttachments[0].texture = S.t.giSample;
@@ -947,21 +963,31 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         profRender(rp, "gi trace", true);
         id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
         e.label = @"gi trace";
-        [e setRenderPipelineState:S.giTracePso];
+        [e setRenderPipelineState:rtGi ? S.giTracePso : S.giVoxPso];
         [e setFragmentBytes:&fr length:sizeof fr atIndex:1];
         [e setFragmentTexture:depth atIndex:0];
         [e setFragmentTexture:S.t.linZ atIndex:1];
         [e setFragmentTexture:S.t.normal atIndex:2];
         [e setFragmentTexture:S.skyLut atIndex:5];
-        [e setFragmentAccelerationStructure:rts.tlas atBufferIndex:10];
-        [e setFragmentBuffer:rts.instances offset:0 atIndex:11];
-        [e setFragmentBuffer:g_emissions offset:0 atIndex:6];
         [e setFragmentTexture:atlasE && atlasE->tex ? atlasE->tex : S.t.albedo atIndex:7];
-        [e setFragmentSamplerState:S.pointClamp atIndex:2];
         [e setFragmentSamplerState:S.linearClamp atIndex:1];
-        if (rts.resources)
-            [e useResources:rts.resources->data() count:rts.resources->size() usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
-        bindEntities(e);
+        if (rtGi) {
+            [e setFragmentAccelerationStructure:rts.tlas atBufferIndex:10];
+            [e setFragmentBuffer:rts.instances offset:0 atIndex:11];
+            [e setFragmentBuffer:g_emissions offset:0 atIndex:6];
+            [e setFragmentSamplerState:S.pointClamp atIndex:2];
+            if (rts.resources)
+                [e useResources:rts.resources->data() count:rts.resources->size() usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
+            bindEntities(e);
+        } else {
+            [e setFragmentTexture:S.t.light atIndex:3];
+            [e setFragmentTexture:(features & ADV_SHADOWS) ? S.shadowMap : depth atIndex:4];
+            [e setFragmentSamplerState:S.shadowCmp atIndex:0];
+            [e setFragmentTexture:vox.tex atIndex:16];
+            [e setFragmentTexture:vox.occ atIndex:18];
+            [e setFragmentTexture:vox.shape atIndex:19];
+            [e setFragmentTexture:vox.occSlot atIndex:20];
+        }
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [e endEncoding];
         // temporal accumulation into the history ring
@@ -1067,7 +1093,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         // last frame's resolved image (screen-space reflections on smooth surfaces)
         [e setFragmentTexture:taaOn ? S.t.taa[S.taaIndex ^ 1] : S.t.hdr atIndex:11];
         [e setFragmentTexture:(features & (ADV_RT_AO | ADV_SSAO)) ? S.t.ao[0] : S.t.light atIndex:12];
-        [e setFragmentTexture:(features & ADV_RT_GI) ? S.t.giBlur[1] : S.t.light atIndex:13];
+        [e setFragmentTexture:(features & (ADV_RT_GI | ADV_WSGI)) ? S.t.giBlur[1] : S.t.light atIndex:13];
         [e setFragmentTexture:(features & ADV_WATER_SHADOW) ? S.waterShadow : depth atIndex:14];
         [e setFragmentTexture:S.waveTex atIndex:15];
         if (vox.valid) {

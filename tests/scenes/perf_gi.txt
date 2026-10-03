@@ -1,0 +1,32 @@
+sleep 3
+world ref1 1234567
+waitWorld
+cmd /gamerule doDaylightCycle false
+cmd /time set 6000
+config rtReflections false
+config globalIllumination 0
+cmd /tp @p 64 78 -32 135 10
+sleep 15
+fps 5 gi_off_a
+config globalIllumination 1
+sleep 3
+fps 5 gi_ws_a
+config globalIllumination 2
+sleep 3
+fps 5 gi_rt_a
+config globalIllumination 0
+sleep 3
+fps 5 gi_off_b
+config globalIllumination 1
+sleep 3
+fps 5 gi_ws_b
+config globalIllumination 2
+sleep 3
+fps 5 gi_rt_b
+config globalIllumination 1
+config globalIlluminationQuality 1
+sleep 3
+fps 5 gi_ws_2rays
+config globalIlluminationQuality 0
+config globalIllumination 0
+quit

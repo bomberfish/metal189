@@ -56,7 +56,7 @@ public final class Pipeline {
             if (Config.autoExposure) features |= AUTO_EXPOSURE;
             if (Config.ssao) features |= SSAO;
             if (Config.rtAmbientOcclusion) features |= RT_AO;
-            if (Config.rtGlobalIllumination) features |= RT_GI;
+            if (Config.globalIllumination == 2) features |= RT_GI;   // world-space where ray tracing is unavailable
         }
         if (advanced) Materials.upload();
         Native.setOption(OPT_SHADOW_RES, Config.shadowResolution);
@@ -154,6 +154,10 @@ public final class Pipeline {
         t[55] = Config.waterReflectionDistortion / 100f;
         t[56] = Config.rainWetness / 100f;
         t[57] = Config.rainPuddles ? 1 : 0;
+        // global illumination: 0 off, 1 world-space, 2 ray-traced; bounce strength; rays per texel
+        t[60] = Config.globalIllumination;
+        t[61] = Config.globalIlluminationStrength / 100f;
+        t[62] = 1 << Config.globalIlluminationQuality;
         for (int i = 0; i < TUNING; i++) metal189.engine.Mem.putFloat(tuning + i * 4L, t[i]);
         Native.advSetTuning(tuning, TUNING);
     }

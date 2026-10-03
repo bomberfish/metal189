@@ -158,6 +158,7 @@ vertex GTerrainOut gbuf_terrain_vertex(uint vid [[vertex_id]],
 // user settings (Pipeline.java TUNE_*)
 #define PBR_TUNE fr.tune[6]   // x: normal strength, y: specular strength, z: emission strength, w: format (0 LabPBR, 1 SEUS)
 #define POM_TUNE fr.tune[7]   // x: depth (blocks, 0 = off), y: steps, z: distance (blocks), w: PBR enabled
+#define GI_TUNE  fr.tune[15]  // x: global illumination (0 off, 1 world-space, 2 ray-traced), y: bounce strength, z: rays per texel
 
 // Parallax occlusion mapping: march the view ray into the height field (the normal atlas'
 // alpha: 1 = surface, 0 = deepest) until it passes below it, then interpolate between the
@@ -1291,8 +1292,54 @@ fragment float4 rtao_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& 
 // ---------------------------------------------------------------------------
 // ray-traced global illumination (one diffuse bounce, half resolution)
 
-// One cosine-weighted ray per texel; hits are shaded with sun (shadow ray), sky light and
-// emission, misses see the sky. Output: incoming indirect radiance (Lambert-normalised).
+// One cosine-weighted GI ray (ray index `ray` decorrelates several per texel).
+static float3 giTraceRay(constant AdvFrame& fr, float2 px, int ray, float3 world, float3 eye, float3 nWorld, float3 tx, float3 ty,
+                         texture2d<float> skyLut, instance_acceleration_structure tlas, device const RtInstance* rtInst,
+                         primitive_acceleration_structure entAs, device const RtEntVertex* entV, device const RtEntDraw* entD,
+                         device const RtEntTex* entT, device const uchar* emissions, texture2d<float> atlas, sampler pointS,
+                         sampler lin) {
+    float2 xi = hash22(px * 0.73 + float(fr.flags.z % 1024u) * float2(5.17, 11.3) + float(ray) * float2(1.37, 2.71));
+    float r = sqrt(xi.x), phi = 6.2831853 * xi.y;
+    float3 dir = normalize(tx * (r * cos(phi)) + ty * (r * sin(phi)) + nWorld * sqrt(max(0.0, 1.0 - xi.x)));
+    float3 o = world + fr.rtCam.xyz + nWorld * (0.01 + length(eye) * 0.0002);
+    RtHit h = rtClosest(tlas, rtInst, atlas, pointS, o, dir, 48.0);
+    if (fr.flags.x & ADV_RT_ENTITIES) {
+        RtHit eh = rtEntClosestSolid(entAs, o, dir, h.t);
+        if (eh.hit) return rtEntShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, entV, entD, entT, eh, o, dir, true) * GI_TUNE.y;
+    }
+    if (!h.hit) {
+        // sky (no sun disc: direct sun is handled by the deferred pass)
+        return (fr.flags.y != 0 ? toLinear(fr.fogColor.rgb) * 0.3 : skyBase(fr, skyLut, lin, dir)) * fr.ambient.a;
+    }
+    device const BlockVertex* v = rtInst[h.inst].verts[h.geom];
+    uint3 t = rtTri(h.prim);
+    float3 w = rtBary(h.bary);
+    float2 uv = float2(v[t.x].uv) * w.x + float2(v[t.y].uv) * w.y + float2(v[t.z].uv) * w.z;
+    float4 col = (float4(v[t.x].color) * w.x + float4(v[t.y].color) * w.y + float4(v[t.z].color) * w.z) * (1.0 / 255.0);
+    float2 lm = (float2(ushort2(v[t.x].lm) & ushort2(0xFF)) * w.x + float2(ushort2(v[t.y].lm) & ushort2(0xFF)) * w.y +
+                 float2(ushort2(v[t.z].lm) & ushort2(0xFF)) * w.z) * (1.0 / 240.0);
+    ushort2 lmRaw = ushort2(v[t.x].lm);
+    uint state = uint(lmRaw.x >> 8) | (uint(lmRaw.y >> 8) << 8);
+    float3 p0 = float3(v[t.x].pos), p1 = float3(v[t.y].pos), p2 = float3(v[t.z].pos);
+    float3 n = normalize(cross(p1 - p0, p2 - p0));
+    if (dot(n, dir) > 0.0) n = -n;
+    float3 albedo = toLinear(atlas.sample(pointS, uv, level(0)).rgb * col.rgb / faceShade(n));
+    float3 p = o + dir * h.t;
+    bool sunUp = fr.sunDirWorld.w > 0.0;
+    float3 L = sunUp ? fr.sunDirWorld.xyz : -fr.sunDirWorld.xyz;
+    float3 lightCol = sunUp ? fr.sunColor.rgb : fr.moonColor.rgb;
+    float3 c = float3(0);
+    float ndl = saturate(dot(n, L));
+    if (ndl > 0.0 && fr.flags.y == 0 && !rtOccluded(tlas, rtInst, atlas, pointS, p + n * 0.01, L, 256.0))
+        c += lightCol * albedo * ndl;
+    c += albedo * skyAmbient(fr, skyLut, lin, n) * lm.y * lm.y * fr.ambient.a;
+    c += albedo * fr.blockLight.rgb * pow(lm.x, fr.blockLight.a) * 0.5;
+    c += albedo * float(emissions[state]) * (6.0 / 255.0);
+    return c * GI_TUNE.y;
+}
+
+// Cosine-weighted rays per texel (GI quality); hits are shaded with sun (shadow ray), sky
+// light and emission, misses see the sky. Output: incoming indirect radiance (Lambert-normalised).
 fragment float4 gi_trace_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
                                   depth2d<float> depth [[texture(0)]], texture2d<float> gLinZ [[texture(1)]],
                                   texture2d<float> gNormal [[texture(2)]], texture2d<float> skyLut [[texture(5)]],
@@ -1316,44 +1363,11 @@ fragment float4 gi_trace_fragment(FullscreenOut in [[stage_in]], constant AdvFra
     float3 nWorld = normalize((fr.invView * float4(normalize(gNormal.read(fp).xyz), 0)).xyz);
     float3 up = abs(nWorld.y) < 0.999 ? float3(0, 1, 0) : float3(1, 0, 0);
     float3 tx = normalize(cross(up, nWorld)), ty = cross(nWorld, tx);
-    float2 xi = hash22(in.position.xy * 0.73 + float(fr.flags.z % 1024u) * float2(5.17, 11.3));
-    float r = sqrt(xi.x), phi = 6.2831853 * xi.y;
-    float3 dir = normalize(tx * (r * cos(phi)) + ty * (r * sin(phi)) + nWorld * sqrt(max(0.0, 1.0 - xi.x)));
-    float3 o = world + fr.rtCam.xyz + nWorld * (0.01 + length(eye) * 0.0002);
-    RtHit h = rtClosest(tlas, rtInst, atlas, pointS, o, dir, 48.0);
-    if (fr.flags.x & ADV_RT_ENTITIES) {
-        RtHit eh = rtEntClosestSolid(entAs, o, dir, h.t);
-        if (eh.hit) return float4(rtEntShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, entV, entD, entT, eh, o, dir, true), 1.0);
-    }
-    if (!h.hit) {
-        // sky (no sun disc: direct sun is handled by the deferred pass)
-        return float4(fr.flags.y != 0 ? toLinear(fr.fogColor.rgb) * 0.3 : skyBase(fr, skyLut, lin, dir), 1.0);
-    }
-    device const BlockVertex* v = rtInst[h.inst].verts[h.geom];
-    uint3 t = rtTri(h.prim);
-    float3 w = rtBary(h.bary);
-    float2 uv = float2(v[t.x].uv) * w.x + float2(v[t.y].uv) * w.y + float2(v[t.z].uv) * w.z;
-    float4 col = (float4(v[t.x].color) * w.x + float4(v[t.y].color) * w.y + float4(v[t.z].color) * w.z) * (1.0 / 255.0);
-    float2 lm = (float2(ushort2(v[t.x].lm) & ushort2(0xFF)) * w.x + float2(ushort2(v[t.y].lm) & ushort2(0xFF)) * w.y +
-                 float2(ushort2(v[t.z].lm) & ushort2(0xFF)) * w.z) * (1.0 / 240.0);
-    ushort2 lmRaw = ushort2(v[t.x].lm);
-    uint state = uint(lmRaw.x >> 8) | (uint(lmRaw.y >> 8) << 8);
-    float3 p0 = float3(v[t.x].pos), p1 = float3(v[t.y].pos), p2 = float3(v[t.z].pos);
-    float3 n = normalize(cross(p1 - p0, p2 - p0));
-    if (dot(n, dir) > 0.0) n = -n;
-    float3 albedo = toLinear(atlas.sample(pointS, uv, level(0)).rgb * col.rgb / faceShade(n));
-    float3 p = o + dir * h.t;
-    bool sunUp = fr.sunDirWorld.w > 0.0;
-    float3 L = sunUp ? fr.sunDirWorld.xyz : -fr.sunDirWorld.xyz;
-    float3 lightCol = sunUp ? fr.sunColor.rgb : fr.moonColor.rgb;
-    float3 c = float3(0);
-    float ndl = saturate(dot(n, L));
-    if (ndl > 0.0 && fr.flags.y == 0 && !rtOccluded(tlas, rtInst, atlas, pointS, p + n * 0.01, L, 256.0))
-        c += lightCol * albedo * ndl;
-    c += albedo * skyAmbient(fr, skyLut, lin, n) * lm.y * lm.y;
-    c += albedo * fr.blockLight.rgb * pow(lm.x, fr.blockLight.a) * 0.5;
-    c += albedo * float(emissions[state]) * (6.0 / 255.0);
-    return float4(c, 1.0);
+    float3 sum = float3(0.0);
+    int rays = clamp(int(GI_TUNE.z + 0.5), 1, 4);
+    for (int ray = 0; ray < rays; ray++)
+        sum += giTraceRay(fr, in.position.xy, ray, world, eye, nWorld, tx, ty, skyLut, tlas, rtInst, entAs, entV, entD, entT, emissions, atlas, pointS, lin);
+    return float4(sum / float(rays), 1.0);
 }
 
 // Temporal accumulation of the GI samples: reprojects last frame's history with the camera
@@ -1778,6 +1792,54 @@ static float3 voxShade(constant AdvFrame& fr, texture2d<float> atlas, depth2d<fl
     return c;
 }
 
+// Global illumination without ray tracing (world-space): like gi_trace_fragment, cosine-
+// weighted rays per texel at half resolution, but through the voxel volume, hits lit by
+// voxShade. A ray that leaves the volume before its length is up is as open as the lightmap
+// says; outside the volume, the sky light is the lightmap's as without GI.
+fragment float4 gi_voxel_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
+                                  depth2d<float> depth [[texture(0)]], texture2d<float> gLinZ [[texture(1)]],
+                                  texture2d<float> gNormal [[texture(2)]], texture2d<float> gLight [[texture(3)]],
+                                  depth2d<float> shadowMap [[texture(4)]], texture2d<float> skyLut [[texture(5)]],
+                                  texture2d<float> atlas [[texture(7)]],
+                                  texture3d<ushort> vox [[texture(16)]], texture3d<ushort> voxOcc [[texture(18)]],
+                                  texture3d<uint> voxShape [[texture(19)]], texture3d<ushort> voxOccSlot [[texture(20)]],
+                                  sampler cmp [[sampler(0)]], sampler lin [[sampler(1)]]) {
+    uint2 fp = min(uint2(in.position.xy) * 2u + 1u, uint2(fr.screen.xy) - 1u);
+    float d = depth.read(fp);
+    if (d >= 1.0) return float4(0.0);
+    float2 ndc = float2((float(fp.x) + 0.5) * fr.screen.z * 2.0 - 1.0, (float(fp.y) + 0.5) * fr.screen.w * 2.0 - 1.0) - fr.jitter.xy;
+    float4 pf = fr.invProj * float4(ndc, 1.0, 1.0);
+    float3 rd = pf.xyz / pf.w;
+    float3 eye = rd * (gLinZ.read(fp).r / -rd.z);
+    float3 world = (fr.invView * float4(eye, 1)).xyz;
+    float3 nWorld = normalize((fr.invView * float4(normalize(gNormal.read(fp).xyz), 0)).xyz);
+    float sky = gLight.read(fp).y;
+    float3 p = world + fr.voxCam.xyz + nWorld * 0.05;
+    float N = float(fr.voxel.w);
+    if (any(p < 1.0) || any(p > N - 1.0)) return float4(skyAmbient(fr, skyLut, lin, nWorld) * sky * sky * fr.ambient.a, 1.0);
+    float3 up = abs(nWorld.y) < 0.999 ? float3(0, 1, 0) : float3(1, 0, 0);
+    float3 tx = normalize(cross(up, nWorld)), ty = cross(nWorld, tx);
+    const float len = 40.0;
+    float3 sum = float3(0.0);
+    int rays = clamp(int(GI_TUNE.z + 0.5), 1, 4);
+    for (int ray = 0; ray < rays; ray++) {
+        float2 xi = hash22(in.position.xy * 0.73 + float(fr.flags.z % 1024u) * float2(5.17, 11.3) + float(ray) * float2(1.37, 2.71));
+        float r = sqrt(xi.x), phi = 6.2831853 * xi.y;
+        float3 dir = normalize(tx * (r * cos(phi)) + ty * (r * sin(phi)) + nWorld * sqrt(max(0.0, 1.0 - xi.x)));
+        // diffuse light needs no texture detail: a wide footprint picks coarse mips
+        VoxHit h = voxTrace(fr, vox, voxShape, voxOcc, voxOccSlot, atlas, p, dir, len, float2(0.5, 0.1));
+        if (h.hit) {
+            sum += voxShade(fr, atlas, shadowMap, cmp, skyLut, lin, h) * GI_TUNE.y;
+        } else {
+            float3 skyC = (fr.flags.y != 0 ? toLinear(fr.fogColor.rgb) * 0.3 : skyBase(fr, skyLut, lin, dir)) * fr.ambient.a;
+            float3 tf = (select(float3(0.0), float3(N), dir > 0.0) - p) / select(dir, float3(1e-9), abs(dir) < 1e-9);
+            float leaves = min(min(tf.x, tf.y), tf.z);   // where the ray leaves the volume
+            sum += leaves >= len ? skyC : skyC * sky * sky;
+        }
+    }
+    return float4(sum / float(rays), 1.0);
+}
+
 static float3 ssr(constant AdvFrame& fr, depth2d<float> depthTex, float3 eyePos, float3 rdView, float jitter);
 static float waterCaustics(constant AdvFrame& fr, texture2d<float> waveTex, sampler wrep, float2 p, float2 dX, float2 dY, float d);
 
@@ -1971,8 +2033,8 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
         }
         envCol *= mix(1.0, 0.3, saturate(-Rw.y * 2.5));
         float3 skyVis = float3(skyLight * skyLight * ao * fr.ambient.a);
-        if (fr.flags.x & ADV_RT_GI)
-            color += albedo * (1.0 - metal) * giTex.sample(lin, in.uv).rgb * ao;   // ray-traced sky light + bounce
+        if (fr.flags.x & (ADV_RT_GI | ADV_WSGI))
+            color += albedo * (1.0 - metal) * giTex.sample(lin, in.uv).rgb * ao;   // traced sky light + bounce
         else
             color += albedo * (1.0 - metal) * skyAmbient(fr, skyLut, lin, nWorld) * skyVis;
         if (waterPath > 0.0)

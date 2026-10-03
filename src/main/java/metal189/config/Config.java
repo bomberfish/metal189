@@ -34,7 +34,9 @@ public final class Config {
     public static boolean rtShadows = false;
     public static boolean rtReflections = false;
     public static boolean rtAmbientOcclusion = false;
-    public static boolean rtGlobalIllumination = false;
+    public static int globalIllumination = 0;            // 0 off, 1 world-space (voxels), 2 ray-traced
+    public static int globalIlluminationStrength = 100;  // bounce light, percent
+    public static int globalIlluminationQuality = 0;     // rays per texel: 0 one, 1 two, 2 four
     /** Entities (and the first-person player) in ray-traced reflections, AO and GI. */
     public static boolean rtEntities = true;
     /** Shaders mode: the first-person player casts a shadow (and appears in ray tracing). */
@@ -127,6 +129,10 @@ public final class Config {
         int version = version(p);
         if (version < 2) p.remove("ctrlClickRightClick");
         if (version < 3) p.remove("waterFoam");
+        // the RT Global Illumination switch became the Global Illumination mode
+        String rtGi = p.getProperty("rtGlobalIllumination");
+        if (rtGi != null && p.getProperty("globalIllumination") == null)
+            p.setProperty("globalIllumination", Boolean.parseBoolean(rtGi.trim()) ? "2" : "0");
         // a first start takes the default (High) profile, ray tracing included on hardware that accelerates it
         if (!f.isFile()) Options.applyProfile(Options.DEFAULT_PROFILE, metal189.world.Pipeline.rtAccelerated());
         for (Options.Opt o : Options.all()) {

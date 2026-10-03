@@ -54,6 +54,7 @@ struct AdvFrame {
 #define ADV_RT_ENTITIES (1u << 15) // engine-set: this frame's entity acceleration structure is bound
 #define ADV_WATER_SHADOW (1u << 16) // engine-set: the water shadow map (water surfaces in light space) is valid
 #define ADV_WSR          (1u << 17) // engine-set: the voxel volume for world-space reflections is bound
+#define ADV_WSGI         (1u << 18) // engine-set: global illumination from the voxel volume (giTex)
 
 // Per-item data for G-buffer/shadow draws of captured (non-terrain) geometry.
 struct AdvItem {

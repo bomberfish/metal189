@@ -123,22 +123,24 @@ public final class Options {
     public static final int DEFAULT_PROFILE = 2;
     // HW: on (1) only with hardware ray tracing. LOW_REFL: reflections on Low, world-space (2)
     // with hardware ray tracing and screen-space (1) without; from Medium up hardware ray
-    // tracing reflects with RT and the others world-space.
-    private static final int HW = -1, LOW_REFL = -2;
+    // tracing reflects with RT and the others world-space. GI: global illumination on Ultra,
+    // ray-traced (2) with hardware ray tracing, world-space (1) without.
+    private static final int HW = -1, LOW_REFL = -2, GI = -3;
     private static final String[] PROFILE_KEYS = {"shadows", "shadowResolution", "shadowDistance", "ssao", "volumetrics",
             "clouds", "taa", "pom", "pomQuality", "waterFoam", "reflections", "roughReflectionQuality", "rtShadows",
-            "rtReflections", "rtAmbientOcclusion", "rtGlobalIllumination", "rtEntities"};
+            "rtReflections", "rtAmbientOcclusion", "globalIllumination", "rtEntities"};
     private static final int[][] PROFILE_VALUES = {
         {1, 2048, 64, 0, 0, 0, 1, 0, 0, 0, LOW_REFL, 0, 0, 0, 0, 0, 0},
         {1, 2048, 96, 1, 0, 1, 1, 1, 0, 0, 2, 0, 0, HW, 0, 0, 0},
         {1, 4096, 112, 1, 1, 1, 1, 1, 1, 0, 2, 0, 0, HW, 0, 0, HW},
-        {1, 8192, 160, 1, 1, 1, 1, 1, 2, 0, 2, 1, HW, HW, HW, 0, HW},
+        {1, 8192, 160, 1, 1, 1, 1, 1, 2, 0, 2, 1, HW, HW, HW, GI, HW},
     };
 
     private static int profileValue(int p, int i, boolean hwRt) {
         int v = PROFILE_VALUES[p][i];
         if (v == HW) return hwRt ? 1 : 0;
         if (v == LOW_REFL) return hwRt ? 2 : 1;
+        if (v == GI) return hwRt ? 2 : 1;
         return v;
     }
 
@@ -277,7 +279,9 @@ public final class Options {
         toggle("rt", "rtShadows", RT);
         toggle("rt", "rtReflections", RT);
         toggle("rt", "rtAmbientOcclusion", RT);
-        toggle("rt", "rtGlobalIllumination", RT);
+        named("rt", "globalIllumination", S, 3);
+        slider("rt", "globalIlluminationStrength", S, 0, 300, 10, "%");
+        named("rt", "globalIlluminationQuality", S, 3);
         toggle("rt", "rtEntities", RT);
     }
 }

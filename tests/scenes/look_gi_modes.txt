@@ -1,0 +1,42 @@
+# Global illumination modes in a room lit through a roof opening (red and green side walls):
+# off (A), world-space (B), ray-traced (C), world-space at 200% (D), world-space with 4 rays (E)
+sleep 3
+world lookgi 42 flat
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /weather clear
+cmd /time set 6000
+config rtReflections false
+config globalIllumination 0
+cmd /tp @p -805 5 -790 180 10
+sleep 4
+cmd /kill @e[type=!Player]
+cmd /fill -820 4 -820 -780 16 -780 air
+cmd /fill -820 3 -820 -780 3 -780 quartz_block
+cmd /fill -811 4 -811 -811 10 -800 wool 14
+cmd /fill -799 4 -811 -799 10 -800 wool 13
+cmd /fill -811 4 -811 -799 10 -811 wool 0
+cmd /fill -811 11 -811 -799 11 -800 wool 0
+cmd /fill -806 11 -807 -804 11 -805 air
+cmd /tp @p -805 5 -797 180 8
+sleep 8
+capture CAPTURE_A
+config globalIllumination 1
+sleep 4
+capture CAPTURE_B
+config globalIllumination 2
+sleep 4
+capture CAPTURE_C
+config globalIllumination 1
+config globalIlluminationStrength 200
+sleep 4
+capture CAPTURE_D
+config globalIlluminationStrength 100
+config globalIlluminationQuality 2
+sleep 4
+capture CAPTURE_E
+config globalIlluminationQuality 0
+config globalIllumination 0
+quit
