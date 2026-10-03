@@ -52,6 +52,7 @@ public final class Pipeline {
             if (Config.clouds) features |= CLOUDS;
             if (Config.volumetrics) features |= VOLUMETRICS;
             if (Config.autoExposure) features |= AUTO_EXPOSURE;
+            if (Config.ssao) features |= SSAO;
             if (Config.rtAmbientOcclusion) features |= RT_AO;
             if (Config.rtGlobalIllumination) features |= RT_GI;
         }

@@ -16,6 +16,7 @@ metal189.gui.taa=Temporal AA
 metal189.gui.clouds=Volumetric Clouds
 metal189.gui.volumetrics=Light Shafts
 metal189.gui.autoExposure=Auto Exposure
+metal189.gui.ssao=Ambient Occlusion
 metal189.gui.exposure=Exposure
 metal189.gui.rtShadows=RT Shadows
 metal189.gui.rtReflections=RT Reflections

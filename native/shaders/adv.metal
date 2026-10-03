@@ -933,6 +933,50 @@ fragment GiTemporalOut gi_temporal_fragment(FullscreenOut in [[stage_in]], const
     return o;
 }
 
+// Screen-space ambient occlusion (HBAO+ style) at half resolution: 4 rotating directions
+// x 6 steps within a 1-block radius, depth-aware falloff; TAA integrates the rotation.
+static inline float3 eyeAtPixel(constant AdvFrame& fr, texture2d<float> gLinZ, uint2 p) {
+    float2 ndc = float2((float(p.x) + 0.5) * fr.screen.z * 2.0 - 1.0, (float(p.y) + 0.5) * fr.screen.w * 2.0 - 1.0) - fr.jitter.xy;
+    float4 pf = fr.invProj * float4(ndc, 1.0, 1.0);
+    float3 rd = pf.xyz / pf.w;
+    return rd * (gLinZ.read(p).r / -rd.z);
+}
+
+fragment float4 ssao_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
+                              depth2d<float> depth [[texture(0)]], texture2d<float> gLinZ [[texture(1)]],
+                              texture2d<float> gNormal [[texture(2)]]) {
+    uint2 maxP = uint2(fr.screen.xy) - 1u;
+    uint2 fp = min(uint2(in.position.xy) * 2u + 1u, maxP);
+    if (depth.read(fp) >= 1.0) return float4(1.0);
+    float3 P = eyeAtPixel(fr, gLinZ, fp);
+    float3 N = normalize(gNormal.read(fp).xyz);
+    const float R = 1.0;
+    // the radius in full-resolution pixels at this depth
+    float rPx = clamp(R * fr.proj[1][1] * 0.5 * fr.screen.y / max(-P.z, 0.05), 3.0, 96.0);
+    const int DIRS = 4, STEPS = 6;
+    float rot = hash12(in.position.xy) * 6.2831853 + float(fr.flags.z % 64u) * 2.399963;
+    float jit = fract(hash12(in.position.yx * 1.7) + float(fr.flags.z % 16u) * 0.618034);
+    float occ = 0.0;
+    for (int d = 0; d < DIRS; d++) {
+        float ang = rot + float(d) * (3.14159265 / float(DIRS));
+        float2 dir = float2(cos(ang), sin(ang));
+        for (int side = -1; side <= 1; side += 2) {
+            for (int i = 0; i < STEPS; i++) {
+                float t = (float(i) + jit) / float(STEPS);
+                float2 off = dir * float(side) * (1.0 + t * rPx);
+                int2 q = int2(float2(fp) + off);
+                if (any(q < 0) || any(q > int2(maxP))) break;
+                float3 V = eyeAtPixel(fr, gLinZ, uint2(q)) - P;
+                float vv = dot(V, V);
+                float ndv = dot(N, V) * rsqrt(max(vv, 1e-6));
+                occ += saturate(ndv - 0.15) * saturate(1.0 - vv / (R * R));
+            }
+        }
+    }
+    float ao = saturate(1.0 - occ * 2.0 / float(DIRS * STEPS * 2));
+    return float4(ao, 1.0, 1.0, 1.0);
+}
+
 // Separable depth/normal-aware blur of the half-resolution GI (rgb), radius 6.
 fragment float4 giblur_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
                                 texture2d<float> src [[texture(0)]], texture2d<float> gLinZ [[texture(1)]],
@@ -1079,6 +1123,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     }
     // ray-traced ambient occlusion (half resolution, denoised; see rtao_fragment)
     if (fr.flags.x & ADV_RT_AO) ao *= mix(1.0, rtaoTex.sample(lin, in.uv).r, 0.85);
+    else if (fr.flags.x & ADV_SSAO) ao *= mix(1.0, rtaoTex.sample(lin, in.uv).r, 0.7);
     float3 color = float3(0);
     float3 lightDir = fr.sunDirView.w > 0.0 ? fr.sunDirView.xyz : fr.moonDirView.xyz;
     float3 lightCol = fr.sunDirView.w > 0.0 ? fr.sunColor.rgb : fr.moonColor.rgb;

@@ -71,7 +71,7 @@ struct State {
     id<MTLRenderPipelineState> lightPso[2], waterPso[2], tonemapPso, bloomDown, bloomUp, skyLutPso, taaPso, cloudsPso;
     // volumetric clouds
     id<MTLComputePipelineState> cloudNoiseKernel;
-    id<MTLRenderPipelineState> volPso, volCompPso, rtaoPso, aoBlurPso, giTracePso, giTemporalPso, giBlurPso;
+    id<MTLRenderPipelineState> volPso, volCompPso, rtaoPso, aoBlurPso, giTracePso, giTemporalPso, giBlurPso, ssaoPso;
     bool giHistory = false;
     int giIndex = 0;
     id<MTLComputePipelineState> exposureKernel;
@@ -219,6 +219,18 @@ bool initState() {
         gd.fragmentFunction = fn(@"gi_temporal_fragment");
         gd.colorAttachments[1].pixelFormat = MTLPixelFormatR32Float;
         S.giTemporalPso = pso(gd);
+    }
+
+    {
+        MTLRenderPipelineDescriptor* sd2 = [MTLRenderPipelineDescriptor new];
+        sd2.vertexFunction = fn(@"fullscreen_vertex");
+        sd2.fragmentFunction = fn(@"ssao_fragment");
+        sd2.colorAttachments[0].pixelFormat = MTLPixelFormatR16Float;
+        S.ssaoPso = pso(sd2);
+        if (!S.aoBlurPso) {
+            sd2.fragmentFunction = fn(@"aoblur_fragment");
+            S.aoBlurPso = pso(sd2);
+        }
     }
 
     MTLRenderPipelineDescriptor* vd = [MTLRenderPipelineDescriptor new];
@@ -711,27 +723,33 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [b endEncoding];
     }
 
-    // ---- ray-traced ambient occlusion (half resolution) + bilateral blur ----
-    if ((features & ADV_RT_AO) && S.rtaoPso && S.aoBlurPso) {
+    // ---- ambient occlusion: ray-traced, else screen-space (half resolution) + bilateral blur ----
+    if (features & ADV_RT_AO) features &= ~ADV_SSAO;
+    if (!S.ssaoPso || !S.aoBlurPso) features &= ~ADV_SSAO;
+    fr.flags.x = features;
+    if ((features & (ADV_RT_AO | ADV_SSAO)) && S.aoBlurPso) {
         TexEntry* atlasE = texture(w.atlasTex);
         MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.colorAttachments[0].texture = S.t.ao[0];
         rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
         rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-        profRender(rp, "rtao", true);
+        bool rtAo = (features & ADV_RT_AO) != 0;
+        profRender(rp, rtAo ? "rtao" : "ssao", true);
         id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
-        e.label = @"rtao";
-        [e setRenderPipelineState:S.rtaoPso];
+        e.label = rtAo ? @"rtao" : @"ssao";
+        [e setRenderPipelineState:rtAo ? S.rtaoPso : S.ssaoPso];
         [e setFragmentBytes:&fr length:sizeof fr atIndex:1];
         [e setFragmentTexture:depth atIndex:0];
         [e setFragmentTexture:S.t.linZ atIndex:1];
         [e setFragmentTexture:S.t.normal atIndex:2];
-        [e setFragmentAccelerationStructure:rts.tlas atBufferIndex:10];
-        [e setFragmentBuffer:rts.instances offset:0 atIndex:11];
-        [e setFragmentTexture:atlasE && atlasE->tex ? atlasE->tex : S.t.albedo atIndex:7];
-        [e setFragmentSamplerState:S.pointClamp atIndex:2];
-        if (rts.resources)
-            [e useResources:rts.resources->data() count:rts.resources->size() usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
+        if (rtAo) {
+            [e setFragmentAccelerationStructure:rts.tlas atBufferIndex:10];
+            [e setFragmentBuffer:rts.instances offset:0 atIndex:11];
+            [e setFragmentTexture:atlasE && atlasE->tex ? atlasE->tex : S.t.albedo atIndex:7];
+            [e setFragmentSamplerState:S.pointClamp atIndex:2];
+            if (rts.resources)
+                [e useResources:rts.resources->data() count:rts.resources->size() usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
+        }
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [e endEncoding];
         for (int pass = 0; pass < 2; pass++) {
@@ -739,7 +757,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             bp.colorAttachments[0].texture = S.t.ao[pass ^ 1];
             bp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
             bp.colorAttachments[0].storeAction = MTLStoreActionStore;
-            profRender(bp, "rtao blur", true);
+            profRender(bp, "ao blur", true);
             id<MTLRenderCommandEncoder> b = [cb renderCommandEncoderWithDescriptor:bp];
             [b setRenderPipelineState:S.aoBlurPso];
             [b setFragmentBytes:&fr length:sizeof fr atIndex:1];
@@ -881,7 +899,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [e setFragmentTexture:S.t.spec atIndex:10];
         // last frame's resolved image (screen-space reflections on smooth surfaces)
         [e setFragmentTexture:taaOn ? S.t.taa[S.taaIndex ^ 1] : S.t.hdr atIndex:11];
-        [e setFragmentTexture:(features & ADV_RT_AO) ? S.t.ao[0] : S.t.light atIndex:12];
+        [e setFragmentTexture:(features & (ADV_RT_AO | ADV_SSAO)) ? S.t.ao[0] : S.t.light atIndex:12];
         [e setFragmentTexture:(features & ADV_RT_GI) ? S.t.giBlur[1] : S.t.light atIndex:13];
         [e setFragmentSamplerState:S.repeatLinear atIndex:3];
         if (rtLight) {

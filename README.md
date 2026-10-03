@@ -55,6 +55,7 @@ It is an OptiFine replacement: do not install OptiFine alongside it.
 | Volumetric Clouds | on | Raymarched cumulus layer, cloud shadows on terrain |
 | Light Shafts | on | Volumetric sun scattering through the shadow map |
 | Auto Exposure | on | Eye adaptation (scene log-average luminance, on the GPU) |
+| Ambient Occlusion | on | Screen-space AO (HBAO+ style, half resolution) on top of vanilla's baked AO |
 | Exposure | 100% | Manual exposure bias |
 | RT Shadows | off | Ray-traced sun shadows for all loaded terrain |
 | RT Reflections | off | Ray-traced reflections on water, metals, polished and wet surfaces |

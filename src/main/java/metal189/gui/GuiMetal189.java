@@ -20,7 +20,7 @@ import net.minecraftforge.fml.client.config.GuiSlider;
 public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
     private enum Opt {
         SHADERS, TAA, SHADOWS, SHADOW_RES, SHADOW_DIST, BLOOM, SKY, WATER, WAVING, BLOOM_STRENGTH, CLOUDS, VOLUMETRICS,
-        AUTO_EXP, EXPOSURE, RT_SHADOWS, RT_REFL, RT_AO, RT_GI
+        AUTO_EXP, EXPOSURE, SSAO, RT_SHADOWS, RT_REFL, RT_AO, RT_GI
     }
 
     private static final Opt[][] ROWS = {
@@ -31,6 +31,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
         {Opt.CLOUDS, Opt.VOLUMETRICS},
         {Opt.WAVING, Opt.BLOOM_STRENGTH},
         {Opt.AUTO_EXP, Opt.EXPOSURE},
+        {Opt.SSAO, null},
         {Opt.RT_SHADOWS, Opt.RT_REFL},
         {Opt.RT_AO, Opt.RT_GI},
     };
@@ -86,6 +87,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
                 case CLOUDS: b.displayString = label("clouds", onOff(Config.clouds)); break;
                 case VOLUMETRICS: b.displayString = label("volumetrics", onOff(Config.volumetrics)); break;
                 case AUTO_EXP: b.displayString = label("autoExposure", onOff(Config.autoExposure)); break;
+                case SSAO: b.displayString = label("ssao", onOff(Config.ssao)); break;
                 case RT_SHADOWS: b.displayString = label("rtShadows", rt ? onOff(Config.rtShadows) : unsupported); break;
                 case RT_REFL: b.displayString = label("rtReflections", rt ? onOff(Config.rtReflections) : unsupported); break;
                 case RT_AO: b.displayString = label("rtAO", rt ? onOff(Config.rtAmbientOcclusion) : unsupported); break;
@@ -113,6 +115,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
             case CLOUDS: Config.clouds = !Config.clouds; break;
             case VOLUMETRICS: Config.volumetrics = !Config.volumetrics; break;
             case AUTO_EXP: Config.autoExposure = !Config.autoExposure; break;
+            case SSAO: Config.ssao = !Config.ssao; break;
             case RT_SHADOWS: Config.rtShadows = !Config.rtShadows; break;
             case RT_REFL: Config.rtReflections = !Config.rtReflections; break;
             case RT_AO: Config.rtAmbientOcclusion = !Config.rtAmbientOcclusion; break;
