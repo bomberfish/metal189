@@ -661,8 +661,22 @@ static float3 skyRadiance(constant AdvFrame& fr, texture2d<float> skyLut, sample
     float3 base = skyBase(fr, skyLut, s, d);
     float mu = dot(d, fr.sunDirWorld.xyz);
     float disc = smoothstep(0.99955, 0.9998, mu) * fr.sunDirWorld.w;
-    float moon = smoothstep(0.99935, 0.9996, -mu) * (1.0 - fr.sunDirWorld.w);
-    float3 c = base + fr.sunColor.rgb * disc * 60.0 + float3(0.8, 0.85, 1.0) * moon * 1.5;
+    float3 c = base + fr.sunColor.rgb * disc * 60.0;
+    // moon (always opposite the sun in Minecraft) with vanilla's phases: a lit sphere whose
+    // terminator is an ellipse, plus faint earthshine on the dark part
+    float moonMask = smoothstep(0.99935, 0.9996, -mu) * (1.0 - fr.sunDirWorld.w);
+    if (moonMask > 0.0) {
+        float3 m = -fr.sunDirWorld.xyz;
+        float3 ax = normalize(cross(m, float3(0, 0, 1)));
+        float rad = sqrt(1.0 - 0.99948 * 0.99948);
+        float lx = dot(d, ax) / rad, ly = d.z / rad;
+        float rr = saturate(1.0 - ly * ly);
+        float cosA = 2.0 * fr.moon.x - 1.0;              // phase angle: cos = 2k - 1
+        float xt = -cosA * sqrt(rr);
+        float lit = smoothstep(xt - 0.08, xt + 0.08, fr.moon.y * lx);
+        float maria = 0.85 + 0.15 * hash12(floor(float2(lx, ly) * 6.0 + 10.0));
+        c += float3(0.8, 0.85, 1.0) * moonMask * (lit * 1.5 * maria + 0.03);
+    }
     c += starField(d, fr.camera.w * (1.0 - fr.params.y));
     if ((fr.flags.x & ADV_CLOUDS) && d.y > 0.0) {
         float4 cl = cloudMap.sample(s, cloudMapUv(d));

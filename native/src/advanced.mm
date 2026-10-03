@@ -482,7 +482,12 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
     fr.sunDirWorld = simd_make_float4(sun, day);
     simd_float3 sunCol = transmittance(simd_make_float3(sun.x, std::max(sun.y, 0.02f), sun.z));
     fr.sunColor = simd_make_float4(sunCol * 2.5f * day * (1.0f - rain * 0.85f), 1);
-    fr.moonColor = simd_make_float4(simd_make_float3(0.13f, 0.16f, 0.25f) * night * (1.0f - rain * 0.7f), 1);
+    // vanilla's 8 moon phases (0 full ... 4 new): illuminated fraction and lit side
+    static const float kMoonLit[8] = {1.0f, 0.75f, 0.5f, 0.25f, 0.0f, 0.25f, 0.5f, 0.75f};
+    int phase = ((env.moonPhase % 8) + 8) % 8;
+    fr.moon = simd_make_float4(kMoonLit[phase], phase >= 1 && phase <= 4 ? -1.0f : 1.0f, 0, 0);
+    fr.moonColor = simd_make_float4(simd_make_float3(0.13f, 0.16f, 0.25f) * night * (1.0f - rain * 0.7f) *
+                                    (0.35f + 0.65f * kMoonLit[phase]), 1);
     auto lin = [](float c) { return powf(std::max(c, 0.0f), 2.2f); };
     simd_float3 skyV = simd_make_float3(lin(env.skyR), lin(env.skyG), lin(env.skyB));
     simd_float3 fogV = simd_make_float3(lin(w.fogColor[0]), lin(w.fogColor[1]), lin(w.fogColor[2]));

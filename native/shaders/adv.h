@@ -30,6 +30,7 @@ struct AdvFrame {
     m189_float4 jitter;          // xy: sub-pixel projection jitter (GL NDC units), zw: unused
     m189_float4x4 prevViewProj;  // previous frame's proj * view (GL clip, unjittered)
     m189_float4 taa;             // xyz: camera position minus previous camera position, w: history valid
+    m189_float4 moon;            // x: illuminated fraction (phase), y: lit side (+1 waxing, -1 waning)
 };
 
 #define ADV_SHADOWS   (1u << 0)
