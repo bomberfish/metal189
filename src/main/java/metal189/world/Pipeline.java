@@ -12,7 +12,7 @@ public final class Pipeline {
     private Pipeline() {}
 
     public static final int SHADOWS = 1, BLOOM = 2, SKY = 4, WATER = 8, SSAO = 16, PCSS = 32, RT_SHADOWS = 64, RT_REFLECTIONS = 128,
-            TAA = 256, CLOUDS = 512, VOLUMETRICS = 1024;
+            TAA = 256, CLOUDS = 512, VOLUMETRICS = 1024, AUTO_EXPOSURE = 2048;
 
     private static final String SHADERS_OVERRIDE = System.getProperty("metal189.shaders");
     private static final Integer FEATURES_OVERRIDE = Integer.getInteger("metal189.shaderFeatures");
@@ -51,6 +51,7 @@ public final class Pipeline {
             if (Config.taa) features |= TAA;
             if (Config.clouds) features |= CLOUDS;
             if (Config.volumetrics) features |= VOLUMETRICS;
+            if (Config.autoExposure) features |= AUTO_EXPOSURE;
         }
         if (advanced) Materials.upload();
         Native.setOption(OPT_SHADOW_RES, Config.shadowResolution);

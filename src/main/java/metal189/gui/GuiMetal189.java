@@ -12,7 +12,7 @@ import net.minecraftforge.fml.client.config.GuiSlider;
 /** metal189 rendering settings (opened from Video Settings or the settings keybind). */
 public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
     private static final int SHADERS = 1, SHADOWS = 2, SHADOW_RES = 3, SHADOW_DIST = 4, BLOOM = 5, SKY = 6, WATER = 7,
-            WAVING = 8, RT_SHADOWS = 9, RT_REFL = 10, EXPOSURE = 11, BLOOM_STRENGTH = 12, TAA = 13, CLOUDS = 14, VOLUMETRICS = 15,
+            WAVING = 8, RT_SHADOWS = 9, RT_REFL = 10, EXPOSURE = 11, BLOOM_STRENGTH = 12, TAA = 13, CLOUDS = 14, VOLUMETRICS = 15, AUTO_EXP = 16,
             DONE = 200;
 
     private final GuiScreen parent;
@@ -48,6 +48,8 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
         y += 22;
         buttonList.add(new GuiButton(CLOUDS, x0, y, 150, 20, ""));
         buttonList.add(new GuiButton(VOLUMETRICS, x1, y, 150, 20, ""));
+        y += 22;
+        buttonList.add(new GuiButton(AUTO_EXP, x0, y, 150, 20, ""));
         y += 26;
         buttonList.add(new GuiButton(RT_SHADOWS, x0, y, 150, 20, ""));
         buttonList.add(new GuiButton(RT_REFL, x1, y, 150, 20, ""));
@@ -73,6 +75,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
                 case TAA: b.displayString = I18n.format("metal189.gui.taa") + ": " + onOff(Config.taa); break;
                 case CLOUDS: b.displayString = I18n.format("metal189.gui.clouds") + ": " + onOff(Config.clouds); break;
                 case VOLUMETRICS: b.displayString = I18n.format("metal189.gui.volumetrics") + ": " + onOff(Config.volumetrics); break;
+                case AUTO_EXP: b.displayString = I18n.format("metal189.gui.autoExposure") + ": " + onOff(Config.autoExposure); break;
                 case RT_SHADOWS:
                     b.enabled = rt;
                     b.displayString = I18n.format("metal189.gui.rtShadows") + ": " + (rt ? onOff(Config.rtShadows) : I18n.format("metal189.gui.unsupported"));
@@ -103,6 +106,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
             case TAA: Config.taa = !Config.taa; break;
             case CLOUDS: Config.clouds = !Config.clouds; break;
             case VOLUMETRICS: Config.volumetrics = !Config.volumetrics; break;
+            case AUTO_EXP: Config.autoExposure = !Config.autoExposure; break;
             case RT_SHADOWS: Config.rtShadows = !Config.rtShadows; break;
             case RT_REFL: Config.rtReflections = !Config.rtReflections; break;
             case DONE:

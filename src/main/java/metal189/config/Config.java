@@ -26,6 +26,7 @@ public final class Config {
     public static boolean taa = true;
     public static boolean clouds = true;
     public static boolean volumetrics = true;
+    public static boolean autoExposure = true;
     public static int exposure = 100;        // percent
     public static boolean rtShadows = false;
     public static boolean rtReflections = false;
@@ -66,6 +67,7 @@ public final class Config {
         taa = bool(p, "taa", taa);
         clouds = bool(p, "clouds", clouds);
         volumetrics = bool(p, "volumetrics", volumetrics);
+        autoExposure = bool(p, "autoExposure", autoExposure);
         exposure = clamp(integer(p, "exposure", exposure), 25, 400);
         rtShadows = bool(p, "rtShadows", rtShadows);
         rtReflections = bool(p, "rtReflections", rtReflections);
@@ -85,6 +87,7 @@ public final class Config {
         p.setProperty("taa", Boolean.toString(taa));
         p.setProperty("clouds", Boolean.toString(clouds));
         p.setProperty("volumetrics", Boolean.toString(volumetrics));
+        p.setProperty("autoExposure", Boolean.toString(autoExposure));
         p.setProperty("exposure", Integer.toString(exposure));
         p.setProperty("rtShadows", Boolean.toString(rtShadows));
         p.setProperty("rtReflections", Boolean.toString(rtReflections));

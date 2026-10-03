@@ -1189,6 +1189,37 @@ fragment float4 bloom_up_fragment(FullscreenOut in [[stage_in]], texture2d<float
     return float4(o * (p.x / 16.0), 1.0);
 }
 
+// Auto exposure: log-average luminance over a 64x36 grid, adapted over time
+// (darkening faster than brightening). state: x exposure, y last time, z valid, w average.
+kernel void exposure_kernel(texture2d<float> hdr [[texture(0)]], device float4* state [[buffer(0)]],
+                            constant AdvFrame& fr [[buffer(1)]], uint tid [[thread_index_in_threadgroup]],
+                            uint tcount [[threads_per_threadgroup]]) {
+    threadgroup float partial[256];
+    float w = float(hdr.get_width()), h = float(hdr.get_height());
+    float sum = 0.0;
+    for (uint i = tid; i < 64u * 36u; i += tcount) {
+        float2 g = float2(float(i % 64u) + 0.5, float(i / 64u) + 0.5);
+        uint2 p = uint2(g.x * w / 64.0, g.y * h / 36.0);
+        float l = dot(hdr.read(p).rgb, float3(0.2126, 0.7152, 0.0722));
+        sum += log(max(l, 1e-4));
+    }
+    partial[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint s = tcount / 2; s > 0; s >>= 1) {
+        if (tid < s) partial[tid] += partial[tid + s];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) {
+        float avg = exp(partial[0] / (64.0 * 36.0));
+        float target = clamp(pow(0.2 / avg, 0.6), 0.7, 2.5);   // partial adaptation, like the eye
+        float4 st = state[0];
+        float dt = clamp(fr.params.x - st.y, 0.0, 0.25);
+        if (st.z < 0.5) st.x = target;
+        else st.x = mix(st.x, target, 1.0 - exp(-dt * (target < st.x ? 2.5 : 0.9)));
+        state[0] = float4(st.x, fr.params.x, 1.0, avg);
+    }
+}
+
 static float3 aces(float3 x) {
     const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
     return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
@@ -1196,17 +1227,18 @@ static float3 aces(float3 x) {
 
 fragment float4 tonemap_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
                                  texture2d<float> hdr [[texture(0)]], texture2d<float> bloom [[texture(1)]],
-                                 sampler s [[sampler(0)]]) {
+                                 sampler s [[sampler(0)]], device const float4* expState [[buffer(2)]]) {
     int2 px = int2(in.position.xy);
     float3 b = (fr.flags.x & ADV_BLOOM) ? bloom.sample(s, in.uv).rgb * (0.06 * fr.post.x) : float3(0);
-    float3 c = aces((hdr.read(uint2(px)).rgb + b) * fr.params.z);
+    float exposure = fr.params.z * ((fr.flags.x & ADV_AUTOEXP) ? expState[0].x : 1.0);
+    float3 c = aces((hdr.read(uint2(px)).rgb + b) * exposure);
     if (fr.flags.x & ADV_TAA) {
         // contrast-adaptive sharpening (after AMD CAS) to restore texture detail TAA softens
         int2 mx = int2(fr.screen.xy) - 1;
-        float3 n = aces((hdr.read(uint2(clamp(px + int2(0, -1), int2(0), mx))).rgb + b) * fr.params.z);
-        float3 w_ = aces((hdr.read(uint2(clamp(px + int2(-1, 0), int2(0), mx))).rgb + b) * fr.params.z);
-        float3 e = aces((hdr.read(uint2(clamp(px + int2(1, 0), int2(0), mx))).rgb + b) * fr.params.z);
-        float3 so = aces((hdr.read(uint2(clamp(px + int2(0, 1), int2(0), mx))).rgb + b) * fr.params.z);
+        float3 n = aces((hdr.read(uint2(clamp(px + int2(0, -1), int2(0), mx))).rgb + b) * exposure);
+        float3 w_ = aces((hdr.read(uint2(clamp(px + int2(-1, 0), int2(0), mx))).rgb + b) * exposure);
+        float3 e = aces((hdr.read(uint2(clamp(px + int2(1, 0), int2(0), mx))).rgb + b) * exposure);
+        float3 so = aces((hdr.read(uint2(clamp(px + int2(0, 1), int2(0), mx))).rgb + b) * exposure);
         float3 mn = min(min(min(n, w_), min(e, so)), c), mxv = max(max(max(n, w_), max(e, so)), c);
         float3 amp = sqrt(saturate(min(mn, 1.0 - mxv) / max(mxv, 1e-4)));
         float3 wgt = -amp / mix(8.0, 5.0, 0.55);

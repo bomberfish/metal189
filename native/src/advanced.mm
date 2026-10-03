@@ -14,6 +14,7 @@
 
 namespace m189 {
 extern int g_optAdvDebug;
+extern bool g_optGpuStats;
 
 extern int g_optQuadDiagonal;
 
@@ -64,6 +65,8 @@ struct State {
     // volumetric clouds
     id<MTLComputePipelineState> cloudNoiseKernel;
     id<MTLRenderPipelineState> volPso, volCompPso;
+    id<MTLComputePipelineState> exposureKernel;
+    id<MTLBuffer> exposureState;
     id<MTLTexture> cloudNoise, cloudMap[2];
     id<MTLSamplerState> repeatLinear;
     bool cloudNoiseReady = false, cloudHistory = false;
@@ -178,6 +181,14 @@ bool initState() {
         rs.minFilter = rs.magFilter = MTLSamplerMinMagFilterLinear;
         rs.sAddressMode = rs.tAddressMode = rs.rAddressMode = MTLSamplerAddressModeRepeat;
         S.repeatLinear = [device() newSamplerStateWithDescriptor:rs];
+    }
+
+    {
+        NSError* err = nil;
+        id<MTLFunction> k = fn(@"exposure_kernel");
+        S.exposureKernel = k ? [device() newComputePipelineStateWithFunction:k error:&err] : nil;
+        S.exposureState = [device() newBufferWithLength:16 options:MTLResourceStorageModeShared];
+        memset(S.exposureState.contents, 0, 16);
     }
 
     MTLRenderPipelineDescriptor* vd = [MTLRenderPipelineDescriptor new];
@@ -469,6 +480,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
     }
     if (env.dimension != 0 || !S.cloudsPso || !S.cloudNoiseKernel) features &= ~ADV_CLOUDS;
     if (!(features & ADV_SHADOWS) || !S.volPso) features &= ~ADV_VOLUMETRIC;
+    if (!S.exposureKernel) features &= ~ADV_AUTOEXP;
     bool cloudsOn = (features & ADV_CLOUDS) != 0;
     fr.post.y = cloudsOn && S.cloudHistory && fr.taa.w > 0.5f ? 1.0f : 0.0f; // teleports reset the cloud history too
     if (!taaOn) fr.post.y = cloudsOn && S.cloudHistory ? 1.0f : 0.0f;
@@ -841,6 +853,24 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         post = out;
     }
 
+    // ---- auto exposure (GPU-side adaptation, read by the tonemap pass) ----
+    if (features & ADV_AUTOEXP) {
+        if (g_optGpuStats && (S.frame % 300) == 0) {
+            const float* st = (const float*)S.exposureState.contents;
+            log("auto exposure %.3f (scene log-average luminance %.4f)", st[0], st[3]);
+        }
+        MTLComputePassDescriptor* cpd = [MTLComputePassDescriptor computePassDescriptor];
+        profCompute(cpd, "exposure");
+        id<MTLComputeCommandEncoder> c = [cb computeCommandEncoderWithDescriptor:cpd];
+        c.label = @"exposure";
+        [c setComputePipelineState:S.exposureKernel];
+        [c setTexture:post atIndex:0];
+        [c setBuffer:S.exposureState offset:0 atIndex:0];
+        [c setBytes:&fr length:sizeof fr atIndex:1];
+        [c dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [c endEncoding];
+    }
+
     // ---- bloom ----
     if ((features & ADV_BLOOM) && !S.t.bloom.empty()) {
         id<MTLTexture> src = post;
@@ -892,6 +922,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [e setFragmentBytes:&fr length:sizeof fr atIndex:1];
         [e setFragmentTexture:post atIndex:0];
         [e setFragmentTexture:S.t.bloom.empty() ? post : S.t.bloom[0] atIndex:1];
+        [e setFragmentBuffer:S.exposureState offset:0 atIndex:2];
         [e setFragmentSamplerState:S.linearClamp atIndex:0];
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [e endEncoding];
