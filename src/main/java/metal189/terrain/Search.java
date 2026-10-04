@@ -168,7 +168,7 @@ public final class Search {
     // the camera section's visible faces (vanilla floods its blocks every search)
     private static long facingsKey = Long.MIN_VALUE;
     private static CompiledChunk facingsCompiled;
-    private static Set<EnumFacing> facingsCached;
+    private static volatile Set<EnumFacing> facingsCached;
 
     private static long lastSearch;
     private static double lastX = Double.NaN, lastY, lastZ;
@@ -427,7 +427,11 @@ public final class Search {
         // the player's own edits (sections around the camera) are scheduled at once
         BlockPos p = rc.getPosition();
         double dx = p.getX() + 8 - lastX, dy = p.getY() + 8 - lastY, dz = p.getZ() + 8 - lastZ;
-        if (dx * dx + dy * dy + dz * dz < 48 * 48) markedNear = true;
+        if (dx * dx + dy * dy + dz * dz < 48 * 48) {
+            markedNear = true;
+            // blocks around the camera changed (an edit, a chunk arriving): its open faces too
+            facingsCached = null;
+        }
     }
 
     /** Patched before setupTerrain's scheduling: false skips it this frame. */
@@ -510,16 +514,21 @@ public final class Search {
         return m;
     }
 
-    /** RenderGlobal.getVisibleFacings, kept while the camera block and its section's build stay the same. */
+    /**
+     * RenderGlobal.getVisibleFacings (a flood through the camera section's blocks), kept while
+     * the camera block, its section's build and its blocks (needsUpdate) stay the same.
+     */
     @SuppressWarnings("unchecked")
     private static Set<EnumFacing> visibleFacings(RenderGlobal rg, BlockPos eye, RenderChunk rc) throws Throwable {
         long key = eye.toLong();
         CompiledChunk cc = rc != null ? rc.getCompiledChunk() : null;
-        if (key != facingsKey || cc != facingsCompiled || facingsCached == null) {
-            facingsCached = (Set<EnumFacing>) VISIBLE_FACINGS.invokeExact(rg, eye);
+        Set<EnumFacing> f = facingsCached;
+        if (key != facingsKey || cc != facingsCompiled || f == null) {
+            f = (Set<EnumFacing>) VISIBLE_FACINGS.invokeExact(rg, eye);
+            facingsCached = f;
             facingsKey = key;
             facingsCompiled = cc;
         }
-        return java.util.EnumSet.copyOf(facingsCached.isEmpty() ? java.util.EnumSet.noneOf(EnumFacing.class) : facingsCached);
+        return f.isEmpty() ? java.util.EnumSet.noneOf(EnumFacing.class) : java.util.EnumSet.copyOf(f);
     }
 }

@@ -18,8 +18,6 @@ namespace m189 {
 // Per-frame statistics (logged with -Dmetal189.gpuStats=true).
 struct FrameStats { uint64_t draws, terrainDraws, terrainQuads, arenaDraws, meshDraws, passes, terrainDrawn, drawCalls; };
 bool g_optFaceCull = true;
-bool g_optTerrainSplit = false;
-int g_optTerrainDebug = 0;
 bool g_optDepthDiscard = false;
 bool g_optAdopt = true;
 uint32_t g_optSkipPhases = 0;
@@ -46,13 +44,11 @@ void setOption(int key, int value) {
         case 5: g_ctrlClickRight = value != 0; break;
         case 7: g_optFaceCull = value != 0; break;
         case 8: g_optSerialGpu = value != 0; break;
-        case 9: g_optTerrainSplit = value != 0; break;
         case 6: g_optPresentDraw = value != 0; break;
         case 104: g_optAdopt = value != 0; break;   // present Minecraft's framebuffer without copying it
         case 103: g_optSkipPhases = (uint32_t)value; break;   // benchmarking: skip the draws of these phases (bit per PH_*)
         case 102: g_optDepthDiscard = value != 0; break;   // benchmarking: what storing depth costs (wrong output)
         case 101: g_optPresentSkip = value != 0; break;
-        case 100: g_optTerrainDebug = value; break;   // benchmarking: 1 = shade terrain vertices but draw nothing
         default: if (key >= 10) advancedSetParam(key, value); break;
     }
 }
@@ -1133,15 +1129,15 @@ static void sectionMatrix(const simd_float4x4& mv, float ox, float oy, float oz,
     }
 }
 
-// One record per section draw, read by terrain_vertex at [[instance_id]] (ff.metal TerrainDraw).
+// One record per section, read through the meshlets (ff.metal TerrainDraw): the section's
+// layer buffers (GPU addresses, 0 for empty layers) and its modelview.
 struct TerrainDrawRecord {
-    uint64_t vertices;   // GPU address of the section's layer buffer
-    uint64_t pad;
+    uint64_t vertices[4];
     float mv[16];
 };
-static_assert(sizeof(TerrainDrawRecord) == 80, "matches TerrainDraw");
+static_assert(sizeof(TerrainDrawRecord) == 96, "matches TerrainDraw");
 
-struct TerrainMeshlet { uint32_t record, first, count, pad; };   // ff.metal TerrainMeshlet
+struct TerrainMeshlet { uint32_t record, first, count, layer; };   // ff.metal TerrainMeshlet
 constexpr uint32_t kMeshletQuads = 64;
 
 static void* allocTerrainBytes(Exec& x, size_t bytes, id<MTLBuffer>* buf, size_t* offset) {
@@ -1159,35 +1155,88 @@ static void* allocTerrainBytes(Exec& x, size_t bytes, id<MTLBuffer>* buf, size_t
     return (uint8_t*)f.terrainDraws.contents + *offset;
 }
 
-static TerrainDrawRecord* allocTerrainDraws(Exec& x, uint32_t count, id<MTLBuffer>* buf, size_t* offset) {
-    return (TerrainDrawRecord*)allocTerrainBytes(x, (size_t)count * sizeof(TerrainDrawRecord), buf, offset);
+// The sections a frame's terrain layers draw, with their records: made once for all four
+// layers of the visible list (same camera and modelview), or per record for explicit lists.
+struct TerrainSet {
+    const void* frame = nullptr;     // the FrameResources it was made in
+    uint64_t serial = 0;             // the execution it was made in
+    double cam[3] = {0, 0, 0};
+    simd_float4x4 mv;
+    bool visibleList = false;
+    std::vector<Section*> sections;  // per entry; null: nothing to draw
+    std::vector<uint32_t> record;    // per entry
+    std::vector<simd_float3> offset; // per entry: vanilla's camera-relative section offset
+    id<MTLBuffer> table = nil;
+    size_t tableOffset = 0;
+};
+
+static uint64_t g_execSerial = 0;
+
+static void buildTerrainSet(Exec& x, TerrainSet& set, const TerrainEntry* e, uint32_t count) {
+    set.sections.resize(count);
+    set.record.resize(count);
+    set.offset.resize(count);
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        Section* s = section((int)e[i].section);
+        bool any = s && (s->layers[0] || s->layers[1] || s->layers[2] || s->layers[3]);
+        set.sections[i] = any ? s : nullptr;
+        set.record[i] = any ? n++ : 0;
+        set.offset[i] = simd_make_float3(e[i].x, e[i].y, e[i].z);
+    }
+    id<MTLBuffer> table;
+    TerrainDrawRecord* rec = (TerrainDrawRecord*)allocTerrainBytes(x, std::max<size_t>(1, n) * sizeof(TerrainDrawRecord), &table, &set.tableOffset);
+    set.table = table;
+    for (uint32_t i = 0; i < count; i++) {
+        Section* s = set.sections[i];
+        if (!s) continue;
+        TerrainDrawRecord& r = rec[set.record[i]];
+        for (int l = 0; l < 4; l++) r.vertices[l] = s->layers[l] ? s->layers[l].gpuAddress : 0;
+        sectionMatrix(g.mv, e[i].x, e[i].y, e[i].z, r.mv);
+    }
 }
 
-// A layer of the visible sections: the records go to one buffer bound once, and each
-// section is one draw that changes no state (its record is its base instance).
+// A layer of the visible sections: every visible range of every section becomes 64-quad
+// meshlets of one draw (a small draw costs the GPU about as much as its vertices).
+// terrain_vertex finds a quad's meshlet (record, layer, first quad) and drops the padding.
 static void drawTerrain(Exec& x, const CmdHeader* h) {
     flushBatch(x);
     const TerrainCmd& t = payload<TerrainCmd>(h);
     if (t.layer > 3) return;
+    const uint8_t* body = (const uint8_t*)(h + 1) + sizeof(TerrainCmd);
+    static TerrainSet set;
     uint32_t count;
-    const TerrainEntry* e = terrainEntries(t, (const uint8_t*)(h + 1) + sizeof(TerrainCmd), count);
+    if (t.count == kTerrainVisible) {
+        double cam[3];
+        memcpy(cam, body, sizeof cam);
+        bool reuse = set.visibleList && set.frame == x.fr && set.serial == g_execSerial && memcmp(set.cam, cam, sizeof cam) == 0 &&
+                     simd_equal(set.mv, g.mv);
+        if (!reuse) {
+            TerrainCmd all = t;
+            all.layer = 4;   // every visible section, whatever its layers
+            const TerrainEntry* e = terrainEntries(all, body, count);
+            buildTerrainSet(x, set, e, count);
+            set.visibleList = true;
+            set.frame = x.fr;
+            set.serial = g_execSerial;
+            memcpy(set.cam, cam, sizeof cam);
+            set.mv = g.mv;
+        }
+    } else {
+        const TerrainEntry* e = terrainEntries(t, body, count);
+        buildTerrainSet(x, set, e, count);
+        set.visibleList = false;
+    }
+    count = (uint32_t)set.sections.size();
     if (count == 0) return;
     if (!prepareDraw(x, 7, (int)t.format, true)) return;
-    id<MTLBuffer> table;
-    size_t tableOffset;
-    TerrainDrawRecord* rec = allocTerrainDraws(x, count, &table, &tableOffset);
-    // Every visible range of every section becomes 64-quad meshlets of one draw: a small draw
-    // costs the GPU about as much as its vertices, so a layer is a single draw. terrain_vertex
-    // finds a quad's meshlet (record + first quad) and drops the padding past its count.
     static std::vector<TerrainMeshlet> meshlets;
-    static std::vector<uint32_t> sectionFirstMeshlet;   // per record, for one draw per section
     meshlets.clear();
-    sectionFirstMeshlet.clear();
-    uint32_t n = 0;
+    uint32_t layer = t.layer;
     auto addRun = [&](uint32_t record, uint32_t first, uint32_t quads) {
         g_stats.terrainDrawn += quads;
         for (uint32_t q = 0; q < quads; q += kMeshletQuads)
-            meshlets.push_back({record, first + q, std::min<uint32_t>(kMeshletQuads, quads - q), 0});
+            meshlets.push_back({record, first + q, std::min<uint32_t>(kMeshletQuads, quads - q), layer});
     };
     // Back faces are culled (GL_BACK, counter-clockwise fronts): face groups whose every quad
     // faces away from the camera are left out.
@@ -1196,26 +1245,25 @@ static void drawTerrain(Exec& x, const CmdHeader* h) {
     // the third-person distance)
     simd_float4 ec = simd_mul(simd_inverse(g.mv), simd_make_float4(0, 0, 0, 1));
     float eyeX = ec.x / ec.w, eyeY = ec.y / ec.w, eyeZ = ec.z / ec.w;
-    for (uint32_t i = 0; i < count; i++) {
-        Section* s = section((int)e[i].section);
-        if (!s || !s->layers[t.layer]) continue;
-        uint32_t quads = s->vertices[t.layer] / 4;
+    // vanilla draws translucent sections back to front (the visible list is front to back)
+    bool reverse = set.visibleList && layer == 3;
+    for (uint32_t k = 0; k < count; k++) {
+        uint32_t i = reverse ? count - 1 - k : k;
+        Section* s = set.sections[i];
+        if (!s || !s->layers[layer]) continue;
+        uint32_t quads = s->vertices[layer] / 4;
         if (quads == 0) continue;
-        const uint32_t* gs = s->groupStart[t.layer];
-        const float* pl = s->plane[t.layer];
+        const uint32_t* gs = s->groupStart[layer];
+        const float* pl = s->plane[layer];
         // the chunk matrix scales about the section centre by 1.000001: a millimetre of slack
         const float eps = 1e-3f;
-        float cx = eyeX - e[i].x, cy = eyeY - e[i].y, cz = eyeZ - e[i].z;
+        simd_float3 o = set.offset[i];
+        float cx = eyeX - o.x, cy = eyeY - o.y, cz = eyeZ - o.z;
         bool vis[FG_COUNT] = {
             cy < pl[FG_NY] + eps, cx < pl[FG_NX] + eps, cz < pl[FG_NZ] + eps, cy > pl[FG_PY] - eps,
             true, cz > pl[FG_PZ] - eps, cx > pl[FG_PX] - eps,
         };
-        uint32_t record = n++;
-        sectionFirstMeshlet.push_back((uint32_t)meshlets.size());
-        TerrainDrawRecord& r = rec[record];
-        r.vertices = s->layers[t.layer].gpuAddress;
-        r.pad = (uint64_t)((g_optTerrainDebug >> t.layer) & 1);   // option 100: a mask of layers
-        sectionMatrix(g.mv, e[i].x, e[i].y, e[i].z, r.mv);
+        uint32_t record = set.record[i];
         uint32_t runStart = 0, runEnd = 0;   // the current run of visible groups (quads)
         bool open = false;
         for (int gi = 0; gi < FG_COUNT; gi++) {
@@ -1239,25 +1287,13 @@ static void drawTerrain(Exec& x, const CmdHeader* h) {
     void* mdst = allocTerrainBytes(x, meshlets.size() * sizeof(TerrainMeshlet), &mbuf, &moff);
     memcpy(mdst, meshlets.data(), meshlets.size() * sizeof(TerrainMeshlet));
     sectionHeapsUse(x.enc);
-    [x.enc setVertexBuffer:table offset:tableOffset atIndex:3];
+    [x.enc setVertexBuffer:set.table offset:set.tableOffset atIndex:3];
     [x.enc setVertexBuffer:mbuf offset:moff atIndex:4];
     uint32_t virtualQuads = (uint32_t)meshlets.size() * kMeshletQuads;
     id<MTLBuffer> qi = quadIndices(virtualQuads);
-    if (g_optTerrainSplit) {
-        // benchmarking: one draw per section
-        sectionFirstMeshlet.push_back((uint32_t)meshlets.size());
-        for (uint32_t r = 0; r + 1 < sectionFirstMeshlet.size(); r++) {
-            uint32_t a = sectionFirstMeshlet[r], b = sectionFirstMeshlet[r + 1];
-            if (a == b) continue;
-            g_stats.drawCalls++;
-            [x.enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:(NSUInteger)(b - a) * kMeshletQuads * 6
-                               indexType:MTLIndexTypeUInt32 indexBuffer:qi indexBufferOffset:(NSUInteger)a * kMeshletQuads * 24];
-        }
-    } else {
-        g_stats.drawCalls++;
-        [x.enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:(NSUInteger)virtualQuads * 6 indexType:MTLIndexTypeUInt32
-                         indexBuffer:qi indexBufferOffset:0];
-    }
+    g_stats.drawCalls++;
+    [x.enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:(NSUInteger)virtualQuads * 6 indexType:MTLIndexTypeUInt32
+                     indexBuffer:qi indexBufferOffset:0];
     x.xfDirty = true;
 }
 
@@ -1569,6 +1605,7 @@ static bool presentWithoutCopy(Exec& x, uint32_t texId) {
 }
 
 void executeFrame(id<MTLCommandBuffer> cb, const uint8_t* cmds, size_t len) {
+    g_execSerial++;
     Exec x;
     x.cb = cb;
     x.fr = engine().cur;

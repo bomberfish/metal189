@@ -62,15 +62,16 @@ const TerrainEntry* terrainEntries(const TerrainCmd& t, const uint8_t* body, uin
     }
     double cam[3];
     memcpy(cam, body, sizeof cam);
-    static std::vector<TerrainEntry> out[4];
-    std::vector<TerrainEntry>& o = out[t.layer & 3];
+    static std::vector<TerrainEntry> out[5];
+    std::vector<TerrainEntry>& o = out[std::min<uint32_t>(t.layer, 4)];
     o.clear();
     size_t n = g_visible.size();
     bool backToFront = t.layer == 3;   // vanilla draws translucent sections in reverse
+    bool all = t.layer > 3;            // every visible section (frame_exec.mm drawTerrain)
     for (size_t k = 0; k < n; k++) {
         int32_t id = g_visible[backToFront ? n - 1 - k : k];
         const Section* sp = section(id);
-        if (!sp || !sp->layers[t.layer]) continue;   // vanilla: isLayerEmpty
+        if (!sp || (!all && !sp->layers[t.layer])) continue;   // vanilla: isLayerEmpty
         const Section& s = *sp;
         o.push_back({(uint32_t)id, (float)((double)s.ox - cam[0]), (float)((double)s.oy - cam[1]), (float)((double)s.oz - cam[2])});
     }

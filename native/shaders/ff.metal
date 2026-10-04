@@ -227,15 +227,14 @@ struct BlockVertex {
 
 // one per section draw, at the draw's base instance (frame_exec.mm TerrainDrawRecord)
 struct TerrainDraw {
-    device const BlockVertex* verts;
-    ulong debug;   // benchmarking (frame_exec.mm option 100): 1 = collapse every vertex
+    device const BlockVertex* verts[4];   // per layer
     float4x4 mv;
 };
 
 // 64 quads of one section's draw record (frame_exec.mm drawTerrain): the layer's draw covers
 // meshlet m with quads [64m, 64m + 64); those past `count` are padding.
 struct TerrainMeshlet {
-    uint record, first, count, pad;
+    uint record, first, count, layer;
 };
 
 // The section vertex a virtual vertex id names, or false for padding.
@@ -246,7 +245,7 @@ static bool terrainFetch(uint vid, device const TerrainDraw* draws, device const
     uint local = q & 63u;
     if (local >= m.count) return false;
     device const TerrainDraw& d = draws[m.record];
-    v = d.verts[(m.first + local) * 4u + (vid & 3u)];
+    v = d.verts[m.layer][(m.first + local) * 4u + (vid & 3u)];
     mv = d.mv;
     return true;
 }
@@ -516,7 +515,6 @@ vertex TerrainOut terrain_vertex_slim(uint vid [[vertex_id]],
         else { float dd = u.fogParams.z * dist; ff = exp(-dd * dd); }
     }
     o.fog = half(saturate(ff));
-    if (draws[meshlets[vid >> 8].record].debug == 1) o.position = float4(o.uv.x * 1e-9, 0.0, 0.0, 1.0);
     return o;
 }
 
