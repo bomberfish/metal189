@@ -22,15 +22,44 @@ It is an OptiFine replacement: if OptiFine is installed too, metal189 stays disa
 
 ## Requirements
 
-* macOS 14 or newer (macOS 15+ recommended: ray tracing uses residency sets there).
-* Apple silicon (the native library is universal, so x86_64 Java under Rosetta also
-  works). Ray tracing runs on every Apple silicon GPU and is hardware-accelerated on
-  M3 and later.
-* Minecraft 1.8.9 with Forge 11.15.1.x (for example a Prism Launcher instance).
+**Required**
+
+* A Mac with Apple silicon (M1 or later).
+* macOS 14 Sonoma or newer (the shaders are Metal 3.1).
+* Minecraft 1.8.9 with Forge 11.15.1.x (for example a Prism Launcher instance) and a
+  Java 8 runtime. An arm64 Java 8 such as Zulu 8 is best; x86_64 Java under Rosetta
+  also runs, since the native library is universal.
+* No OptiFine in the same instance (metal189 replaces it).
+
+**Recommended: macOS 26 or newer.** Several features need it, mostly MetalFX:
+
+| Feature | Needs |
+|---|---|
+| Baseline renderer, shaders pipeline, MetalFX spatial and temporal upscaling | macOS 14 |
+| Ray tracing (shadows, reflections, AO, GI, entities) | macOS 14; macOS 15 or newer recommended (residency sets) |
+| MetalFX Denoised upscaling (ray-reconstruction-style denoiser) | macOS 26 |
+| MetalFX Frame Interpolation | macOS 26 |
+
+On older macOS versions those settings switch themselves off.
+
+**Which chip for what**
+
+* **Any Apple silicon:** the baseline renderer and the full shaders pipeline,
+  including world-space reflections and GI, which need no ray tracing hardware.
+* **M3 or later** for ray-traced effects at playable frame rates (hardware-accelerated
+  ray tracing). M1 and M2 can turn them on, but they run in software and are slow;
+  the presets only enable ray tracing on chips that accelerate it.
+* **M5 or later** for the MetalFX denoiser and frame interpolation. Both are neural
+  networks; on earlier chips they cost more than they save (on an M4 Pro at 1440p the
+  denoiser takes about 23 ms a frame and interpolation about 12 ms per generated
+  frame), so they are off by default.
+
+Intel Macs are not supported.
 
 ## Installing
 
-1. Build the jar (see below) or take `build/libs/metal189-0.1.0.jar`.
+1. Download the jar from the [releases page](https://github.com/bomberfish/metal189/releases),
+   or build it (see below).
 2. Copy it into the instance's `mods` folder (Prism: *Edit Instance → Mods →
    Add file*, or open the instance's `.minecraft/mods` folder).
 3. Remove OptiFine from the instance if it is installed.
@@ -100,8 +129,8 @@ export JAVA_HOME=/path/to/jdk-17
 ./gradlew build -x test        # native library + metallib + reobfuscated jar
 ```
 
-The jar is written to `build/libs/metal189-0.1.0.jar` (with the native library and
-shader library inside). For native-only changes, `cd native && make` rebuilds
+The jar is written to `build/libs/metal189-<version>.jar` (with the native library
+and shader library inside; the `-dev` jar next to it is the deobfuscated build). For native-only changes, `cd native && make` rebuilds
 `native/build/`, which test runs load directly.
 
 ## Development and testing
@@ -134,8 +163,8 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the engine is put toget
 * Mods that render the world a second time into their own framebuffer (picture-in-
   picture cameras, mirrors) work; those extra views use the vanilla-exact renderer
   so they cannot disturb the main view's temporal effects.
-* Input is LWJGL-exact, including macOS's Ctrl+left click = right click; if
-  mcmouser (which removes that) is installed, metal189 follows it. The behaviour is
-  also a setting.
+* Input is LWJGL-exact, except that Ctrl+left click is a left click (macOS turns it
+  into a right click under LWJGL). The *Ctrl+Click* setting on the Input page brings
+  LWJGL's behaviour back. mcmouser is not needed.
 * OptiFine is not supported (metal189 replaces it); with both installed, metal189
   stays off and says so on the main menu.
