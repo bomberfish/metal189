@@ -63,6 +63,12 @@ void sectionDelete(int id);
 void sectionSolid(int id, const uint32_t* bits, bool emits, bool tinted);
 // Makes every section vertex buffer resident for draws that reach them by GPU address.
 void sectionHeapsUse(id<MTLRenderCommandEncoder> enc);
+// The visible sections in vanilla order (RenderGlobal.renderInfos), set when it changes.
+void terrainSetVisible(const int32_t* ids, int count);
+// A TERRAIN command's sections with their camera-relative offsets (expanding the visible list).
+struct TerrainEntry;
+struct TerrainCmd;
+const TerrainEntry* terrainEntries(const TerrainCmd& t, const uint8_t* body, uint32_t& count);
 
 StagingAlloc stagingAlloc(size_t bytes);
 void encodePendingResourceWork(id<MTLCommandBuffer> cb);

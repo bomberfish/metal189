@@ -87,6 +87,9 @@ struct TargetCmd { uint32_t fbo, colorTex, depth; };
 struct ClearCmd { uint32_t mask; float r, g, b, a, depth; uint32_t stencil; };
 struct CopyTexCmd { uint32_t tex, level; int32_t xoff, yoff, x, y, w, h; };
 struct TerrainCmd { uint32_t layer, format, count; };
+// count == kTerrainVisible: the sections are the visible list (terrainSetVisible), followed by
+// the camera position (3 doubles); offsets are computed as vanilla's preRenderChunk does.
+constexpr uint32_t kTerrainVisible = 0xFFFFFFFFu;
 struct EnvCmd {
     float view[16];       // modelview at terrain setup (camera transform)
     float proj[16];       // world projection

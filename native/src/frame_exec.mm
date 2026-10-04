@@ -1157,12 +1157,14 @@ static TerrainDrawRecord* allocTerrainDraws(Exec& x, uint32_t count, id<MTLBuffe
 static void drawTerrain(Exec& x, const CmdHeader* h) {
     flushBatch(x);
     const TerrainCmd& t = payload<TerrainCmd>(h);
-    const TerrainEntry* e = (const TerrainEntry*)((const uint8_t*)(h + 1) + sizeof(TerrainCmd));
-    if (t.layer > 3 || t.count == 0) return;
+    if (t.layer > 3) return;
+    uint32_t count;
+    const TerrainEntry* e = terrainEntries(t, (const uint8_t*)(h + 1) + sizeof(TerrainCmd), count);
+    if (count == 0) return;
     if (!prepareDraw(x, 7, (int)t.format, true)) return;
     id<MTLBuffer> table;
     size_t tableOffset;
-    TerrainDrawRecord* rec = allocTerrainDraws(x, t.count, &table, &tableOffset);
+    TerrainDrawRecord* rec = allocTerrainDraws(x, count, &table, &tableOffset);
     // Every visible range of every section becomes 64-quad meshlets of one draw: a small draw
     // costs the GPU about as much as its vertices, so a layer is a single draw. terrain_vertex
     // finds a quad's meshlet (record + first quad) and drops the padding past its count.
@@ -1183,7 +1185,7 @@ static void drawTerrain(Exec& x, const CmdHeader* h) {
     // the third-person distance)
     simd_float4 ec = simd_mul(simd_inverse(g.mv), simd_make_float4(0, 0, 0, 1));
     float eyeX = ec.x / ec.w, eyeY = ec.y / ec.w, eyeZ = ec.z / ec.w;
-    for (uint32_t i = 0; i < t.count; i++) {
+    for (uint32_t i = 0; i < count; i++) {
         Section* s = section((int)e[i].section);
         if (!s || !s->layers[t.layer]) continue;
         uint32_t quads = s->vertices[t.layer] / 4;
@@ -1433,8 +1435,9 @@ static void advCollect(Exec& x, CmdReader rd, AdvWorld& w, TargetCmd& target, bo
             case OP_TERRAIN: {
                 const TerrainCmd& t = payload<TerrainCmd>(h);
                 if (t.layer > 3) break;
-                const TerrainEntry* e = (const TerrainEntry*)((const uint8_t*)(h + 1) + sizeof(TerrainCmd));
-                for (uint32_t i = 0; i < t.count; i++) w.terrain[t.layer].push_back({e[i].section, e[i].x, e[i].y, e[i].z});
+                uint32_t count;
+                const TerrainEntry* e = terrainEntries(t, (const uint8_t*)(h + 1) + sizeof(TerrainCmd), count);
+                for (uint32_t i = 0; i < count; i++) w.terrain[t.layer].push_back({e[i].section, e[i].x, e[i].y, e[i].z});
                 if (!sampledLayer[t.layer]) {
                     sampledLayer[t.layer] = true;
                     w.atlasTex = (int)m.units[0].tex;

@@ -2,7 +2,6 @@ package metal189.terrain;
 
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
-import java.util.IdentityHashMap;
 import java.util.List;
 import metal189.capture.Tess;
 import metal189.engine.Cmd;
@@ -27,16 +26,42 @@ import net.minecraft.util.EnumWorldBlockLayer;
 public final class Terrain {
     private Terrain() {}
 
-    private static final IdentityHashMap<RenderChunk, Integer> ids = new IdentityHashMap<RenderChunk, Integer>();
     private static int nextId = 1;
+    /** RenderChunk.metal189$id: the engine's section id (0 = none yet). */
+    private static final java.lang.invoke.MethodHandle ID_GET, ID_SET;
+
+    static {
+        java.lang.invoke.MethodHandle g = null, s = null;
+        try {
+            java.lang.invoke.MethodHandles.Lookup l = java.lang.invoke.MethodHandles.lookup();
+            g = l.findGetter(RenderChunk.class, "metal189$id", int.class);
+            s = l.findSetter(RenderChunk.class, "metal189$id", int.class);
+        } catch (Exception e) {
+            throw new IllegalStateException("metal189: RenderChunk not patched", e);
+        }
+        ID_GET = g;
+        ID_SET = s;
+    }
+
+    private static int idOf(RenderChunk rc) {
+        try {
+            return (int) ID_GET.invokeExact(rc);
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+    }
     private static int blockFormat;
     private static final int MAX_PER_RECORD = 8192;
 
     static int idFor(RenderChunk rc) {
-        Integer id = ids.get(rc);
-        if (id == null) {
+        int id = idOf(rc);
+        if (id == 0) {
             id = nextId++;
-            ids.put(rc, id);
+            try {
+                ID_SET.invokeExact(rc, id);
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
         }
         return id;
     }
@@ -127,8 +152,8 @@ public final class Terrain {
 
     /** Head of RenderChunk.setPosition: the old geometry no longer describes the world there. */
     public static void moved(RenderChunk rc) {
-        Integer id = ids.get(rc);
-        if (id != null) Native.sectionDelete(id);
+        int id = idOf(rc);
+        if (id != 0) Native.sectionDelete(id);
     }
 
     private static final java.util.concurrent.ConcurrentLinkedQueue<Object[]> pendingCompiled = new java.util.concurrent.ConcurrentLinkedQueue<Object[]>();
@@ -146,8 +171,9 @@ public final class Terrain {
             pendingCompiled.add(new Object[] {rc, cc});
             return;
         }
-        Integer id = ids.get(rc);
-        if (id == null) return;
+        int id = idOf(rc);
+        if (id == 0) return;
+        compiledGeneration++;
         BlockPos pos = rc.getPosition();
         for (EnumWorldBlockLayer layer : LAYERS) {
             if (cc.isLayerEmpty(layer)) Native.sectionUpload(id, layer.ordinal(), 0L, 0, 0, pos.getX(), pos.getY(), pos.getZ());
@@ -173,8 +199,38 @@ public final class Terrain {
     /** Head of RenderChunk.deleteGlResources. */
     public static void delete(RenderChunk rc) {
         solidMasks.remove(rc);
-        Integer id = ids.remove(rc);
-        if (id != null) Native.sectionDelete(id);
+        int id = idOf(rc);
+        if (id != 0) Native.sectionDelete(id);
+    }
+
+    /** Changes whenever some section's compiled chunk does (tile entity lists may change). */
+    public static int compiledGeneration;
+
+    /**
+     * Replaces both renderInfos.size() reads of RenderGlobal.renderBlockLayer's section loop:
+     * vanilla's loop then adds nothing to the container, and the layer is drawn from the
+     * visible-section snapshot instead (Visible, TerrainContainer.renderChunkLayer).
+     */
+    @SuppressWarnings("rawtypes")
+    public static int layerLoopSize(List renderInfos) {
+        Visible.update(renderInfos);
+        return 0;
+    }
+
+    /** One TERRAIN record drawing the visible sections that have this layer (the engine filters and offsets them). */
+    static void renderVisible(EnumWorldBlockLayer layer, double vx, double vy, double vz) {
+        Lod.camera(vx, vy, vz);
+        if (Visible.count == 0) return;
+        if (blockFormat == 0) blockFormat = Tess.formatId(DefaultVertexFormats.BLOCK);
+        Draw.flush();
+        long p = Engine.cmd.begin(Cmd.TERRAIN, 1 + 3 + 6);   // header, layer, format, -1, camera (3 doubles)
+        Mem.putInt(p, layer.ordinal());
+        Mem.putInt(p + 4, blockFormat);
+        Mem.putInt(p + 8, -1);
+        Mem.U.putDouble(p + 12, vx);
+        Mem.U.putDouble(p + 20, vy);
+        Mem.U.putDouble(p + 28, vz);
+        GlStateManager.resetColor();
     }
 
     /**
@@ -184,7 +240,6 @@ public final class Terrain {
      */
     static void renderLayer(List<RenderChunk> chunks, EnumWorldBlockLayer layer, double vx, double vy, double vz) {
         int total = chunks.size();
-        if (layer == EnumWorldBlockLayer.SOLID) Lod.check(chunks, vx, vy, vz);
         if (total > 0) {
             if (blockFormat == 0) blockFormat = Tess.formatId(DefaultVertexFormats.BLOCK);
             Draw.flush();

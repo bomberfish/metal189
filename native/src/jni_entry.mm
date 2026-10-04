@@ -121,6 +121,7 @@ static void JNICALL n_sectionUpload(JNIEnv*, jclass, jint id, jint layer, jlong 
     @autoreleasepool { sectionUpload(id, layer, ptr(data), (size_t)bytes, (uint32_t)count, x, y, z); }
 }
 static void JNICALL n_sectionDelete(JNIEnv*, jclass, jint id) { sectionDelete(id); }
+static void JNICALL n_terrainVisible(JNIEnv*, jclass, jlong ids, jint n) { terrainSetVisible((const int32_t*)ptr(ids), n); }
 static void JNICALL n_sectionSolid(JNIEnv*, jclass, jint id, jlong bits, jboolean emits, jboolean tinted) {
     sectionSolid(id, (const uint32_t*)ptr(bits), emits, tinted);
 }
@@ -171,6 +172,7 @@ static JNINativeMethod kMethods[] = {
     {(char*)"sectionUpload", (char*)"(IIJIIIII)V", (void*)n_sectionUpload},
     {(char*)"sectionDelete", (char*)"(I)V", (void*)n_sectionDelete},
     {(char*)"sectionSolid", (char*)"(IJZZ)V", (void*)n_sectionSolid},
+    {(char*)"terrainVisible", (char*)"(JI)V", (void*)n_terrainVisible},
     {(char*)"advSetEnabled", (char*)"(Z)V", (void*)n_advSetEnabled},
     {(char*)"advSetFeatures", (char*)"(I)V", (void*)n_advSetFeatures},
     {(char*)"advSetTables", (char*)"(JJJ)V", (void*)n_advSetTables},

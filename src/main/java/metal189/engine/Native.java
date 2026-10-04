@@ -118,6 +118,8 @@ public final class Native {
     public static native void setOption(int key, int value);
     public static native void sectionUpload(int id, int layer, long data, int bytes, int vertexCount, int x, int y, int z);
     public static native void sectionDelete(int id);
+    /** The visible sections (ids, vanilla order); terrain commands with count -1 draw them. */
+    public static native void terrainVisible(long ids, int count);
     /**
      * Which blocks of a section are opaque cubes (4096 bits, index (y << 8) | (z << 4) | x), whether any
      * gives light, and whether it has translucent blocks other than water (stained glass and the like).

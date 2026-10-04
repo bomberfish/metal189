@@ -178,11 +178,14 @@ public final class Lod {
         f[0] = f[1] = false;
     }
 
-    /** Each frame, with the visible sections (client thread): queues those built at the wrong detail. */
-    static void check(java.util.List<RenderChunk> visible, double vx, double vy, double vz) {
+    static void camera(double vx, double vy, double vz) {
         camX = vx;
         camY = vy;
         camZ = vz;
+    }
+
+    /** With each new visible-section snapshot (client thread): queues sections built at the wrong detail. */
+    static void check(RenderChunk[] visible, int n) {
         if (GET == null) return;
         double d = limit();
         boolean fancy = Minecraft.getMinecraft().gameSettings.fancyGraphics;
@@ -191,8 +194,8 @@ public final class Lod {
         double nearIn = (d - margin) * (d - margin), farOut = (d + margin) * (d + margin);
         int requested = 0;
         try {
-            for (int i = 0, n = visible.size(); i < n; i++) {
-                RenderChunk rc = visible.get(i);
+            for (int i = 0; i < n; i++) {
+                RenderChunk rc = visible[i];
                 int built = (int) GET.invokeExact(rc);
                 if (built == 0 || (built & 8) != 0 || rc.isNeedsUpdate()) continue;
                 boolean builtFar = (built & 3) == 2, wantFar;

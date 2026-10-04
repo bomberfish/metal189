@@ -18,6 +18,7 @@ public class TerrainContainer extends ChunkRenderContainer {
     @Override
     public void renderChunkLayer(EnumWorldBlockLayer layer) {
         if (!initialized) return;
-        Terrain.renderLayer(renderChunks, layer, vx, vy, vz);
+        if (renderChunks.isEmpty()) Terrain.renderVisible(layer, vx, vy, vz);   // the usual case (Terrain.layerLoopSize)
+        else Terrain.renderLayer(renderChunks, layer, vx, vy, vz);
     }
 }

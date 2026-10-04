@@ -2,6 +2,7 @@
 
 #import "engine.h"
 #import "resources.h"
+#import "commands.h"
 #import "raytrace.h"
 #include <unordered_map>
 
@@ -48,6 +49,33 @@ static id<MTLBuffer> newSectionBuffer(const void* data, size_t bytes) {
     if (!b) return [device() newBufferWithBytes:data length:bytes options:MTLResourceStorageModeShared];
     memcpy(b.contents, data, bytes);
     return b;
+}
+
+static std::vector<int32_t> g_visible;
+
+void terrainSetVisible(const int32_t* ids, int count) { g_visible.assign(ids, ids + std::max(count, 0)); }
+
+const TerrainEntry* terrainEntries(const TerrainCmd& t, const uint8_t* body, uint32_t& count) {
+    if (t.count != kTerrainVisible) {
+        count = t.count;
+        return (const TerrainEntry*)body;
+    }
+    double cam[3];
+    memcpy(cam, body, sizeof cam);
+    static std::vector<TerrainEntry> out[4];
+    std::vector<TerrainEntry>& o = out[t.layer & 3];
+    o.clear();
+    size_t n = g_visible.size();
+    bool backToFront = t.layer == 3;   // vanilla draws translucent sections in reverse
+    for (size_t k = 0; k < n; k++) {
+        int32_t id = g_visible[backToFront ? n - 1 - k : k];
+        const Section* sp = section(id);
+        if (!sp || !sp->layers[t.layer]) continue;   // vanilla: isLayerEmpty
+        const Section& s = *sp;
+        o.push_back({(uint32_t)id, (float)((double)s.ox - cam[0]), (float)((double)s.oy - cam[1]), (float)((double)s.oz - cam[2])});
+    }
+    count = (uint32_t)o.size();
+    return o.data();
 }
 
 void sectionHeapsUse(id<MTLRenderCommandEncoder> enc) {
@@ -346,10 +374,11 @@ void renderbufferStorage(int id, int internalFormat, int w, int h) {
 // terrain sections
 
 static std::unordered_map<int, Section> g_sections;
+// by id (ids are small and dense): map nodes never move, so these stay valid until erased
+static std::vector<Section*> g_sectionById;
 
 Section* section(int sid) {
-    auto it = g_sections.find(sid);
-    return it == g_sections.end() ? nullptr : &it->second;
+    return sid >= 0 && (size_t)sid < g_sectionById.size() ? g_sectionById[sid] : nullptr;
 }
 
 const std::unordered_map<int, Section>& allSections() { return g_sections; }
@@ -376,6 +405,10 @@ void sectionUpload(int sid, int layer, const void* data, size_t bytes, uint32_t 
     if (layer < 3) rtSectionChanged(sid);
     static uint64_t versions = 0;
     Section& s = g_sections[sid];
+    if (sid >= 0) {
+        if ((size_t)sid >= g_sectionById.size()) g_sectionById.resize((size_t)sid + 1024, nullptr);
+        g_sectionById[sid] = &s;
+    }
     bool moved = s.version == 0 || s.ox != ox || s.oy != oy || s.oz != oz;
     if (moved) {
         if (s.version != 0) sectionUnplace(sid, s);
@@ -465,6 +498,7 @@ void sectionDelete(int sid) {
     if (it == g_sections.end()) return;
     sectionUnplace(sid, it->second);
     for (id<MTLBuffer> b : it->second.layers) if (b) g_deferredReleases.push_back(b);
+    if (sid >= 0 && (size_t)sid < g_sectionById.size()) g_sectionById[sid] = nullptr;
     g_sections.erase(it);
 }
 

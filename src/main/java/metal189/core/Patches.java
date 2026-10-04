@@ -40,6 +40,30 @@ public final class Patches {
     public static void register(String className, ClassPatch patch) { PATCHES.put(className, patch); }
 
     static {
+        // The visibility search's per-section direction sets (metal189.terrain.FacingSet).
+        register("net.minecraft.client.renderer.RenderGlobal$ContainerLocalRenderInformation", new ClassPatch() {
+            public boolean apply(ClassNode cn) {
+                boolean changed = false;
+                for (MethodNode m : cn.methods) {
+                    if (!m.name.equals("<init>")) continue;
+                    for (AbstractInsnNode n = m.instructions.getFirst(); n != null; n = n.getNext()) {
+                        if (n.getOpcode() != Opcodes.INVOKESTATIC) continue;
+                        org.objectweb.asm.tree.MethodInsnNode c = (org.objectweb.asm.tree.MethodInsnNode) n;
+                        if (!c.owner.equals("java/util/EnumSet") || !c.name.equals("noneOf")) continue;
+                        c.owner = "metal189/terrain/FacingSet";
+                        c.name = "create";
+                        c.desc = "(Ljava/lang/Class;)Ljava/util/Set;";
+                        changed = true;
+                    }
+                }
+                return changed;
+            }
+
+            public boolean needsFrames() { return false; }
+        });
+    }
+
+    static {
         // Leaves' graphics level is read through Lod.leaves (fast leaves for far sections).
         ClassPatch leaves = new ClassPatch() {
             public boolean apply(ClassNode cn) {
@@ -135,6 +159,60 @@ public final class Patches {
                 }
 
                 public boolean needsFrames() { return false; }
+            },
+            // setupTerrain's visibility search is metal189.terrain.Search (vanilla's rules, no
+            // per-section allocation; rate-limited while the camera is still)
+            new ClassPatch() {
+                public boolean apply(ClassNode cn) {
+                    MethodNode m = Asm.find(cn, "setupTerrain", "func_174970_a",
+                        "(Lnet/minecraft/entity/Entity;DLnet/minecraft/client/renderer/culling/ICamera;IZ)V");
+                    if (m == null) return false;
+                    for (AbstractInsnNode i = m.instructions.getFirst(); i != null; i = i.getNext()) {
+                        if (i.getOpcode() != Opcodes.GETFIELD) continue;
+                        String f = ((FieldInsnNode) i).name;
+                        if (!f.equals("displayListEntitiesDirty") && !f.equals("field_147595_R")) continue;
+                        AbstractInsnNode next = i.getNext();
+                        if (next == null || next.getOpcode() != Opcodes.IFEQ) continue;   // the "if (... && dirty)" read
+                        org.objectweb.asm.tree.InsnList l = new org.objectweb.asm.tree.InsnList();
+                        l.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ALOAD, 0));   // this
+                        l.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ALOAD, 1));   // viewEntity
+                        l.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.DLOAD, 2));   // partialTicks
+                        l.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ALOAD, 4));   // camera (after the debug frustum swap)
+                        l.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ILOAD, 5));   // frameCount
+                        l.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ILOAD, 6));   // playerSpectator
+                        l.add(new org.objectweb.asm.tree.MethodInsnNode(Opcodes.INVOKESTATIC, "metal189/terrain/Search", "run",
+                            "(ZLnet/minecraft/client/renderer/RenderGlobal;Lnet/minecraft/entity/Entity;DLnet/minecraft/client/renderer/culling/ICamera;IZ)Z", false));
+                        m.instructions.insert(i, l);
+                        return true;
+                    }
+                    return false;
+                }
+
+                public boolean needsFrames() { return false; }
+            },
+            // renderBlockLayer's per-section loop: the layer is drawn from the engine's visible list
+            new ClassPatch() {
+                public boolean apply(ClassNode cn) {
+                    MethodNode m = Asm.find(cn, "renderBlockLayer", "func_174977_a",
+                        "(Lnet/minecraft/util/EnumWorldBlockLayer;DILnet/minecraft/entity/Entity;)I");
+                    if (m == null) return false;
+                    int n = 0;
+                    for (AbstractInsnNode i = m.instructions.getFirst(); i != null; i = i.getNext()) {
+                        if (i.getOpcode() != Opcodes.INVOKEINTERFACE || !"size".equals(((org.objectweb.asm.tree.MethodInsnNode) i).name)) continue;
+                        AbstractInsnNode prev = i.getPrevious();
+                        if (!(prev instanceof FieldInsnNode) || prev.getOpcode() != Opcodes.GETFIELD) continue;
+                        String f = ((FieldInsnNode) prev).name;
+                        if (!f.equals("renderInfos") && !f.equals("field_72755_R")) continue;
+                        AbstractInsnNode call = new org.objectweb.asm.tree.MethodInsnNode(Opcodes.INVOKESTATIC, "metal189/terrain/Terrain",
+                            "layerLoopSize", "(Ljava/util/List;)I", false);
+                        m.instructions.set(i, call);
+                        i = call;
+                        n++;
+                    }
+                    return n == 2;
+                }
+
+                public boolean needsFrames() { return false; }
             }));
         register("net.minecraft.client.renderer.chunk.ChunkRenderDispatcher",
             Asm.injectHead("uploadChunk", "func_178503_a",
@@ -205,6 +283,8 @@ public final class Patches {
             new ClassPatch() {
                 public boolean apply(ClassNode cn) {
                     cn.fields.add(new org.objectweb.asm.tree.FieldNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_VOLATILE, "metal189$lod", "I", null, null));
+                    // the engine's section id (metal189.terrain.Terrain)
+                    cn.fields.add(new org.objectweb.asm.tree.FieldNode(Opcodes.ACC_PUBLIC, "metal189$id", "I", null, null));
                     return true;
                 }
 

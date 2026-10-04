@@ -339,6 +339,10 @@ public final class TestDriver {
                 // advdebug N : advanced-pipeline debug view (-Dmetal189.advDebug), 0 off
                 Native.setOption(4, Integer.parseInt(a[1]));
                 return true;
+            case "renderdistance":
+                // renderdistance CHUNKS : render (and integrated server view) distance; options are not saved
+                mc.gameSettings.renderDistanceChunks = Integer.parseInt(a[1]);
+                return true;
             case "fancy":
                 // fancy true|false : fancy graphics (leaves, clouds) and reload the renderers
                 mc.gameSettings.fancyGraphics = Boolean.parseBoolean(a[1]);
