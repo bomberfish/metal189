@@ -133,6 +133,17 @@ The jar is written to `build/libs/metal189-<version>.jar` (with the native libra
 and shader library inside; the `-dev` jar next to it is the deobfuscated build). For native-only changes, `cd native && make` rebuilds
 `native/build/`, which test runs load directly.
 
+### iOS (experimental)
+
+`./gradlew iosJar` builds `build/libs/metal189-<version>-ios.jar`: the same mod with an
+arm64 iOS native library (iOS 17+, ad-hoc signed) and an iOS shader library, for
+launchers that run Forge 1.8.9 on iOS such as PojavLauncher. It is untested on a device.
+It draws into a full-screen Metal view over the launcher's window, unpacks its natives
+inside the app's container (`$HOME/Library/Caches/metal189`), and takes input from
+touch (in menus a finger is the mouse; in game a drag looks around, a tap is a left
+click and a two-finger tap a right click), a hardware keyboard, and an iPad mouse or
+trackpad. iOS only loads signed code, so the launcher may need to allow or re-sign it.
+
 ## Development and testing
 
 Tests run a separate client in `run/` (built from the Prism libraries, never the

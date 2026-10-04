@@ -29,7 +29,7 @@ done
 mkdir -p "$RUN/mods" "$RUN/config"
 [ -f "$RUN/classpath.txt" ] || python3 "$ROOT/tools/mkclasspath.py" "$RUN/natives" > "$RUN/classpath.txt"
 # the mod jar (not -dev/-sources): metal189-<version>.jar
-JAR=$(ls "$ROOT"/build/libs/metal189-*.jar | grep -v -- '-dev\.jar$\|-sources\.jar$\|-ios\.jar$' | head -1)
+JAR=$(ls "$ROOT"/build/libs/metal189-*.jar | grep -Ev -- '-(dev|sources|ios)\.jar$' | head -1)
 cp "$JAR" "$RUN/mods/metal189.jar"
 [ -f "$RUN/config/splash.properties" ] || printf 'enabled=false\n' > "$RUN/config/splash.properties"
 CP="$(cat "$RUN/classpath.txt")"
