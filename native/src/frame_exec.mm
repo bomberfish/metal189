@@ -9,6 +9,7 @@
 #import "resources.h"
 #import "advanced.h"
 #import "gpu_profiler.h"
+#import "interp.h"
 #include <unordered_map>
 #include <cstring>
 
@@ -19,6 +20,9 @@ struct FrameStats { uint64_t draws, terrainDraws, terrainQuads, arenaDraws, mesh
 bool g_optFaceCull = true;
 bool g_optTerrainSplit = false;
 int g_optTerrainDebug = 0;
+bool g_optDepthDiscard = false;
+bool g_optAdopt = true;
+uint32_t g_optSkipPhases = 0;
 static FrameStats g_stats, g_statsAcc;
 static int g_statsFrames;
 
@@ -29,6 +33,7 @@ extern bool g_optPresent;
 extern bool g_optGpuStats;
 extern bool g_optSerialGpu;
 extern bool g_optPresentDraw;
+extern bool g_optPresentSkip;
 int g_optAdvDebug = 0; // advanced pipeline debug view (see light_fragment)
 extern bool g_ctrlClickRight;
 
@@ -43,6 +48,10 @@ void setOption(int key, int value) {
         case 8: g_optSerialGpu = value != 0; break;
         case 9: g_optTerrainSplit = value != 0; break;
         case 6: g_optPresentDraw = value != 0; break;
+        case 104: g_optAdopt = value != 0; break;   // present Minecraft's framebuffer without copying it
+        case 103: g_optSkipPhases = (uint32_t)value; break;   // benchmarking: skip the draws of these phases (bit per PH_*)
+        case 102: g_optDepthDiscard = value != 0; break;   // benchmarking: what storing depth costs (wrong output)
+        case 101: g_optPresentSkip = value != 0; break;
         case 100: g_optTerrainDebug = value; break;   // benchmarking: 1 = shade terrain vertices but draw nothing
         default: if (key >= 10) advancedSetParam(key, value); break;
     }
@@ -484,6 +493,7 @@ struct Exec {
     bool lastTerrain = false;
     bool lastOk = false;
     bool advReplay = false;  // replaying a world segment already rendered by the advanced pipeline
+    bool skipCopyDraw = false;   // the next draw is the framebuffer copy an adoption made unnecessary
     int auxDepth = 0;        // inside auxiliary world segments (rendered with the baseline, no filtering)
     bool advReplaySaved = false;
     // batch of merged arena draws
@@ -524,10 +534,11 @@ static void resolveTarget(Exec& x, const TargetCmd& t) {
         ensureScreenTargets();
         nt.color = e.screenColor;
         nt.depth = e.screenDepth;
-        nt.flip = false;
+        nt.flip = screenFlipped();
     } else {
         TexEntry* c = t.colorTex ? texture(t.colorTex) : nullptr;
         nt.color = c ? c->tex : nil;
+        if (c) c->presented = nil;   // drawn to again: its own texture holds the image
         if (t.depth & 0x40000000) {
             TexEntry* r = renderbuffer(t.depth & 0x3FFFFFFF);
             nt.depth = r ? r->tex : nil;
@@ -567,12 +578,12 @@ static bool beginPass(Exec& x) {
         rp.depthAttachment.texture = x.cur.depth;
         rp.depthAttachment.loadAction = x.pendDepth ? MTLLoadActionClear : MTLLoadActionLoad;
         rp.depthAttachment.clearDepth = x.pendDepthValue;
-        rp.depthAttachment.storeAction = MTLStoreActionStore;
+        rp.depthAttachment.storeAction = g_optDepthDiscard ? MTLStoreActionDontCare : MTLStoreActionStore;
         if (x.cur.depth.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) {
             rp.stencilAttachment.texture = x.cur.depth;
             rp.stencilAttachment.loadAction = x.pendStencil ? MTLLoadActionClear : MTLLoadActionLoad;
             rp.stencilAttachment.clearStencil = x.pendStencilValue;
-            rp.stencilAttachment.storeAction = MTLStoreActionStore;
+            rp.stencilAttachment.storeAction = g_optDepthDiscard ? MTLStoreActionDontCare : MTLStoreActionStore;
         }
     }
     x.pendColor = x.pendDepth = x.pendStencil = false;
@@ -1534,6 +1545,29 @@ static void advRenderWorld(Exec& x, CmdReader rd) {
     if (target.fbo == 0) engine().screenDirty = true;
 }
 
+// Minecraft draws its finished framebuffer onto the screen with a full-screen quad (in 1.8 the
+// HUD and menus are drawn into the framebuffer too): when nothing else reached the screen this
+// frame, the screen takes the framebuffer's texture instead (presented in GL row order) and the
+// framebuffer gets the screen's free texture for its next frame. Saves a full-screen copy.
+static bool presentWithoutCopy(Exec& x, uint32_t texId) {
+    if (!g_optAdopt || advancedEnabled() || interpWanted() || x.cur.fbo != 0 || !x.cur.valid || engine().screenDirty) return false;
+    TexEntry* t = texture((int)texId);
+    if (!t || !t->tex || t->isDepth || (int)t->tex.width != x.cur.w || (int)t->tex.height != x.cur.h) return false;
+    endPass(x);
+    id<MTLTexture> image = t->tex, other = t->tex;
+    if (!screenAdopt(other)) return false;
+    t->presented = image;
+    t->tex = other;
+    t->levels = (int)other.mipmapLevelCount;
+    x.cur.color = engine().screenColor;
+    x.cur.flip = true;
+    x.pendColor = false;   // the frame's earlier clear of the screen is covered by the image
+    g.uniformsDirty = true;
+    x.stateDirty = true;
+    for (int i = 0; i < 3; i++) x.bTex[i] = nil;
+    return true;
+}
+
 void executeFrame(id<MTLCommandBuffer> cb, const uint8_t* cmds, size_t len) {
     Exec x;
     x.cb = cb;
@@ -1564,14 +1598,21 @@ void executeFrame(id<MTLCommandBuffer> cb, const uint8_t* cmds, size_t len) {
                 if (x.advReplay && (g_phase == PH_WORLD_BEGIN || g_phase == PH_SKY)) break;
                 doClear(x, payload<ClearCmd>(h));
                 break;
+            case OP_PRESENT_TEX:
+                flushBatch(x);
+                if (presentWithoutCopy(x, payload<uint32_t>(h))) x.skipCopyDraw = true;
+                break;
             case OP_DRAW:
+                if (x.skipCopyDraw) { x.skipCopyDraw = false; break; }
                 if (g_phase == PH_ENTITIES_SHADOW) break;   // never on screen
+                if ((g_optSkipPhases >> g_phase) & 1) break;
                 if (x.advReplay && (g_phase == PH_SKY || (g_phase == PH_CLOUDS && advancedCloudsActive()) ||
                                     advConsumes(g, g_phase, payload<DrawCmd>(h).prim))) break;
                 drawArena(x, payload<DrawCmd>(h));
                 break;
             case OP_DRAW_MESH:
                 if (g_phase == PH_ENTITIES_SHADOW) break;
+                if ((g_optSkipPhases >> g_phase) & 1) break;
                 if (x.advReplay && (g_phase == PH_SKY || (g_phase == PH_CLOUDS && advancedCloudsActive()) ||
                                     advConsumes(g, g_phase, payload<DrawMeshCmd>(h).prim))) break;
                 drawMesh(x, payload<DrawMeshCmd>(h));
@@ -1592,7 +1633,7 @@ void executeFrame(id<MTLCommandBuffer> cb, const uint8_t* cmds, size_t len) {
                 }
                 break;
             case OP_ENV: g_env = payload<EnvCmd>(h); g_envValid = true; break;
-            case OP_TERRAIN: if (!x.advReplay) drawTerrain(x, h); break;
+            case OP_TERRAIN: if (!x.advReplay && !((g_optSkipPhases >> g_phase) & 1)) drawTerrain(x, h); break;
             default: break;
         }
     }

@@ -42,16 +42,20 @@ void texGetImage(int id, int level, int format, int type, void* dst, size_t size
     TexEntry* t = texture(id);
     if (!t || !t->tex || level >= t->levels) return;
     int w = std::max(1, t->w >> level), h = std::max(1, t->h >> level);
-    readTexture(t->tex, level, 0, 0, w, h, format, type, (uint8_t*)dst, size, false);
+    // a framebuffer presented without a copy keeps its image in the screen until drawn to again
+    auto src = (level == 0 && t->presented) ? t->presented : t->tex;
+    readTexture(src, level, 0, 0, w, h, format, type, (uint8_t*)dst, size, false);
 }
 
 void readPixels(int fbo, int x, int y, int w, int h, int format, int type, void* dst, size_t size) {
     Engine& e = engine();
     if (fbo == 0) {
-        id<MTLTexture> screen = screenForReadback();
+        bool flipped = false;
+        id<MTLTexture> screen = screenForReadback(&flipped);
         if (!screen) return;
         int H = (int)screen.height;
-        readTexture(screen, 0, x, H - (y + h), w, h, format, type, (uint8_t*)dst, size, true);
+        if (flipped) readTexture(screen, 0, x, y, w, h, format, type, (uint8_t*)dst, size, false);
+        else readTexture(screen, 0, x, H - (y + h), w, h, format, type, (uint8_t*)dst, size, true);
     }
     // FBO reads go through the colour texture with GL row order; callers use glGetTexImage.
 }

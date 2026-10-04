@@ -59,7 +59,11 @@ void submitPartial(const uint8_t* cmds, size_t len);
 void arenaGrow(size_t minBytes, int64_t* info);
 void waitIdle();
 void ensureScreenTargets();
-id<MTLTexture> screenForReadback();
+id<MTLTexture> screenForReadback(bool* flipped = nullptr);   // flipped: stored in GL row order (an adopted texture)
+// The open frame's screen takes `tex` (same size and format) as its image, and `tex` becomes the
+// screen's former texture: presenting a finished framebuffer without copying it. False if not possible.
+bool screenAdopt(id<MTLTexture> __strong& tex);
+bool screenFlipped();   // the open frame's screen holds an adopted (GL row order) texture
 void setVSync(bool on);
 id<CAMetalDrawable> acquireDrawable();
 

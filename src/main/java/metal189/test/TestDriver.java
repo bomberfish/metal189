@@ -161,6 +161,12 @@ public final class TestDriver {
                 }
                 leavingDimension = false;
                 return true;
+            case "capturescreen": {
+                // the screen's image as presented (engine screen target)
+                boolean ok = Native.capture(0, a[1]);
+                Native.LOG.info("metal189-test capturescreen {} -> {}", a[1], ok ? "ok" : "FAILED");
+                return true;
+            }
             case "capture": {
                 if (metal189.core.Settings.reference()) {
                     pendingCapture = a[1]; // taken from the next frame, before its swap

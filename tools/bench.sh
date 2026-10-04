@@ -2,6 +2,8 @@
 # Baseline-renderer benchmark: tools/bench.sh [WIDTH HEIGHT] [extra run-client args]
 # Runs tools/bench/base.txt (or $BENCH_SCRIPT: a path, or a name under tools/bench/) in a
 # background window (pass --fg for a foreground one) and prints the fps lines.
+# Sizes are points: on a 2x display a true 3440x1440 test is
+#   tools/bench.sh 1720 720 --fg -Dmetal189.retina=true
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 W=${1:-3440}; H=${2:-1440}; shift 2 2>/dev/null
 cp "$ROOT/run/config/metal189.properties" "$ROOT/captures/metal189.properties.bench"

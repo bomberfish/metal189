@@ -105,6 +105,7 @@ bool g_optPresent = true;
 bool g_optGpuStats = false;
 bool g_optSerialGpu = false;
 bool g_optPresentDraw = true;
+bool g_optPresentSkip = false;
 static bool g_vsync = false;
 
 enum ScreenState { SS_FREE, SS_WRITING, SS_READY, SS_PRESENTING };
@@ -116,6 +117,7 @@ struct Presenter {
     id<MTLTexture> color[kScreenRing];
     id<MTLTexture> interp[kScreenRing];        // frame interpolation: the generated frame shown before color[i]
     bool hasInterp[kScreenRing] = {false, false, false, false};
+    bool flipped[kScreenRing] = {false, false, false, false};   // holds an adopted texture (GL row order)
     ScreenState state[kScreenRing] = {SS_FREE, SS_FREE, SS_FREE, SS_FREE};
     uint64_t readySeq[kScreenRing] = {0, 0, 0, 0};
     uint64_t seq = 0, presentedSeq = 0;
@@ -130,11 +132,12 @@ static Presenter g_pres;
 
 void setVSync(bool on) { g_vsync = on; }
 
-static void blitToDrawable(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<CAMetalDrawable> drawable) {
+static void blitToDrawable(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<CAMetalDrawable> drawable, bool flipped = false) {
+    if (g_optPresentSkip) return;   // benchmarking (option 101): what presenting costs
     id<MTLTexture> dst = drawable.texture;
     static id<MTLRenderPipelineState> pso = nil;
     static MTLPixelFormat psoFormat = MTLPixelFormatInvalid;
-    if (g_optPresentDraw && dst.pixelFormat != psoFormat) {
+    if (dst.pixelFormat != psoFormat) {
         MTLRenderPipelineDescriptor* d = [MTLRenderPipelineDescriptor new];
         d.vertexFunction = [engine().library newFunctionWithName:@"blit_vertex"];
         d.fragmentFunction = [engine().library newFunctionWithName:@"present_fragment"];
@@ -144,7 +147,7 @@ static void blitToDrawable(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<CAMet
         if (!pso) log("present pipeline: %s", err.localizedDescription.UTF8String);
         psoFormat = dst.pixelFormat;
     }
-    if (g_optPresentDraw && pso && (dst.usage & MTLTextureUsageRenderTarget)) {
+    if ((g_optPresentDraw || flipped) && pso && (dst.usage & MTLTextureUsageRenderTarget)) {
         MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.colorAttachments[0].texture = dst;
         rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
@@ -156,6 +159,8 @@ static void blitToDrawable(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<CAMet
         [e setViewport:(MTLViewport){0, 0, (double)w, (double)h, 0, 1}];
         simd_float4 noFlip = simd_make_float4(0, 0, 0, 0);
         [e setVertexBytes:&noFlip length:sizeof noFlip atIndex:0];
+        uint32_t flipRows = flipped ? (uint32_t)src.height : 0;   // bottom-up source: row h - 1 - y
+        [e setFragmentBytes:&flipRows length:sizeof flipRows atIndex:0];
         [e setFragmentTexture:src atIndex:0];
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [e endEncoding];
@@ -181,6 +186,7 @@ static void presenterLoop() {
             id<CAMetalDrawable> drawable = layer ? [layer nextDrawable] : nil;
             if (!drawable) continue;
             int slot = -1;
+            bool srcFlipped = false;
             id<MTLTexture> src = nil, generated = nil;   // held here: the game thread may replace the slot's
             {
                 std::lock_guard<std::mutex> lk(g_pres.m);
@@ -192,6 +198,7 @@ static void presenterLoop() {
                 g_pres.state[slot] = SS_PRESENTING;
                 g_pres.presentedSeq = g_pres.readySeq[slot];
                 src = g_pres.color[slot];
+                srcFlipped = g_pres.flipped[slot];
                 if (g_pres.hasInterp[slot]) generated = g_pres.interp[slot];
             }
             id<MTLCommandBuffer> cb = [g_pres.queue commandBuffer];
@@ -210,11 +217,11 @@ static void presenterLoop() {
                 if (wait > 0) std::this_thread::sleep_for(std::chrono::microseconds((int64_t)(wait * 1e6)));
                 drawable = [layer nextDrawable];
                 if (drawable) {
-                    blitToDrawable(cb, src, drawable);
+                    blitToDrawable(cb, src, drawable, srcFlipped);
                     [cb presentDrawable:drawable];
                 }
             } else {
-                blitToDrawable(cb, src, drawable);
+                blitToDrawable(cb, src, drawable, srcFlipped);
                 [cb presentDrawable:drawable];
             }
             [cb addCompletedHandler:^(id<MTLCommandBuffer>) {
@@ -295,15 +302,44 @@ void ensureScreenTargets() {
     }
     g_pres.state[slot] = SS_WRITING;
     g_pres.current = slot;
+    g_pres.flipped[slot] = false;
     e.screenColor = g_pres.color[slot];
 }
 
-// Texture holding the most recent complete image of the default framebuffer.
-id<MTLTexture> screenForReadback() {
+static bool g_screenFlipped = false;   // this frame's screen is an adopted texture (GL row order)
+
+bool screenFlipped() { return g_screenFlipped; }
+
+bool screenAdopt(id<MTLTexture> __strong& tex) {
     Engine& e = engine();
-    if (e.screenDirty && e.screenColor) return e.screenColor;
+    ensureScreenTargets();
     std::lock_guard<std::mutex> lk(g_pres.m);
-    return g_pres.lastFinished >= 0 ? g_pres.color[g_pres.lastFinished] : e.screenColor;
+    int slot = g_pres.current;
+    if (slot < 0 || !tex) return false;
+    id<MTLTexture> mine = g_pres.color[slot];
+    if (!mine || mine.width != tex.width || mine.height != tex.height || mine.pixelFormat != tex.pixelFormat ||
+        mine.storageMode != tex.storageMode || (tex.usage & mine.usage) != mine.usage)
+        return false;
+    g_pres.color[slot] = tex;
+    tex = mine;
+    g_pres.flipped[slot] = true;
+    e.screenColor = g_pres.color[slot];
+    e.screenDirty = true;
+    g_screenFlipped = true;
+    return true;
+}
+
+// Texture holding the most recent complete image of the default framebuffer.
+id<MTLTexture> screenForReadback(bool* flipped) {
+    Engine& e = engine();
+    if (e.screenDirty && e.screenColor) {
+        if (flipped) *flipped = g_screenFlipped;
+        return e.screenColor;
+    }
+    std::lock_guard<std::mutex> lk(g_pres.m);
+    int s = g_pres.lastFinished;
+    if (flipped) *flipped = s >= 0 && g_pres.flipped[s];
+    return s >= 0 ? g_pres.color[s] : e.screenColor;
 }
 
 static void startPresenter() {
@@ -321,6 +357,7 @@ static void present(id<MTLCommandBuffer> cb) {
     int slot = g_pres.current;
     bool rendered = e.screenDirty && slot >= 0;
     e.screenDirty = false;
+    g_screenFlipped = false;
     g_pres.current = -1;
     e.screenColor = nil;
     if (slot < 0) return;
@@ -388,7 +425,7 @@ static void present(id<MTLCommandBuffer> cb) {
     if (g_vsync && !interp) {   // interpolated frames are paced by the presenter
         id<CAMetalDrawable> drawable = [layer nextDrawable];
         if (drawable) {
-            blitToDrawable(cb, g_pres.color[slot], drawable);
+            blitToDrawable(cb, g_pres.color[slot], drawable, g_pres.flipped[slot]);
             [cb presentDrawable:drawable];
         }
         [cb addCompletedHandler:^(id<MTLCommandBuffer>) {

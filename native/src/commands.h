@@ -30,6 +30,7 @@ enum Op : uint16_t {
     OP_PHASE = 17,
     OP_TERRAIN = 18,
     OP_ENV = 19,
+    OP_PRESENT_TEX = 20,   // 1: texture (a finished framebuffer about to be copied to the screen by the next draw)
 };
 
 enum Phase : uint32_t {

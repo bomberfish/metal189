@@ -23,8 +23,11 @@ fragment float4 blit_fragment(BlitOut in [[stage_in]], texture2d<float> src [[te
 
 // Presenting: texel-exact copy into the drawable (a render pass is several times faster
 // than a blit into the window's surface on Apple GPUs).
-fragment float4 present_fragment(BlitOut in [[stage_in]], texture2d<float> src [[texture(0)]]) {
-    return src.read(uint2(in.position.xy));
+fragment float4 present_fragment(BlitOut in [[stage_in]], texture2d<float> src [[texture(0)]],
+                                 constant uint& flipRows [[buffer(0)]]) {
+    uint2 p = uint2(in.position.xy);
+    if (flipRows != 0) p.y = flipRows - 1 - p.y;   // a GL-row-order (bottom-up) image
+    return src.read(p);
 }
 
 // glCopyTexSubImage2D from a top-down (Metal-oriented) source into a bottom-up (GL row

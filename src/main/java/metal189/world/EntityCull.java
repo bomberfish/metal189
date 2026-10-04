@@ -14,6 +14,7 @@ import net.minecraft.client.renderer.chunk.RenderChunk;
 import net.minecraft.entity.Entity;
 import net.minecraft.util.BlockPos;
 import net.minecraft.world.World;
+import metal189.terrain.Visible;
 import net.minecraftforge.client.MinecraftForgeClient;
 
 /**
@@ -29,42 +30,19 @@ import net.minecraftforge.client.MinecraftForgeClient;
 public final class EntityCull {
     private EntityCull() {}
 
-    /** RenderGlobal.ContainerLocalRenderInformation.renderChunk (package-private). */
-    private static final MethodHandle RENDER_CHUNK;
-
-    static {
-        MethodHandle h = null;
-        try {
-            Class<?> c = Class.forName("net.minecraft.client.renderer.RenderGlobal$ContainerLocalRenderInformation");
-            for (Field f : c.getDeclaredFields()) {
-                if (f.getType() != RenderChunk.class) continue;
-                f.setAccessible(true);
-                h = MethodHandles.lookup().unreflectGetter(f).asType(MethodType.methodType(RenderChunk.class, Object.class));
-            }
-        } catch (Exception e) {
-            metal189.engine.Native.LOG.warn("metal189: render info layout not recognised; entity loops unchanged", e);
-        }
-        RENDER_CHUNK = h;
-    }
-
     private static final List<Object> entityInfos = new ArrayList<Object>();
     private static final List<Object> tileInfos = new ArrayList<Object>();
-    private static List<?> lastList;
-    // section keys holding entities: open addressing, 0 = empty slot (keys are stored + 1)
+    private static int tileGeneration = -1, tileCompiled = -1;
+    // section keys holding entities: open addressing, 0 = empty slot (Visible.key is never 0)
     private static long[] keys = new long[256];
-
-    private static long key(int sx, int sy, int sz) {
-        return ((long) (sx & 0x3FFFFF) << 42 | (long) (sz & 0x3FFFFF) << 20 | (long) (sy & 0xFFFFF)) + 1;
-    }
 
     private static int slot(long k, int mask) {
         long h = k * 0x9E3779B97F4A7C15L;
         return (int) (h >>> 40) & mask;
     }
 
-    private static void rebuild(List<?> infos) {
+    private static void findEntities() {
         entityInfos.clear();
-        tileInfos.clear();
         World world = Minecraft.getMinecraft().theWorld;
         List<Entity> entities = world != null ? world.loadedEntityList : Collections.<Entity>emptyList();
         int need = Integer.highestOneBit(Math.max(16, entities.size() * 2)) << 1;
@@ -75,44 +53,51 @@ public final class EntityCull {
         for (int i = 0, s = entities.size(); i < s; i++) {
             Entity e = entities.get(i);
             if (!e.addedToChunk) continue;
-            long k = key(e.chunkCoordX, e.chunkCoordY, e.chunkCoordZ);
+            long k = Visible.key(e.chunkCoordX, e.chunkCoordY, e.chunkCoordZ);
             int j = slot(k, mask);
             while (keys[j] != 0 && keys[j] != k) j = (j + 1) & mask;
             if (keys[j] == 0) { keys[j] = k; n++; }
         }
-        try {
-            for (int i = 0, s = infos.size(); i < s; i++) {
-                Object info = infos.get(i);
-                RenderChunk rc = (RenderChunk) RENDER_CHUNK.invokeExact(info);
-                if (!rc.getCompiledChunk().getTileEntities().isEmpty()) tileInfos.add(info);
-                if (n == 0) continue;
-                BlockPos p = rc.getPosition();
-                long k = key(p.getX() >> 4, p.getY() >> 4, p.getZ() >> 4);
-                int j = slot(k, mask);
-                while (keys[j] != 0) {
-                    if (keys[j] == k) { entityInfos.add(info); break; }
-                    j = (j + 1) & mask;
-                }
+        if (n == 0) return;
+        long[] vk = Visible.keys;
+        Object[] vi = Visible.infos;
+        for (int i = 0, c = Visible.count; i < c; i++) {
+            long k = vk[i];
+            int j = slot(k, mask);
+            while (keys[j] != 0) {
+                if (keys[j] == k) { entityInfos.add(vi[i]); break; }
+                j = (j + 1) & mask;
             }
-        } catch (Throwable t) {
-            throw new RuntimeException(t);
         }
-        lastList = infos;
+    }
+
+    private static void findTileEntities() {
+        if (tileGeneration == Visible.generation && tileCompiled == metal189.terrain.Terrain.compiledGeneration) return;
+        tileGeneration = Visible.generation;
+        tileCompiled = metal189.terrain.Terrain.compiledGeneration;
+        tileInfos.clear();
+        RenderChunk[] rc = Visible.chunks;
+        Object[] vi = Visible.infos;
+        for (int i = 0, c = Visible.count; i < c; i++)
+            if (!rc[i].getCompiledChunk().getTileEntities().isEmpty()) tileInfos.add(vi[i]);
     }
 
     /** The visible sections that may hold entities (replaces renderInfos.iterator()). */
     @SuppressWarnings({"rawtypes", "unchecked"})
     public static Iterator entityInfos(List infos) {
-        if (RENDER_CHUNK == null) return infos.iterator();
-        if (infos != lastList || MinecraftForgeClient.getRenderPass() == 0) rebuild(infos);
+        metal189.terrain.Visible.update(infos);
+        if (MinecraftForgeClient.getRenderPass() == 0 || lastPass1Generation != Visible.generation) findEntities();
+        lastPass1Generation = Visible.generation;
         return entityInfos.iterator();
     }
+
+    private static int lastPass1Generation = -1;
 
     /** The visible sections with tile entities (replaces renderInfos.iterator()). */
     @SuppressWarnings({"rawtypes", "unchecked"})
     public static Iterator tileEntityInfos(List infos) {
-        if (RENDER_CHUNK == null) return infos.iterator();
-        if (infos != lastList) rebuild(infos);
+        metal189.terrain.Visible.update(infos);
+        findTileEntities();
         return tileInfos.iterator();
     }
 

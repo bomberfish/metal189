@@ -48,6 +48,12 @@ public final class Display {
         created = true;
         refreshInfo();
         resizedSinceUpdate = false;
+        // the window may not be the size asked for (the screen clamps it; retina counts pixels):
+        // the first update reports the real size as a resize, so the game renders at it
+        if (!fullscreen) {
+            width = mode.getWidth();
+            height = mode.getHeight();
+        }
         Native.windowSetVSync(vsync);
         if (fullscreen) Native.windowSetFullscreen(true);
         Mouse.created = true;

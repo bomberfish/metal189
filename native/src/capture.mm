@@ -12,8 +12,8 @@ bool captureToPng(int which, const char* path) {
     Engine& e = engine();
     id<MTLTexture> tex = nil;
     bool flip = false;
-    if (which == 0) tex = screenForReadback();
-    else { TexEntry* t = texture(which); tex = t ? t->tex : nil; flip = true; }
+    if (which == 0) tex = screenForReadback(&flip);
+    else { TexEntry* t = texture(which); tex = t ? (t->presented ? t->presented : t->tex) : nil; flip = true; }
     if (!tex) return false;
     waitIdle();
     int w = (int)tex.width, h = (int)tex.height;

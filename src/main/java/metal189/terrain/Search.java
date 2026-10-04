@@ -36,6 +36,8 @@ public final class Search {
     private Search() {}
 
     private static final boolean DISABLED = Boolean.getBoolean("metal189.vanillaSearch");
+    private static final boolean DEBUG = Boolean.getBoolean("metal189.searchDebug");
+    private static String debugOpen = "";
     private static final EnumFacing[] FACINGS = EnumFacing.values();
     private static final int[] OPPOSITE = new int[6];
     private static final int[] DX = new int[6], DY = new int[6], DZ = new int[6];
@@ -87,12 +89,27 @@ public final class Search {
 
     private static final MethodHandle VIEW_FRUSTUM, RENDER_DISTANCE, SET_RENDER_INFOS, SET_DIRTY, VISIBLE_FACINGS, VIEW_VECTOR;
     private static final MethodHandle VF_CHUNKS, VF_X, VF_Y, VF_Z, NEW_INFO;
+    private static final MethodHandle FR_HELPER, FR_X, FR_Y, FR_Z;
     private static final boolean READY;
 
     static {
         MethodHandle vf = null, rd = null, ri = null, dirty = null, facings = null, view = null, ch = null, cx = null, cy = null,
                 cz = null, info = null;
         boolean ok = false;
+        MethodHandle frh = null, frx = null, fry = null, frz = null;
+        try {
+            Class<?> fc = net.minecraft.client.renderer.culling.Frustum.class;
+            frh = getter(fc, "clippingHelper", "field_78552_a");
+            frx = getter(fc, "xPosition", "field_78550_b");
+            fry = getter(fc, "yPosition", "field_78551_c");
+            frz = getter(fc, "zPosition", "field_78549_d");
+        } catch (Exception e) {
+            Native.LOG.warn("metal189: Frustum layout not recognised; terrain search uses its box test", e);
+        }
+        FR_HELPER = frh;
+        FR_X = frx;
+        FR_Y = fry;
+        FR_Z = frz;
         try {
             Class<?> vfc = Class.forName("net.minecraft.client.renderer.ViewFrustum");
             vf = getter(RenderGlobal.class, "viewFrustum", "field_175008_n");
@@ -134,6 +151,9 @@ public final class Search {
     private static CompiledChunk[] visCompiled = new CompiledChunk[0];
     private static long[] visMask = new long[0];      // bit (from * 6 + to): the section connects those faces
     private static int searchId;
+    // the sections found, in order (handed to Visible)
+    private static RenderChunk[] foundChunks = new RenderChunk[0];
+    private static int found;
     // the flood's queue: slot, directions taken (mask), the face it entered through (-1: start)
     private static int[] qSlot = new int[0], qDirs = new int[0], qFrom = new int[0];
 
@@ -170,8 +190,11 @@ public final class Search {
         try {
             SET_DIRTY.invoke(rg, false);
             List<Object> infos = new ArrayList<Object>(Math.max(256, Visible.count + 64));
+            found = 0;
             search(rg, viewEntity, partialTicks, camera, playerSpectator, infos);
             SET_RENDER_INFOS.invoke(rg, infos);
+            Visible.publish(infos, foundChunks, found);
+            if (DEBUG) Native.LOG.info("search: {} sections, frustum {}, open {}", found, fallback == null ? "planes" : "camera", debugOpen);
         } catch (Throwable t) {
             throw new RuntimeException(t);
         }
@@ -195,6 +218,7 @@ public final class Search {
             qDirs = new int[n];
             qFrom = new int[n];
         }
+        loadFrustum(camera);
         int id = ++searchId;
         if (id == 0) { java.util.Arrays.fill(stamp, 0); id = searchId = 1; }
 
@@ -211,6 +235,7 @@ public final class Search {
         int start = slot(eye.getX(), eye.getY(), eye.getZ(), cx, cy, cz);
         if (start >= 0) {
             Set<EnumFacing> open = visibleFacings(rg, eye, grid[start]);
+            if (DEBUG) debugOpen = open.toString();
             if (open.size() == 1) {
                 Vector3f v = (Vector3f) VIEW_VECTOR.invoke(rg, viewEntity, partialTicks);
                 open.remove(EnumFacing.getFacingFromVector(v.x, v.y, v.z).getOpposite());
@@ -233,7 +258,7 @@ public final class Search {
                     int s = slot((j << 4) + 8, y, (k << 4) + 8, cx, cy, cz);
                     if (s < 0 || stamp[s] == id) continue;
                     RenderChunk rc = grid[s];
-                    if (rc == null || !camera.isBoundingBoxInFrustum(rc.boundingBox)) continue;
+                    if (rc == null || !inFrustum(rc)) continue;
                     stamp[s] = id;
                     qSlot[tail] = s;
                     qDirs[tail] = 0;
@@ -262,13 +287,47 @@ public final class Search {
                 RenderChunk nb = grid[t];
                 if (nb == null) continue;
                 stamp[t] = id;   // vanilla marks the section reached before testing the frustum
-                if (!camera.isBoundingBoxInFrustum(nb.boundingBox)) continue;
+                if (!inFrustum(nb)) continue;
                 qSlot[tail] = t;
                 qDirs[tail] = dirs | (1 << f);
                 qFrom[tail] = f;
                 tail++;
             }
         }
+    }
+
+    // the search's view frustum: vanilla's planes and camera offset (Frustum / ClippingHelper)
+    private static final float[][] planes = new float[6][4];
+    private static double fx, fy, fz;
+    private static ICamera fallback;   // a camera that is not vanilla's Frustum
+
+    private static void loadFrustum(ICamera camera) throws Throwable {
+        fallback = camera;
+        if (FR_HELPER == null || camera.getClass() != net.minecraft.client.renderer.culling.Frustum.class) return;
+        net.minecraft.client.renderer.culling.ClippingHelper h = (net.minecraft.client.renderer.culling.ClippingHelper) FR_HELPER.invoke(camera);
+        for (int i = 0; i < 6; i++) System.arraycopy(h.frustum[i], 0, planes[i], 0, 4);
+        fx = (double) FR_X.invoke(camera);
+        fy = (double) FR_Y.invoke(camera);
+        fz = (double) FR_Z.invoke(camera);
+        fallback = null;
+    }
+
+    /**
+     * ClippingHelper.isBoxInFrustum for a section's box: vanilla tests the eight corners
+     * against each plane; the corner furthest along the plane's normal is one of them and the
+     * largest, with the same arithmetic, so testing it alone gives the same answer.
+     */
+    private static boolean inFrustum(RenderChunk rc) {
+        net.minecraft.util.AxisAlignedBB b = rc.boundingBox;
+        if (fallback != null) return fallback.isBoundingBoxInFrustum(b);
+        double x0 = b.minX - fx, y0 = b.minY - fy, z0 = b.minZ - fz, x1 = b.maxX - fx, y1 = b.maxY - fy, z1 = b.maxZ - fz;
+        for (int j = 0; j < 6; j++) {
+            float[] p = planes[j];
+            double d = (double) p[0] * (p[0] > 0 ? x1 : x0) + (double) p[1] * (p[1] > 0 ? y1 : y0)
+                    + (double) p[2] * (p[2] > 0 ? z1 : z0) + (double) p[3];
+            if (!(d > 0.0)) return false;
+        }
+        return true;
     }
 
     /** ViewFrustum.getRenderChunk's index for a block position, or -1. */
@@ -281,6 +340,8 @@ public final class Search {
     }
 
     private static Object info(RenderGlobal rg, int s, RenderChunk rc) throws Throwable {
+        if (found == foundChunks.length) foundChunks = java.util.Arrays.copyOf(foundChunks, Math.max(1024, found * 2));
+        foundChunks[found++] = rc;
         Object o = infoCache[s];
         if (o == null || infoChunk[s] != rc) {
             o = NEW_INFO.invoke(rg, rc, (EnumFacing) null, 0);

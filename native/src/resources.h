@@ -16,6 +16,7 @@ struct TexEntry {
     int maxLevel = 1000;
     float minLod = -1000.0f, maxLod = 1000.0f, aniso = 1.0f;
     id<MTLSamplerState> sampler = nil;
+    id<MTLTexture> presented = nil;   // the image moved to the screen by screenAdopt (read until next written)
 };
 
 struct PendingInit { id<MTLTexture> tex; int levels; bool depth; };

@@ -40,6 +40,33 @@ public final class Patches {
     public static void register(String className, ClassPatch patch) { PATCHES.put(className, patch); }
 
     static {
+        // Minecraft's framebuffer reaches the screen without a copy when possible (metal189.world.Present).
+        register("net.minecraft.client.shader.Framebuffer", new ClassPatch() {
+            public boolean apply(ClassNode cn) {
+                MethodNode m = Asm.find(cn, "framebufferRenderExt", "func_178038_a", "(IIZ)V");
+                if (m == null) return false;
+                for (AbstractInsnNode n = m.instructions.getFirst(); n != null; n = n.getNext()) {
+                    if (n.getOpcode() != Opcodes.INVOKEVIRTUAL) continue;
+                    org.objectweb.asm.tree.MethodInsnNode c = (org.objectweb.asm.tree.MethodInsnNode) n;
+                    if (!c.owner.equals("net/minecraft/client/renderer/Tessellator") || !(c.name.equals("draw") || c.name.equals("func_78381_a"))) continue;
+                    org.objectweb.asm.tree.InsnList l = new org.objectweb.asm.tree.InsnList();
+                    l.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ALOAD, 0));
+                    l.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ILOAD, 1));
+                    l.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ILOAD, 2));
+                    l.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ILOAD, 3));
+                    l.add(new org.objectweb.asm.tree.MethodInsnNode(Opcodes.INVOKESTATIC, "metal189/world/Present", "beforeCopy",
+                        "(Lnet/minecraft/client/shader/Framebuffer;IIZ)V", false));
+                    m.instructions.insertBefore(c, l);
+                    return true;
+                }
+                return false;
+            }
+
+            public boolean needsFrames() { return false; }
+        });
+    }
+
+    static {
         // The visibility search's per-section direction sets (metal189.terrain.FacingSet).
         register("net.minecraft.client.renderer.RenderGlobal$ContainerLocalRenderInformation", new ClassPatch() {
             public boolean apply(ClassNode cn) {

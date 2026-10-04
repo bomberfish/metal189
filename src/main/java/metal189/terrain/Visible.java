@@ -52,12 +52,23 @@ public final class Visible {
         return ((long) (sx & 0x3FFFFF) << 42 | (long) (sz & 0x3FFFFF) << 20 | (long) (sy & 0xFFFFF)) + 1;
     }
 
-    /** Takes a new snapshot if vanilla replaced the list (client thread). */
+    /** Takes a new snapshot if vanilla replaced the list (client thread; vanilla's own search). */
     public static void update(List<?> renderInfos) {
         if (renderInfos == list || RENDER_CHUNK == null) return;
+        int n = renderInfos.size();
+        RenderChunk[] rcs = new RenderChunk[n];
+        try {
+            for (int i = 0; i < n; i++) rcs[i] = (RenderChunk) RENDER_CHUNK.invokeExact((Object) renderInfos.get(i));
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+        publish(renderInfos, rcs, n);
+    }
+
+    /** A new visible list: renderInfos and its sections (in order). */
+    public static void publish(List<?> renderInfos, RenderChunk[] rcs, int n) {
         list = renderInfos;
         generation++;
-        int n = renderInfos.size();
         if (infos.length < n) {
             int cap = Math.max(n, infos.length * 2);
             infos = new Object[cap];
@@ -69,18 +80,13 @@ public final class Visible {
             idCapacity = Math.max(n, idCapacity * 2);
             idBuffer = Mem.malloc(idCapacity * 4L);
         }
-        try {
-            for (int i = 0; i < n; i++) {
-                Object info = renderInfos.get(i);
-                RenderChunk rc = (RenderChunk) RENDER_CHUNK.invokeExact(info);
-                infos[i] = info;
-                chunks[i] = rc;
-                BlockPos p = rc.getPosition();
-                keys[i] = key(p.getX() >> 4, p.getY() >> 4, p.getZ() >> 4);
-                Mem.putInt(idBuffer + i * 4L, Terrain.idFor(rc));
-            }
-        } catch (Throwable t) {
-            throw new RuntimeException(t);
+        for (int i = 0; i < n; i++) {
+            RenderChunk rc = rcs[i];
+            infos[i] = renderInfos.get(i);
+            chunks[i] = rc;
+            BlockPos p = rc.getPosition();
+            keys[i] = key(p.getX() >> 4, p.getY() >> 4, p.getZ() >> 4);
+            Mem.putInt(idBuffer + i * 4L, Terrain.idFor(rc));
         }
         for (int i = n; i < count; i++) { infos[i] = null; chunks[i] = null; }
         count = n;
