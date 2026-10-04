@@ -45,13 +45,14 @@ struct Section {
     uint64_t version = 0;             // changes when its solid layers or position do (globally unique)
     uint32_t solid[128] = {};         // opaque cubes: bit (y << 8) | (z << 4) | x (chunk builds report them)
     bool emits = false;               // some block in it gives light
+    bool tinted = false;              // translucent blocks other than water (stained glass, ice, slime, portals)
 };
 Section* section(int id);
 const std::unordered_map<int, Section>& allSections();
 const Section* sectionAt(int sx, int sy, int sz);   // by position (blocks / 16)
 void sectionUpload(int id, int layer, const void* data, size_t bytes, uint32_t vertexCount, int ox, int oy, int oz);
 void sectionDelete(int id);
-void sectionSolid(int id, const uint32_t* bits, bool emits);
+void sectionSolid(int id, const uint32_t* bits, bool emits, bool tinted);
 
 StagingAlloc stagingAlloc(size_t bytes);
 void encodePendingResourceWork(id<MTLCommandBuffer> cb);

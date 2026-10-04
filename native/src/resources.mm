@@ -359,11 +359,12 @@ void sectionUpload(int sid, int layer, const void* data, size_t bytes, uint32_t 
     s.vertices[layer] = vertexCount;
 }
 
-void sectionSolid(int sid, const uint32_t* bits, bool emits) {
+void sectionSolid(int sid, const uint32_t* bits, bool emits, bool tinted) {
     auto it = g_sections.find(sid);
     if (it == g_sections.end()) return;
     static_assert(sizeof it->second.solid == 512, "4096 bits");
     it->second.emits = emits;
+    it->second.tinted = tinted;
     if (memcmp(it->second.solid, bits, 512) == 0) return;
     memcpy(it->second.solid, bits, 512);
     static uint64_t versions = 1ull << 62;   // apart from the upload versions

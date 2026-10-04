@@ -94,8 +94,11 @@ public final class Native {
     public static native void setOption(int key, int value);
     public static native void sectionUpload(int id, int layer, long data, int bytes, int vertexCount, int x, int y, int z);
     public static native void sectionDelete(int id);
-    /** Which blocks of a section are opaque cubes (4096 bits, index (y << 8) | (z << 4) | x), and whether any gives light. */
-    public static native void sectionSolid(int id, long bits, boolean emits);
+    /**
+     * Which blocks of a section are opaque cubes (4096 bits, index (y << 8) | (z << 4) | x), whether any
+     * gives light, and whether it has translucent blocks other than water (stained glass and the like).
+     */
+    public static native void sectionSolid(int id, long bits, boolean emits, boolean tinted);
     public static native void advSetEnabled(boolean on);
     public static native void advSetFeatures(int flags);
     public static native void advSetTables(long materials, long emissions, long lightColors);

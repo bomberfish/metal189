@@ -77,7 +77,7 @@ public final class Terrain {
 
     /** Head of RenderChunk.rebuildChunk (chunk worker or client thread). */
     public static void beginRebuild(RenderChunk rc) {
-        long[] m = new long[65];   // 64: opaque cubes; [64] != 0: some block gives light
+        long[] m = new long[66];   // 64: opaque cubes; [64] != 0: some block gives light; [65] != 0: tinted translucents
         solid.set(m);
         solidMasks.put(rc, m);
     }
@@ -97,6 +97,9 @@ public final class Terrain {
                 m[i >> 6] |= 1L << (i & 63);
             }
             if (state.getBlock().getLightValue() > 0) m[64] = 1;
+            // stained glass, ice, slime, portals: what colours shadows (water has its own map)
+            if (state.getBlock().getBlockLayer() == EnumWorldBlockLayer.TRANSLUCENT
+                    && state.getBlock().getMaterial() != net.minecraft.block.material.Material.water) m[65] = 1;
         }
         int start = blockStart.get()[0];
         int end = wr.getVertexCount();
@@ -142,7 +145,7 @@ public final class Terrain {
         if (m != null) {
             long a = Mem.malloc(512);
             for (int i = 0; i < 64; i++) Mem.U.putLong(a + i * 8L, m[i]);
-            Native.sectionSolid(id, a, m[64] != 0);
+            Native.sectionSolid(id, a, m[64] != 0, m[65] != 0);
             Mem.free(a);
         }
     }

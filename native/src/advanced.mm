@@ -933,9 +933,21 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             fr.flags.x = features;
         }
 
-        // ---- glass shadow map: stained glass and other tinted translucents colour the light ----
+        // ---- glass shadow map: stained glass and other tinted translucents colour the light
+        // (only sections that have any: chunk builds report them) ----
         TexEntry* atlasG = texture(w.atlasTex);
+        bool anyTinted = false;
         if (g_tuning[63] > 0.5f && S.shadowGlass && atlasG && atlasG->tex) {
+            for (const auto& kv : allSections()) {
+                const Section* s = &kv.second;
+                if (!s->tinted || !s->layers[3]) continue;
+                float tx = (float)(s->ox - camX), ty = (float)(s->oy - camY), tz = (float)(s->oz - camZ);
+                if (fabsf(tx + 8) > cullReach || fabsf(tz + 8) > cullReach || outsideShadowBox(tx, ty, tz)) continue;
+                anyTinted = true;
+                break;
+            }
+        }
+        if (anyTinted) {
             ensureGlassShadow(std::max(512, shadowRes / 2));
             MTLRenderPassDescriptor* gp = [MTLRenderPassDescriptor renderPassDescriptor];
             gp.colorAttachments[0].texture = S.glassDepth;
@@ -957,7 +969,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             [ge setFragmentSamplerState:S.pointClamp atIndex:0];
             for (const auto& kv : allSections()) {
                 const Section* s = &kv.second;
-                if (!s->layers[3]) continue;
+                if (!s->tinted || !s->layers[3]) continue;
                 float tx = (float)(s->ox - camX), ty = (float)(s->oy - camY), tz = (float)(s->oz - camZ);
                 if (fabsf(tx + 8) > cullReach || fabsf(tz + 8) > cullReach) continue;
                 if (outsideShadowBox(tx, ty, tz)) continue;
