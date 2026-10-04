@@ -1,7 +1,7 @@
 sleep 3
 resourcepack Faithful Texture Pack 64x64 1.8.zip
 sleep 3
-fancy true
+fancy false
 world ref1 1234567
 waitWorld
 cmd /gamerule doDaylightCycle false

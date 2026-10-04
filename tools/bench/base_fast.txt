@@ -1,0 +1,33 @@
+sleep 3
+resourcepack Faithful Texture Pack 64x64 1.8.zip
+sleep 3
+fancy false
+world ref1 1234567
+waitWorld
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /gamerule doMobLoot false
+cmd /weather clear 100000
+cmd /time set 6000
+cmd /kill @e[type=!Player]
+cmd /tp @p 64 78 -32 135 10
+sleep 15
+fps 6 forest
+cmd /tp @p 64 90 -32 45 20
+sleep 6
+fps 6 view2
+cmd /tp @p 0 100 0 0 0
+sleep 8
+fps 6 view3
+spin 1 100000
+fps 6 spin
+spin 0 0
+cmd /kill @e[type=!Player]
+summongrid 150 1.6 Zombie,Skeleton,Creeper,Pig,Sheep,Cow,Chicken,Villager,Spider,Wolf
+look 0 30
+sleep 5
+fps 6 mobs150
+capture /Users/hariz/metal189/captures/bench_base.png
+cmd /kill @e[type=!Player]
+sleep 1
+quit

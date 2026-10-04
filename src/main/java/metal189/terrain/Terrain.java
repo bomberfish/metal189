@@ -80,6 +80,12 @@ public final class Terrain {
         long[] m = new long[66];   // 64: opaque cubes; [64] != 0: some block gives light; [65] != 0: tinted translucents
         solid.set(m);
         solidMasks.put(rc, m);
+        Lod.beginRebuild(rc);
+    }
+
+    /** End of RenderChunk.rebuildChunk. */
+    public static void endRebuild(RenderChunk rc) {
+        Lod.endRebuild();
     }
 
     /**
@@ -89,7 +95,8 @@ public final class Terrain {
      * translucent re-sorting because it lives in the vertex itself. Also records
      * opaque cubes, buried ones (no vertices) included.
      */
-    public static void endBlock(WorldRenderer wr, net.minecraft.block.state.IBlockState state, BlockPos pos) {
+    public static void endBlock(WorldRenderer wr, net.minecraft.block.state.IBlockState state, BlockPos pos,
+                                net.minecraft.world.IBlockAccess world) {
         long[] m = solid.get();
         if (m != null) {
             if (state.getBlock().isOpaqueCube()) {
@@ -104,6 +111,10 @@ public final class Terrain {
         int start = blockStart.get()[0];
         int end = wr.getVertexCount();
         if (end <= start || wr.getVertexFormat() != DefaultVertexFormats.BLOCK) return;
+        if (state.getBlock() instanceof net.minecraft.block.BlockLeavesBase) {
+            end = Lod.cullLeafFaces(wr, start, end, pos, world);
+            if (end <= start) return;
+        }
         int id = net.minecraft.block.Block.getStateId(state);
         byte lo = (byte) id, hi = (byte) (id >>> 8);
         long base = Mem.address(wr.getByteBuffer());
@@ -173,6 +184,7 @@ public final class Terrain {
      */
     static void renderLayer(List<RenderChunk> chunks, EnumWorldBlockLayer layer, double vx, double vy, double vz) {
         int total = chunks.size();
+        if (layer == EnumWorldBlockLayer.SOLID) Lod.check(chunks, vx, vy, vz);
         if (total > 0) {
             if (blockFormat == 0) blockFormat = Tess.formatId(DefaultVertexFormats.BLOCK);
             Draw.flush();

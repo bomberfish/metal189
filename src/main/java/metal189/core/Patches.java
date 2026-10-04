@@ -40,6 +40,33 @@ public final class Patches {
     public static void register(String className, ClassPatch patch) { PATCHES.put(className, patch); }
 
     static {
+        // Leaves' graphics level is read through Lod.leaves (fast leaves for far sections).
+        ClassPatch leaves = new ClassPatch() {
+            public boolean apply(ClassNode cn) {
+                boolean changed = false;
+                for (MethodNode m : cn.methods) {
+                    if (m.name.equals("setGraphicsLevel") || m.name.equals("func_150122_b") || m.name.equals("<init>")) continue;
+                    for (AbstractInsnNode n = m.instructions.getFirst(); n != null; n = n.getNext()) {
+                        if (n.getOpcode() != Opcodes.GETFIELD) continue;
+                        String f = ((FieldInsnNode) n).name;
+                        if (!f.equals("isTransparent") && !f.equals("field_176238_O") && !f.equals("fancyGraphics") && !f.equals("field_150121_P")) continue;
+                        // shouldSideBeRendered culls faces between leaves when this answers false
+                        boolean side = m.name.equals("shouldSideBeRendered") || m.name.equals("func_176225_a");
+                        m.instructions.insert(n, new org.objectweb.asm.tree.MethodInsnNode(Opcodes.INVOKESTATIC, "metal189/terrain/Lod",
+                            side ? "leavesSide" : "leaves", "(Z)Z", false));
+                        changed = true;
+                    }
+                }
+                return changed;
+            }
+
+            public boolean needsFrames() { return false; }
+        };
+        register("net.minecraft.block.BlockLeaves", leaves);
+        register("net.minecraft.block.BlockLeavesBase", leaves);
+    }
+
+    static {
         // Forge 1.8.9 bug: getSkyBlendColour caches its biome-blended sky colour by the
         // camera's X and Z but saves Y as the Z, so the cache never hits and every sky-colour
         // query (several a frame) re-blends up to (2r+1)^2 biomes. Save the Z.
@@ -77,7 +104,38 @@ public final class Patches {
             // shaders mode: the first-person player casts a shadow
             Asm.injectTail("renderEntities", "func_180446_a",
                 "(Lnet/minecraft/entity/Entity;Lnet/minecraft/client/renderer/culling/ICamera;F)V",
-                "metal189/world/Phases", "afterEntities", "(F)V", 3)));
+                "metal189/world/Phases", "afterEntities", "(F)V", 3),
+            // renderEntities' section loops visit only sections with something in them (EntityCull)
+            new ClassPatch() {
+                public boolean apply(ClassNode cn) {
+                    MethodNode m = Asm.find(cn, "renderEntities", "func_180446_a",
+                        "(Lnet/minecraft/entity/Entity;Lnet/minecraft/client/renderer/culling/ICamera;F)V");
+                    if (m == null) return false;
+                    int lists = 0, sets = 0;
+                    for (AbstractInsnNode n = m.instructions.getFirst(); n != null; n = n.getNext()) {
+                        if (n.getOpcode() != Opcodes.INVOKEINTERFACE || !"iterator".equals(((org.objectweb.asm.tree.MethodInsnNode) n).name)) continue;
+                        AbstractInsnNode prev = n.getPrevious();
+                        if (!(prev instanceof FieldInsnNode) || prev.getOpcode() != Opcodes.GETFIELD) continue;
+                        String field = ((FieldInsnNode) prev).name;
+                        String target = null, desc = null;
+                        if (field.equals("renderInfos") || field.equals("field_72755_R")) {
+                            target = lists == 0 ? "entityInfos" : lists == 1 ? "tileEntityInfos" : null;
+                            desc = "(Ljava/util/List;)Ljava/util/Iterator;";
+                            lists++;
+                        } else if (field.equals("setTileEntities") || field.equals("field_181024_n")) {
+                            target = sets++ == 0 ? "setIterator" : null;
+                            desc = "(Ljava/util/Set;)Ljava/util/Iterator;";
+                        }
+                        if (target == null) continue;
+                        AbstractInsnNode call = new org.objectweb.asm.tree.MethodInsnNode(Opcodes.INVOKESTATIC, "metal189/world/EntityCull", target, desc, false);
+                        m.instructions.set(n, call);
+                        n = call;
+                    }
+                    return lists == 2 && sets == 1;
+                }
+
+                public boolean needsFrames() { return false; }
+            }));
         register("net.minecraft.client.renderer.chunk.ChunkRenderDispatcher",
             Asm.injectHead("uploadChunk", "func_178503_a",
                 "(Lnet/minecraft/util/EnumWorldBlockLayer;Lnet/minecraft/client/renderer/WorldRenderer;Lnet/minecraft/client/renderer/chunk/RenderChunk;Lnet/minecraft/client/renderer/chunk/CompiledChunk;)Lcom/google/common/util/concurrent/ListenableFuture;",
@@ -101,8 +159,9 @@ public final class Patches {
                     t.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ALOAD, 4));
                     t.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ALOAD, 1));
                     t.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ALOAD, 2));
+                    t.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ALOAD, 3));
                     t.add(new org.objectweb.asm.tree.MethodInsnNode(Opcodes.INVOKESTATIC, "metal189/terrain/Terrain", "endBlock",
-                        "(Lnet/minecraft/client/renderer/WorldRenderer;Lnet/minecraft/block/state/IBlockState;Lnet/minecraft/util/BlockPos;)V", false));
+                        "(Lnet/minecraft/client/renderer/WorldRenderer;Lnet/minecraft/block/state/IBlockState;Lnet/minecraft/util/BlockPos;Lnet/minecraft/world/IBlockAccess;)V", false));
                     m.instructions.insertBefore(n, t);
                 }
                 return true;
@@ -142,8 +201,19 @@ public final class Patches {
                 "metal189/world/PbrAtlas", "onStitched", "(Lnet/minecraft/client/renderer/texture/TextureMap;)V"));
 
         register("net.minecraft.client.renderer.chunk.RenderChunk", Asm.chain(
+            // how the section was last built (metal189.terrain.Lod)
+            new ClassPatch() {
+                public boolean apply(ClassNode cn) {
+                    cn.fields.add(new org.objectweb.asm.tree.FieldNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_VOLATILE, "metal189$lod", "I", null, null));
+                    return true;
+                }
+
+                public boolean needsFrames() { return false; }
+            },
             Asm.injectHeadThisOnly("rebuildChunk", "func_178581_b", "(FFFLnet/minecraft/client/renderer/chunk/ChunkCompileTaskGenerator;)V",
                 "metal189/terrain/Terrain", "beginRebuild", "(Lnet/minecraft/client/renderer/chunk/RenderChunk;)V"),
+            Asm.injectTailThis("rebuildChunk", "func_178581_b", "(FFFLnet/minecraft/client/renderer/chunk/ChunkCompileTaskGenerator;)V",
+                "metal189/terrain/Terrain", "endRebuild", "(Lnet/minecraft/client/renderer/chunk/RenderChunk;)V"),
             Asm.injectHead("deleteGlResources", "func_178566_a", "()V",
                 "metal189/terrain/Terrain", "delete", "(Lnet/minecraft/client/renderer/chunk/RenderChunk;)V", true),
             Asm.injectHeadThisOnly("setPosition", "func_178576_a", "(Lnet/minecraft/util/BlockPos;)V",

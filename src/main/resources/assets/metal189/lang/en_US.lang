@@ -13,6 +13,7 @@ metal189.profile.medium=Medium
 metal189.profile.high=High
 metal189.profile.ultra=Ultra
 metal189.profile.custom=Custom
+metal189.page.detail=Performance & Detail
 metal189.page.lighting=Lighting & Shadows
 metal189.page.materials=Materials (PBR)
 metal189.page.water=Water
@@ -232,3 +233,9 @@ metal189.opt.rtEntities=RT Entities
 metal189.opt.rtEntities.desc=Mobs, players and block entities in ray-traced reflections, ambient occlusion and global illumination.
 metal189.msg.on=Shaders enabled
 metal189.msg.off=Shaders disabled
+
+metal189.opt.leavesDetailDistance=Fancy Leaves Distance
+metal189.opt.leavesDetailDistance.desc=With Fancy graphics, leaves farther than this are built like Fast leaves (opaque), which draws much faster in forests. Sections are rebuilt as you move past the distance.
+metal189.opt.leavesDetailDistance.v0=Unlimited
+metal189.opt.smartLeaves=Smart Leaves
+metal189.opt.smartLeaves.desc=With Fancy graphics, leaves keep their see-through look but skip the faces hidden between neighbouring leaf blocks, like OptiFine's Smart leaves. Forests draw much faster; the inside of a tree looks a little emptier.

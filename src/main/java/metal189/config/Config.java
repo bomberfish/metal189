@@ -30,6 +30,8 @@ public final class Config {
     public static boolean ssao = true;
     /** LWJGL's macOS emulation of a right click by Ctrl+left click; off by default (Ctrl+click stays a left click). */
     public static boolean ctrlClickRightClick = false;
+    public static boolean smartLeaves = true;            // fancy leaves without the faces between leaf blocks
+    public static int leavesDetailDistance = 8;          // chunks; fast leaves past it (0: everywhere as set)
     public static int exposure = 100;        // percent
     public static boolean rtShadows = false;
     public static boolean rtReflections = false;

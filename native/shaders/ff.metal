@@ -228,6 +228,7 @@ struct BlockVertex {
 // one per section draw, at the draw's base instance (frame_exec.mm TerrainDrawRecord)
 struct TerrainDraw {
     device const BlockVertex* verts;
+    ulong debug;   // benchmarking (frame_exec.mm option 100): 1 = collapse every vertex
     float4x4 mv;
 };
 
@@ -515,6 +516,7 @@ vertex TerrainOut terrain_vertex_slim(uint vid [[vertex_id]],
         else { float dd = u.fogParams.z * dist; ff = exp(-dd * dd); }
     }
     o.fog = half(saturate(ff));
+    if (draws[meshlets[vid >> 8].record].debug == 1) o.position = float4(o.uv.x * 1e-9, 0.0, 0.0, 1.0);
     return o;
 }
 

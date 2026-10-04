@@ -28,6 +28,7 @@ import org.objectweb.asm.tree.MethodNode;
  */
 public class Metal189Transformer implements IClassTransformer {
     static final Logger LOG = LogManager.getLogger("metal189");
+    private static final String DUMP = System.getProperty("metal189.dumpClass", "");
 
     private static final Map<String, String> REDIRECT = new HashMap<String, String>();
     private static final String CAPS = "org/lwjgl/opengl/ContextCapabilities";
@@ -52,6 +53,14 @@ public class Metal189Transformer implements IClassTransformer {
     @Override
     public byte[] transform(String name, String transformedName, byte[] bytes) {
         if (bytes == null || transformedName.startsWith("metal189.")) return bytes;
+        if (transformedName.equals(DUMP)) {
+            // debugging: -Dmetal189.dumpClass=NAME writes the class as loaded (before our changes)
+            try {
+                java.nio.file.Files.write(java.nio.file.Paths.get(transformedName + ".class"), bytes);
+            } catch (java.io.IOException e) {
+                LOG.warn("metal189: cannot dump {}", transformedName, e);
+            }
+        }
         ClassPatch patch = Patches.forClass(transformedName);
         boolean lwjgl = contains(bytes, LWJGL_BYTES);
         if (!lwjgl && patch == null) return bytes;

@@ -104,6 +104,7 @@ void arenaGrow(size_t minBytes, int64_t* info) {
 bool g_optPresent = true;
 bool g_optGpuStats = false;
 bool g_optSerialGpu = false;
+bool g_optPresentDraw = true;
 static bool g_vsync = false;
 
 enum ScreenState { SS_FREE, SS_WRITING, SS_READY, SS_PRESENTING };
@@ -131,6 +132,35 @@ void setVSync(bool on) { g_vsync = on; }
 
 static void blitToDrawable(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<CAMetalDrawable> drawable) {
     id<MTLTexture> dst = drawable.texture;
+    static id<MTLRenderPipelineState> pso = nil;
+    static MTLPixelFormat psoFormat = MTLPixelFormatInvalid;
+    if (g_optPresentDraw && dst.pixelFormat != psoFormat) {
+        MTLRenderPipelineDescriptor* d = [MTLRenderPipelineDescriptor new];
+        d.vertexFunction = [engine().library newFunctionWithName:@"blit_vertex"];
+        d.fragmentFunction = [engine().library newFunctionWithName:@"present_fragment"];
+        d.colorAttachments[0].pixelFormat = dst.pixelFormat;
+        NSError* err = nil;
+        pso = [device() newRenderPipelineStateWithDescriptor:d error:&err];
+        if (!pso) log("present pipeline: %s", err.localizedDescription.UTF8String);
+        psoFormat = dst.pixelFormat;
+    }
+    if (g_optPresentDraw && pso && (dst.usage & MTLTextureUsageRenderTarget)) {
+        MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = dst;
+        rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+        e.label = @"present";
+        [e setRenderPipelineState:pso];
+        NSUInteger w = std::min(dst.width, src.width), h = std::min(dst.height, src.height);
+        [e setViewport:(MTLViewport){0, 0, (double)w, (double)h, 0, 1}];
+        simd_float4 noFlip = simd_make_float4(0, 0, 0, 0);
+        [e setVertexBytes:&noFlip length:sizeof noFlip atIndex:0];
+        [e setFragmentTexture:src atIndex:0];
+        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [e endEncoding];
+        return;
+    }
     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
     NSUInteger w = std::min(dst.width, src.width), h = std::min(dst.height, src.height);
     [blit copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)

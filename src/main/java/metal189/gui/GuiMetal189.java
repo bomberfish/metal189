@@ -96,6 +96,10 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
 
     // A number as shown: options whose unit starts with "/10" are kept in tenths ("/10 blocks": 2.5 blocks).
     private static String shown(Opt o, int v) {
+        // a value can have its own name (metal189.opt.<key>.v<value>)
+        String named = "metal189.opt." + o.key + ".v" + v;
+        String s = I18n.format(named);
+        if (!s.equals(named)) return s;
         if (o.unit.startsWith("/10")) return String.format(java.util.Locale.ROOT, "%.1f", v / 10f) + o.unit.substring(3);
         return v + o.unit;
     }

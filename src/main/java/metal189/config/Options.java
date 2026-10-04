@@ -20,7 +20,7 @@ public final class Options {
     public static final int NEEDS_SHADERS = 1, NEEDS_RT = 2;
 
     /** Settings pages after the main page, in menu order. */
-    public static final String[] PAGES = {"lighting", "materials", "water", "sky", "post", "rt", "metalfx", "input"};
+    public static final String[] PAGES = {"detail", "lighting", "materials", "water", "sky", "post", "rt", "metalfx", "input"};
 
     public static final class Opt {
         public final String key, page;
@@ -200,6 +200,8 @@ public final class Options {
         final int S = NEEDS_SHADERS, RT = NEEDS_SHADERS | NEEDS_RT;
         toggle("main", "shaders", 0);
         toggle("input", "ctrlClickRightClick", 0);
+        toggle("detail", "smartLeaves", 0);
+        numbers("detail", "leavesDetailDistance", 0, " chunks", 0, 4, 6, 8, 12, 16, 24, 32);
 
         toggle("lighting", "shadows", S);
         numbers("lighting", "shadowResolution", S, "", Config.SHADOW_RESOLUTIONS);

@@ -18,6 +18,7 @@ namespace m189 {
 struct FrameStats { uint64_t draws, terrainDraws, terrainQuads, arenaDraws, meshDraws, passes, terrainDrawn, drawCalls; };
 bool g_optFaceCull = true;
 bool g_optTerrainSplit = false;
+int g_optTerrainDebug = 0;
 static FrameStats g_stats, g_statsAcc;
 static int g_statsFrames;
 
@@ -27,6 +28,7 @@ int g_optQuadDiagonal = 1; // 1: split quads along v1-v3 like Apple's GL, 0: alo
 extern bool g_optPresent;
 extern bool g_optGpuStats;
 extern bool g_optSerialGpu;
+extern bool g_optPresentDraw;
 int g_optAdvDebug = 0; // advanced pipeline debug view (see light_fragment)
 extern bool g_ctrlClickRight;
 
@@ -40,6 +42,8 @@ void setOption(int key, int value) {
         case 7: g_optFaceCull = value != 0; break;
         case 8: g_optSerialGpu = value != 0; break;
         case 9: g_optTerrainSplit = value != 0; break;
+        case 6: g_optPresentDraw = value != 0; break;
+        case 100: g_optTerrainDebug = value; break;   // benchmarking: 1 = shade terrain vertices but draw nothing
         default: if (key >= 10) advancedSetParam(key, value); break;
     }
 }
@@ -1197,6 +1201,7 @@ static void drawTerrain(Exec& x, const CmdHeader* h) {
         sectionFirstMeshlet.push_back((uint32_t)meshlets.size());
         TerrainDrawRecord& r = rec[record];
         r.vertices = s->layers[t.layer].gpuAddress;
+        r.pad = (uint64_t)((g_optTerrainDebug >> t.layer) & 1);   // option 100: a mask of layers
         sectionMatrix(g.mv, e[i].x, e[i].y, e[i].z, r.mv);
         uint32_t runStart = 0, runEnd = 0;   // the current run of visible groups (quads)
         bool open = false;
