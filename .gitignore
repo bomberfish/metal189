@@ -10,3 +10,4 @@ native/build/
 ref/
 .vscode/
 .venv/
+native/build-ios/

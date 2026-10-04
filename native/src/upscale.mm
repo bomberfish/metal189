@@ -40,7 +40,7 @@ bool make(const UpscaleFrame& f) {
         return g_spatial != nil;
     }
     if (f.mode == UPSCALE_DENOISED) {
-        if (@available(macOS 26.0, *)) {
+        if (@available(macOS 26.0, iOS 26.0, *)) {
             MTLFXTemporalDenoisedScalerDescriptor* d = [MTLFXTemporalDenoisedScalerDescriptor new];
             d.colorTextureFormat = MTLPixelFormatRGBA16Float;
             d.depthTextureFormat = MTLPixelFormatDepth32Float;
@@ -88,7 +88,7 @@ bool upscaleSupported(int mode) {
     if (mode == UPSCALE_SPATIAL) return [MTLFXSpatialScalerDescriptor supportsDevice:dev];
     if (mode == UPSCALE_TEMPORAL) return [MTLFXTemporalScalerDescriptor supportsDevice:dev];
     if (mode == UPSCALE_DENOISED) {
-        if (@available(macOS 26.0, *)) return [MTLFXTemporalDenoisedScalerDescriptor supportsDevice:dev];
+        if (@available(macOS 26.0, iOS 26.0, *)) return [MTLFXTemporalDenoisedScalerDescriptor supportsDevice:dev];
     }
     return false;
 }
@@ -101,7 +101,7 @@ void upscaleScaleRange(int mode, float& minScale, float& maxScale) {
         minScale = [MTLFXTemporalScalerDescriptor supportedInputContentMinScaleForDevice:dev];
         maxScale = [MTLFXTemporalScalerDescriptor supportedInputContentMaxScaleForDevice:dev];
     } else if (mode == UPSCALE_DENOISED) {
-        if (@available(macOS 26.0, *)) {
+        if (@available(macOS 26.0, iOS 26.0, *)) {
             id<MTLDevice> dev = device();
             minScale = [MTLFXTemporalDenoisedScalerDescriptor supportedInputContentMinScaleForDevice:dev];
             maxScale = [MTLFXTemporalDenoisedScalerDescriptor supportedInputContentMaxScaleForDevice:dev];
@@ -115,7 +115,7 @@ MTLTextureUsage upscaleOutputUsage() {
     MTLTextureUsage u = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
     if (g_spatial) u |= g_spatial.outputTextureUsage;
     if (g_temporal) u |= g_temporal.outputTextureUsage;
-    if (@available(macOS 26.0, *)) {
+    if (@available(macOS 26.0, iOS 26.0, *)) {
         if (g_denoised) u |= ((id<MTLFXTemporalDenoisedScaler>)g_denoised).outputTextureUsage;
     }
     return u;
@@ -133,7 +133,7 @@ bool upscaleEncode(id<MTLCommandBuffer> cb, const UpscaleFrame& f) {
     }
     if (!f.depth || !f.motion) return false;
     if (g_denoised) {
-        if (@available(macOS 26.0, *)) {
+        if (@available(macOS 26.0, iOS 26.0, *)) {
             if (!f.diffuse || !f.specular || !f.normal || !f.roughness) return false;
             id<MTLFXTemporalDenoisedScaler> ds = (id<MTLFXTemporalDenoisedScaler>)g_denoised;
             ds.colorTexture = f.color;

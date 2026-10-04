@@ -14,6 +14,9 @@ static void swizzle(Class cls, SEL sel, IMP imp) {
     if (m) method_setImplementation(m, imp);
 }
 
+#if TARGET_OS_IPHONE
+void refModeInstall() {}   // no other windows to stay behind
+#else
 void refModeInstall() {
     dispatch_block_t install = ^{
         swizzle([NSApplication class], @selector(activateIgnoringOtherApps:),
@@ -28,5 +31,7 @@ void refModeInstall() {
     if ([NSThread isMainThread]) install();
     else dispatch_async(dispatch_get_main_queue(), install);
 }
+
+#endif
 
 } // namespace m189

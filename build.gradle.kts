@@ -80,3 +80,27 @@ val reobfJar by tasks.registering(Exec::class) {
 }
 
 tasks.build { dependsOn(reobfJar) }
+
+// Experimental iOS jar (for launchers such as PojavLauncher): the release jar with the iOS
+// native library and shader library instead of the macOS ones. Not part of `build`:
+// ./gradlew iosJar  ->  build/libs/metal189-<version>-ios.jar
+val buildNativeIos by tasks.registering(Exec::class) {
+    workingDir = file("native")
+    commandLine("make", "-j8", "ios")
+    inputs.dir("native/src")
+    inputs.dir("native/shaders")
+    inputs.file("native/Makefile")
+    outputs.file("native/build-ios/libmetal189.dylib")
+    outputs.file("native/build-ios/metal189.metallib")
+}
+
+val iosJar by tasks.registering(Zip::class) {
+    dependsOn(reobfJar, buildNativeIos)
+    archiveFileName.set("metal189-${project.version}-ios.jar")
+    destinationDirectory.set(layout.buildDirectory.dir("libs"))
+    from(reobfJar.map { zipTree(it.outputs.files.singleFile) }) { exclude("natives/**") }
+    from("native/build-ios/libmetal189.dylib") { into("natives") }
+    from("native/build-ios/metal189.metallib") { into("natives") }
+    // tells Native.locate to unpack inside the app's container (sandbox)
+    from(resources.text.fromString("ios\n")) { into("natives"); rename { "platform" } }
+}

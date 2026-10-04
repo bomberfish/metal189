@@ -39,7 +39,7 @@ id<MTLTexture> tex(MTLPixelFormat f, int w, int h, MTLTextureUsage u, NSString* 
 // The interpolator works on the screen's frames (colour format f); the world capture keeps the
 // format of the framebuffer the world was rendered into (the UI kernel compares them as colours).
 bool ensure(int w, int h, MTLPixelFormat f, int worldW, int worldH, MTLPixelFormat worldFormat) {
-    if (@available(macOS 26.0, *)) {
+    if (@available(macOS 26.0, iOS 26.0, *)) {
         auto ensureWorld = [&]() {
             if (!S.world || S.world.pixelFormat != worldFormat || (int)S.world.width != worldW || (int)S.world.height != worldH)
                 S.world = tex(worldFormat, worldW, worldH,
@@ -91,7 +91,7 @@ bool ensure(int w, int h, MTLPixelFormat f, int worldW, int worldH, MTLPixelForm
 } // namespace
 
 bool interpSupported() {
-    if (@available(macOS 26.0, *)) return [MTLFXFrameInterpolatorDescriptor supportsDevice:device()];
+    if (@available(macOS 26.0, iOS 26.0, *)) return [MTLFXFrameInterpolatorDescriptor supportsDevice:device()];
     return false;
 }
 
@@ -121,7 +121,7 @@ void interpCaptured(const simd_float4x4& proj, const simd_float4x4& view, bool c
 
 MTLTextureUsage interpOutputUsage() {
     MTLTextureUsage u = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
-    if (@available(macOS 26.0, *)) {
+    if (@available(macOS 26.0, iOS 26.0, *)) {
         if (S.interpolator) u |= ((id<MTLFXFrameInterpolator>)S.interpolator).outputTextureUsage;
     }
     return u;
@@ -133,7 +133,7 @@ bool interpEncode(id<MTLCommandBuffer> cb, id<MTLTexture> finalFrame, id<MTLText
     double now = CACurrentMediaTime();
     if (S.lastTime > 0) S.interval = S.interval * 0.9 + std::min(now - S.lastTime, 0.25) * 0.1;
     S.lastTime = now;
-    if (@available(macOS 26.0, *)) {
+    if (@available(macOS 26.0, iOS 26.0, *)) {
         id<MTLFXFrameInterpolator> fi = (id<MTLFXFrameInterpolator>)S.interpolator;
         bool fits = fi && finalFrame && out && (int)finalFrame.width == S.w && (int)finalFrame.height == S.h &&
                     finalFrame.pixelFormat == S.format && out.pixelFormat == S.format;

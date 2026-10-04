@@ -31,7 +31,38 @@ $(BUILD)/air/%.air: shaders/%.metal $(wildcard shaders/*.h)
 $(BUILD)/metal189.metallib: $(AIR)
 	xcrun -sdk macosx metallib $(AIR) -o $@
 
-clean:
-	rm -rf $(BUILD)
+# ---- iOS (experimental, for launchers such as PojavLauncher): arm64, iOS 17 (Metal 3.1) ----
+IOS_BUILD    := build-ios
+IOS_SDK      := $(shell xcrun --sdk iphoneos --show-sdk-path)
+IOS_OBJ      := $(patsubst src/%.mm,$(IOS_BUILD)/obj/%.o,$(SRC))
+IOS_AIR      := $(patsubst shaders/%.metal,$(IOS_BUILD)/air/%.air,$(SHADERS))
+IOS_CXXFLAGS := -std=c++20 -O2 -g -fobjc-arc -fvisibility=hidden -Wall -Wextra -Wno-unused-parameter \
+                -isysroot $(IOS_SDK) -miphoneos-version-min=17.0 -arch arm64 \
+                -I$(JAVA_HOME)/include -I$(JAVA_HOME)/include/darwin -Isrc -Ishaders
+IOS_LDFLAGS  := -dynamiclib -isysroot $(IOS_SDK) -miphoneos-version-min=17.0 -arch arm64 \
+                -framework Foundation -framework UIKit -framework Metal -framework MetalFX -framework QuartzCore \
+                -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers \
+                -install_name @rpath/libmetal189.dylib
 
-.PHONY: all clean
+ios: $(IOS_BUILD)/libmetal189.dylib $(IOS_BUILD)/metal189.metallib
+
+$(IOS_BUILD)/obj/%.o: src/%.mm $(HDR)
+	@mkdir -p $(dir $@)
+	clang++ $(IOS_CXXFLAGS) -c $< -o $@
+
+# ad-hoc signed: iOS loads only signed code (a launcher may re-sign it with its own identity)
+$(IOS_BUILD)/libmetal189.dylib: $(IOS_OBJ)
+	clang++ $(IOS_LDFLAGS) $(IOS_OBJ) -o $@
+	codesign --force --sign - $@
+
+$(IOS_BUILD)/air/%.air: shaders/%.metal $(wildcard shaders/*.h)
+	@mkdir -p $(dir $@)
+	xcrun -sdk iphoneos metal $(MTLFLAGS) -c $< -o $@
+
+$(IOS_BUILD)/metal189.metallib: $(IOS_AIR)
+	xcrun -sdk iphoneos metallib $(IOS_AIR) -o $@
+
+clean:
+	rm -rf $(BUILD) $(IOS_BUILD)
+
+.PHONY: all ios clean

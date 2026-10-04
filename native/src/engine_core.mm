@@ -347,7 +347,11 @@ static void present(id<MTLCommandBuffer> cb) {
     if (interp != syncForInterp) {
         syncForInterp = interp;
         bool on = interp || g_vsync;
+#if !TARGET_OS_IPHONE   // iOS layers always present on the display's refresh
         dispatch_async(dispatch_get_main_queue(), ^{ layer.displaySyncEnabled = on; });
+#else
+        (void)on;
+#endif
     }
     if (g_vsync && !interp) {   // interpolated frames are paced by the presenter
         id<CAMetalDrawable> drawable = [layer nextDrawable];

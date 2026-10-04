@@ -65,7 +65,7 @@ bool g_residencyDirty = false;
 std::vector<std::pair<uint64_t, id>> g_pendingRemoval;
 
 bool residencyAvailable() {
-    if (@available(macOS 15.0, *)) {
+    if (@available(macOS 15.0, iOS 18.0, *)) {
         if (!g_residency) {
             MTLResidencySetDescriptor* d = [MTLResidencySetDescriptor new];
             d.label = @"rt scene";
@@ -81,7 +81,7 @@ bool residencyAvailable() {
 
 void residentAdd(id a) {
     if (!a || !residencyAvailable()) return;
-    if (@available(macOS 15.0, *)) {
+    if (@available(macOS 15.0, iOS 18.0, *)) {
         [(id<MTLResidencySet>)g_residency addAllocation:(id<MTLAllocation>)a];
         g_residencyDirty = true;
     }
@@ -152,7 +152,7 @@ void rtRelease() {
     // deferred residency removals, so wait for the GPU and empty the set now.
     waitIdle();
     if (g_residency) {
-        if (@available(macOS 15.0, *)) {
+        if (@available(macOS 15.0, iOS 18.0, *)) {
             id<MTLResidencySet> rs = (id<MTLResidencySet>)g_residency;
             [rs removeAllAllocations];
             [rs commit];
@@ -370,7 +370,7 @@ bool rtPrepare(id<MTLCommandBuffer> cb, double camX, double camY, double camZ, f
     }
     TlasSlot& t = g_tlas[g_cur];
     if (g_residency) {
-        if (@available(macOS 15.0, *)) {
+        if (@available(macOS 15.0, iOS 18.0, *)) {
             id<MTLResidencySet> rs = (id<MTLResidencySet>)g_residency;
             size_t kept = 0;
             for (auto& [frame, a] : g_pendingRemoval) {

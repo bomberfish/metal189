@@ -1,4 +1,5 @@
-// metal189: native window, CAMetalLayer and input event capture.
+// metal189: native window, CAMetalLayer and input event capture (macOS; the event queue,
+// logging and timing are shared with iOS, whose window is in platform_ios.mm).
 //
 // AppKit runs on the process main thread (AWT's NSApplication run loop). The
 // Minecraft client thread calls in through JNI; anything touching AppKit is
@@ -49,12 +50,15 @@ void log(const char* fmt, ...) {
     fflush(stderr);
 }
 
-static void runOnMain(void (^block)(void)) {
+void runOnMain(void (^block)(void)) {
     if ([NSThread isMainThread]) block();
     else dispatch_sync(dispatch_get_main_queue(), block);
 }
 
 } // namespace m189
+
+// The window itself: AppKit here, UIKit in platform_ios.mm.
+#if !TARGET_OS_IPHONE
 
 using namespace m189;
 
@@ -395,3 +399,5 @@ void desktopMode(int* out) {
 }
 
 } // namespace m189
+
+#endif // !TARGET_OS_IPHONE

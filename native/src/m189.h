@@ -7,8 +7,14 @@
 #include <cstdarg>
 #include <atomic>
 
+#include <TargetConditionals.h>
+
 #ifdef __OBJC__
+#if TARGET_OS_IPHONE
+#import <UIKit/UIKit.h>
+#else
 #import <Cocoa/Cocoa.h>
+#endif
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #endif
@@ -62,5 +68,6 @@ int64_t nowNanos();
 namespace m189 {
 CAMetalLayer* metalLayer();      // nil until a window exists
 id<MTLDevice> device();
+void runOnMain(void (^block)(void));   // synchronously on the main (UI) thread
 }
 #endif

@@ -41,6 +41,30 @@ public final class Native {
         try { return IOUtils.toByteArray(in); } finally { in.close(); }
     }
 
+    /**
+     * Where the natives are unpacked. iOS builds of the jar (natives/platform = "ios") stay
+     * inside the app's container, which is all a sandboxed launcher may write to: $HOME is the
+     * container there (Java's user.home comes from the password database and is not), with
+     * the JVM's temporary directory as a fallback.
+     */
+    private static File cacheRoot() {
+        boolean ios = false;
+        InputStream marker = Native.class.getResourceAsStream("/natives/platform");
+        if (marker != null) {
+            try {
+                ios = new String(IOUtils.toByteArray(marker), "UTF-8").trim().equals("ios");
+            } catch (IOException ignored) {
+            } finally {
+                try { marker.close(); } catch (IOException ignored) {}
+            }
+        }
+        if (!ios) return new File(System.getProperty("user.home"), "Library/Caches/metal189");
+        String home = System.getenv("HOME");
+        File base = home != null && new File(home).isDirectory() ? new File(home, "Library/Caches")
+                                                                   : new File(System.getProperty("java.io.tmpdir"));
+        return new File(base, "metal189");
+    }
+
     private static File locate(String name) {
         String dir = System.getProperty("metal189.nativeDir");
         if (dir != null) return new File(dir, name);
@@ -52,7 +76,7 @@ public final class Native {
             MessageDigest md = MessageDigest.getInstance("SHA-1");
             StringBuilder sb = new StringBuilder();
             for (byte b : md.digest(data)) sb.append(String.format("%02x", b));
-            File cache = new File(System.getProperty("user.home"), "Library/Caches/metal189/" + sb.substring(0, 16));
+            File cache = new File(cacheRoot(), sb.substring(0, 16));
             File out = new File(cache, name);
             if (!out.isFile() || out.length() != data.length) {
                 cache.mkdirs();
