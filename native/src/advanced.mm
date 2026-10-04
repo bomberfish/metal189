@@ -10,6 +10,7 @@
 #import "raytrace.h"
 #import "voxels.h"
 #import "upscale.h"
+#import "interp.h"
 #import "gpu_profiler.h"
 #import "resources.h"
 #include <cmath>
@@ -71,6 +72,7 @@ void advancedSetTables(const uint8_t* materials, const uint8_t* emissions, const
 }
 
 id<MTLBuffer> advancedLightColors() { return g_lightColors; }
+bool advancedFrameInterpolation() { return g_tuning[72] > 0.5f; }
 id<MTLBuffer> advancedMaterials() { return g_materials; }
 
 namespace {
@@ -730,6 +732,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
     bool taaOn = (features & ADV_TAA) && S.taaPso && !fxTemporal;
     if (!taaOn && !fxTemporal) features &= ~ADV_TAA;
     float jitterPx[2] = {0, 0};
+    bool cameraCut = false;
     {
         auto halton = [](uint32_t i, uint32_t b) {
             float f = 1.0f, r = 0.0f;
@@ -743,6 +746,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         if (taaOn || fxTemporal) fr.jitter = simd_make_float4(jitterPx[0] * 2.0f / W, jitterPx[1] * 2.0f / H, 0, 0);
         double dx = camX - S.prevCam[0], dy = camY - S.prevCam[1], dz = camZ - S.prevCam[2];
         bool cut = S.prevDim != env.dimension || fabs(dx) + fabs(dy) + fabs(dz) >= 16.0;
+        cameraCut = cut;
         bool valid = (taaOn ? S.historyValid : fxTemporal && S.upHistory) && !cut;
         bool giOn = ((features & ADV_RT_GI) && S.giTracePso && S.giTemporalPso && S.giBlurPso) || (features & ADV_WSGI);
         fr.post.w = giOn && S.giHistory && S.prevDim == env.dimension && fabs(dx) + fabs(dy) + fabs(dz) < 16.0 ? 1.0f : 0.0f;
@@ -1652,6 +1656,41 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
             [e endEncoding];
         }
+    }
+
+    // ---- frame interpolation: the world as finished (image, depth and camera motion at output
+    // resolution), for MetalFX to generate the frame shown before this one (interp.mm) ----
+    InterpCapture cap;
+    if (S.motionPso && S.depthUpPso[0] && interpBeginCapture(OW, OH, color.pixelFormat, cap)) {
+        id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+        b.label = @"interp world";
+        [b copyFromTexture:color toTexture:cap.world];
+        [b endEncoding];
+        MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.depthAttachment.texture = cap.depth;
+        rp.depthAttachment.loadAction = MTLLoadActionDontCare;
+        rp.depthAttachment.storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+        e.label = @"interp depth";
+        [e setRenderPipelineState:S.depthUpPso[0]];
+        [e setDepthStencilState:S.depthAlwaysWrite];
+        [e setFragmentTexture:depth atIndex:0];
+        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [e endEncoding];
+        MTLRenderPassDescriptor* mp = [MTLRenderPassDescriptor renderPassDescriptor];
+        mp.colorAttachments[0].texture = cap.motion;
+        mp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+        mp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        e = [cb renderCommandEncoderWithDescriptor:mp];
+        e.label = @"interp motion";
+        [e setRenderPipelineState:S.motionPso];
+        AdvFrame mf = S.lit.frame;   // unjittered, at the screen's size
+        mf.screen = simd_make_float4(cap.screenW, cap.screenH, 1.0f / cap.screenW, 1.0f / cap.screenH);
+        [e setFragmentBytes:&mf length:sizeof mf atIndex:1];
+        [e setFragmentTexture:cap.depth atIndex:0];
+        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [e endEncoding];
+        interpCaptured(fr.proj, fr.view, cameraCut);
     }
 }
 

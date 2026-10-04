@@ -1,0 +1,31 @@
+# MetalFX frame interpolation: rendered frames (A, C) and generated ones in their place (B, D:
+# debug view 30) while turning, with the HUD, hand and held item
+sleep 3
+world ref1 1234567
+waitWorld
+cmd /gamerule doDaylightCycle false
+cmd /weather clear 100000
+cmd /time set 6000
+cmd /replaceitem entity @p slot.hotbar.0 diamond_sword
+slot 0
+config frameInterpolation true
+cmd /tp @p 64 78 -32 135 10
+sleep 12
+spin 0.8 2000
+sleep 2
+capture CAPTURE_A
+advdebug 30
+sleep 1
+capture CAPTURE_B
+advdebug 0
+cmd /tp @p 78 67 -199 160 14
+sleep 4
+spin 1.2 2000
+sleep 2
+capture CAPTURE_C
+advdebug 30
+sleep 1
+capture CAPTURE_D
+advdebug 0
+config frameInterpolation false
+quit

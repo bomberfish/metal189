@@ -2968,6 +2968,22 @@ fragment float4 motion_fragment(FullscreenOut in [[stage_in]], constant AdvFrame
     return float4((pc.xy / pc.w - cur) * 0.5 * fr.screen.xy, 0.0, 0.0);
 }
 
+// Frame interpolation's UI layer (interp.mm): whatever was drawn over the captured world since
+// it was finished (hand, particles, weather, HUD, menus), opaque, for MetalFX to lay over the
+// generated frame unwarped; transparent where the frame still shows the world.
+kernel void interp_ui_kernel(texture2d<float, access::read> finalFrame [[texture(0)]],
+                             texture2d<float, access::read> world [[texture(1)]],
+                             texture2d<float, access::write> ui [[texture(2)]], uint2 p [[thread_position_in_grid]]) {
+    uint2 size = uint2(ui.get_width(), ui.get_height());
+    if (any(p >= size)) return;
+    float4 f = finalFrame.read(p);
+    // the world texel this screen pixel shows (Minecraft scales its framebuffer with nearest filtering)
+    uint2 ws = uint2(world.get_width(), world.get_height());
+    uint2 q = min(uint2((float2(p) + 0.5) * float2(ws) / float2(size)), ws - 1u);
+    bool drawn = any(abs(f.rgb - world.read(q).rgb) > 0.5 / 255.0);
+    ui.write(drawn ? float4(f.rgb, 1.0) : float4(0.0), p);
+}
+
 // Minecraft's framebuffer depth from the scene's render-resolution depth (upscaling), for the
 // hand, particles and weather vanilla draws afterwards.
 struct DepthOut {

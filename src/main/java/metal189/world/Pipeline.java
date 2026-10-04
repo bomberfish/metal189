@@ -169,6 +169,7 @@ public final class Pipeline {
         t[69] = Config.rtAoRadius / 10f;
         t[70] = 1 << Config.rtAoRays;
         t[71] = Config.giDistance;
+        t[72] = Config.frameInterpolation ? 1 : 0;
         for (int i = 0; i < TUNING; i++) metal189.engine.Mem.putFloat(tuning + i * 4L, t[i]);
         Native.advSetTuning(tuning, TUNING);
     }

@@ -280,6 +280,7 @@ public final class Options {
 
         named("metalfx", "upscaling", S, 4);
         slider("metalfx", "renderScale", S, 33, 100, 1, "%");
+        toggle("metalfx", "frameInterpolation", S);
 
         toggle("rt", "rtShadows", RT);
         slider("rt", "rtShadowSoftness", RT, 0, 100, 5, "%");

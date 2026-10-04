@@ -8,6 +8,8 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#import "interp.h"
+#import <QuartzCore/QuartzCore.h>
 
 namespace m189 {
 
@@ -108,6 +110,8 @@ struct Presenter {
     std::mutex m;
     std::condition_variable cv;
     id<MTLTexture> color[kScreenRing];
+    id<MTLTexture> interp[kScreenRing];        // frame interpolation: the generated frame shown before color[i]
+    bool hasInterp[kScreenRing] = {false, false, false, false};
     ScreenState state[kScreenRing] = {SS_FREE, SS_FREE, SS_FREE, SS_FREE};
     uint64_t readySeq[kScreenRing] = {0, 0, 0, 0};
     uint64_t seq = 0, presentedSeq = 0;
@@ -122,6 +126,16 @@ static Presenter g_pres;
 
 void setVSync(bool on) { g_vsync = on; }
 
+static void blitToDrawable(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<CAMetalDrawable> drawable) {
+    id<MTLTexture> dst = drawable.texture;
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    NSUInteger w = std::min(dst.width, src.width), h = std::min(dst.height, src.height);
+    [blit copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+               sourceSize:MTLSizeMake(w, h, 1) toTexture:dst destinationSlice:0 destinationLevel:0
+        destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [blit endEncoding];
+}
+
 static void presenterLoop() {
     while (true) {
         {
@@ -134,6 +148,7 @@ static void presenterLoop() {
             id<CAMetalDrawable> drawable = layer ? [layer nextDrawable] : nil;
             if (!drawable) continue;
             int slot = -1;
+            id<MTLTexture> src = nil, generated = nil;   // held here: the game thread may replace the slot's
             {
                 std::lock_guard<std::mutex> lk(g_pres.m);
                 uint64_t best = 0;
@@ -143,24 +158,43 @@ static void presenterLoop() {
                 if (slot < 0) continue;
                 g_pres.state[slot] = SS_PRESENTING;
                 g_pres.presentedSeq = g_pres.readySeq[slot];
+                src = g_pres.color[slot];
+                if (g_pres.hasInterp[slot]) generated = g_pres.interp[slot];
             }
-            id<MTLTexture> src = g_pres.color[slot];
-            id<MTLTexture> dst = drawable.texture;
             id<MTLCommandBuffer> cb = [g_pres.queue commandBuffer];
             cb.label = @"present";
-            id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-            NSUInteger w = std::min(dst.width, src.width), h = std::min(dst.height, src.height);
-            [blit copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
-                       sourceSize:MTLSizeMake(w, h, 1) toTexture:dst destinationSlice:0 destinationLevel:0
-                destinationOrigin:MTLOriginMake(0, 0, 0)];
-            [blit endEncoding];
-            [cb presentDrawable:drawable];
+            if (generated) {
+                // frame interpolation: the generated frame now, the rendered one half a frame later
+                id<CAMetalDrawable> real = [layer nextDrawable];
+                blitToDrawable(cb, generated, drawable);
+                [cb presentDrawable:drawable];
+                if (real) {
+                    blitToDrawable(cb, src, real);
+                    [cb presentDrawable:real atTime:CACurrentMediaTime() + interpFrameInterval() * 0.5];
+                }
+            } else {
+                blitToDrawable(cb, src, drawable);
+                [cb presentDrawable:drawable];
+            }
             [cb addCompletedHandler:^(id<MTLCommandBuffer>) {
                 std::lock_guard<std::mutex> lk(g_pres.m);
                 if (g_pres.state[slot] == SS_PRESENTING) g_pres.state[slot] = SS_FREE;
                 g_pres.cv.notify_all();
             }];
             [cb commit];
+            if (g_optGpuStats) {
+                // frames shown per second (rendered and generated)
+                static double t0 = 0;
+                static int shown = 0;
+                shown += generated ? 2 : 1;
+                double now = CACurrentMediaTime();
+                if (t0 == 0) t0 = now;
+                if (now - t0 >= 5.0) {
+                    log("presented %.1f frames/s", shown / (now - t0));
+                    t0 = now;
+                    shown = 0;
+                }
+            }
         }
     }
 }
@@ -174,6 +208,8 @@ static void allocScreen(int w, int h) {
         g_pres.color[i] = [e.device newTextureWithDescriptor:d];
         g_pres.color[i].label = @"screen";
         g_pres.state[i] = SS_FREE;
+        g_pres.interp[i] = nil;
+        g_pres.hasInterp[i] = false;
     }
     MTLTextureDescriptor* dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8 width:w height:h mipmapped:NO];
     dd.storageMode = MTLStorageModePrivate;
@@ -253,6 +289,41 @@ static void present(id<MTLCommandBuffer> cb) {
         return;
     }
     CAMetalLayer* layer = metalLayer();
+    // frame interpolation: the generated frame between the previous one and this, shown first
+    // (the slot is ours, SS_WRITING; the presenter takes its textures under the lock)
+    static bool interpWas = false;
+    bool interp = false;
+    if (interpWanted() && g_optPresent && layer) {
+        id<MTLTexture> src = g_pres.color[slot], out = nil;
+        {
+            std::lock_guard<std::mutex> lk(g_pres.m);
+            out = g_pres.interp[slot];
+        }
+        if (!out || out.width != src.width || out.height != src.height || out.pixelFormat != src.pixelFormat) {
+            MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat width:src.width
+                                                                                       height:src.height mipmapped:NO];
+            d.storageMode = MTLStorageModePrivate;
+            d.usage = interpOutputUsage() | MTLTextureUsageShaderRead;
+            out = [e.device newTextureWithDescriptor:d];
+            out.label = @"interpolated frame";
+        }
+        interp = interpEncode(cb, src, out);
+        std::lock_guard<std::mutex> lk(g_pres.m);
+        g_pres.interp[slot] = out;
+        g_pres.hasInterp[slot] = interp;
+        interpWas = true;
+    } else {
+        std::lock_guard<std::mutex> lk(g_pres.m);
+        g_pres.hasInterp[slot] = false;
+        if (interpWas) {
+            interpRelease();
+            for (int i = 0; i < kScreenRing; i++) {
+                g_pres.interp[i] = nil;   // a frame being presented keeps its own reference
+                g_pres.hasInterp[i] = false;
+            }
+            interpWas = false;
+        }
+    }
     if (!g_optPresent || !layer) {
         [cb addCompletedHandler:^(id<MTLCommandBuffer>) {
             std::lock_guard<std::mutex> lk(g_pres.m);
@@ -263,15 +334,22 @@ static void present(id<MTLCommandBuffer> cb) {
         return;
     }
     if (g_vsync) {
+        if (interp) {
+            // the generated frame takes the refresh before the rendered one
+            id<CAMetalDrawable> first = [layer nextDrawable];
+            id<MTLTexture> generated = nil;
+            {
+                std::lock_guard<std::mutex> lk(g_pres.m);
+                generated = g_pres.interp[slot];
+            }
+            if (first && generated) {
+                blitToDrawable(cb, generated, first);
+                [cb presentDrawable:first];
+            }
+        }
         id<CAMetalDrawable> drawable = [layer nextDrawable];
         if (drawable) {
-            id<MTLTexture> src = g_pres.color[slot], dst = drawable.texture;
-            id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-            NSUInteger w = std::min(dst.width, src.width), h = std::min(dst.height, src.height);
-            [blit copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
-                       sourceSize:MTLSizeMake(w, h, 1) toTexture:dst destinationSlice:0 destinationLevel:0
-                destinationOrigin:MTLOriginMake(0, 0, 0)];
-            [blit endEncoding];
+            blitToDrawable(cb, g_pres.color[slot], drawable);
             [cb presentDrawable:drawable];
         }
         [cb addCompletedHandler:^(id<MTLCommandBuffer>) {

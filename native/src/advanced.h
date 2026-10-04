@@ -52,6 +52,7 @@ void advancedSetEnabled(bool on);
 void advancedSetFeatures(uint32_t flags);
 void advancedSetTables(const uint8_t* materials, const uint8_t* emissions, const uint8_t* lightColors);
 id<MTLBuffer> advancedLightColors();   // per block state: light colour (rgb) and level * 17 (a)
+bool advancedFrameInterpolation();     // the frame interpolation setting
 id<MTLBuffer> advancedMaterials();     // per block state: material class
 // Runtime parameters (Pipeline.java OPT_*): 10 shadow resolution, 11 shadow distance,
 // 12 exposure %, 13 bloom strength %, 14 release ray tracing resources, 15 waving foliage.

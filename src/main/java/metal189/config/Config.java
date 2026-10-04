@@ -94,6 +94,7 @@ public final class Config {
     public static int pbrEmissionStrength = 100;
     public static int upscaling = 0;              // MetalFX: 0 off, 1 spatial, 2 temporal, 3 denoised (macOS 26)
     public static int renderScale = 67;           // percent of the output resolution the scene renders at
+    public static boolean frameInterpolation = false;   // MetalFX frame interpolation (macOS 26)
     public static int reflections = 2;            // 0 off, 1 screen-space, 2 world-space (ray-traced: RT page)
     public static int roughReflections = 40;      // roughness (percent) up to which surfaces reflect their surroundings
     public static int roughReflectionQuality = 0; // rays per frame: 0 one, 1 two, 2 four
