@@ -24,7 +24,7 @@ public final class TestDriver {
     private static int pc;
     private static int waitFrames;
     private static long waitUntil;
-    private static long fpsStart, fpsFrames, fpsEnd;
+    private static long fpsStart, fpsFrames, fpsEnd, fpsLast, fpsWorst, fpsSpikes;
     private static String fpsLabel;
     private static boolean active;
     private static int frame;
@@ -97,9 +97,23 @@ public final class TestDriver {
         if (fpsLabel != null) {
             fpsFrames++;
             long now = System.nanoTime();
+            // hitches: frames over 3x the run's average so far (logged with their time into the run)
+            if (fpsLast != 0) {
+                long dt = now - fpsLast;
+                fpsWorst = Math.max(fpsWorst, dt);
+                double avg = (double) (now - fpsStart) / fpsFrames;
+                if (fpsFrames > 10 && dt > 3 * avg && dt > 25_000_000L) {
+                    fpsSpikes++;
+                    if (fpsSpikes <= 20) Native.LOG.info("metal189-test spike {} ms at {} s", String.format("%.1f", dt / 1e6),
+                            String.format("%.2f", (now - fpsStart) / 1e9));
+                }
+            }
+            fpsLast = now;
             if (now >= fpsEnd) {
                 double secs = (now - fpsStart) / 1e9;
-                Native.LOG.info("metal189-test fps {} = {} ({} frames in {}s)", fpsLabel, String.format("%.1f", fpsFrames / secs), fpsFrames, String.format("%.2f", secs));
+                Native.LOG.info("metal189-test fps {} = {} ({} frames in {}s, worst {} ms, {} spikes)", fpsLabel,
+                        String.format("%.1f", fpsFrames / secs), fpsFrames, String.format("%.2f", secs),
+                        String.format("%.1f", fpsWorst / 1e6), fpsSpikes);
                 fpsLabel = null;
             }
             return;
@@ -365,6 +379,7 @@ public final class TestDriver {
                 fpsStart = System.nanoTime();
                 fpsEnd = fpsStart + (long) (Double.parseDouble(a[1]) * 1e9);
                 fpsFrames = 0;
+                fpsLast = fpsWorst = fpsSpikes = 0;
                 fpsLabel = a.length > 2 ? a[2] : "run";
                 return false;
             case "quit":
