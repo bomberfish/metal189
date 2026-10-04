@@ -8,6 +8,7 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#include <chrono>
 #import "interp.h"
 #import <QuartzCore/QuartzCore.h>
 
@@ -165,12 +166,20 @@ static void presenterLoop() {
             cb.label = @"present";
             if (generated) {
                 // frame interpolation: the generated frame now, the rendered one half a frame later
-                id<CAMetalDrawable> real = [layer nextDrawable];
-                blitToDrawable(cb, generated, drawable);
-                [cb presentDrawable:drawable];
-                if (real) {
-                    blitToDrawable(cb, src, real);
-                    [cb presentDrawable:real atTime:CACurrentMediaTime() + interpFrameInterval() * 0.5];
+                // (display-synced while interpolating, so neither tears). One drawable at a time:
+                // holding two of the layer's three made nextDrawable wait up to its 1 s timeout.
+                double due = CACurrentMediaTime() + interpFrameInterval() * 0.5;
+                id<MTLCommandBuffer> first = [g_pres.queue commandBuffer];
+                first.label = @"present generated";
+                blitToDrawable(first, generated, drawable);
+                [first presentDrawable:drawable];
+                [first commit];
+                double wait = due - CACurrentMediaTime();
+                if (wait > 0) std::this_thread::sleep_for(std::chrono::microseconds((int64_t)(wait * 1e6)));
+                drawable = [layer nextDrawable];
+                if (drawable) {
+                    blitToDrawable(cb, src, drawable);
+                    [cb presentDrawable:drawable];
                 }
             } else {
                 blitToDrawable(cb, src, drawable);
@@ -333,20 +342,14 @@ static void present(id<MTLCommandBuffer> cb) {
         }];
         return;
     }
-    if (g_vsync) {
-        if (interp) {
-            // the generated frame takes the refresh before the rendered one
-            id<CAMetalDrawable> first = [layer nextDrawable];
-            id<MTLTexture> generated = nil;
-            {
-                std::lock_guard<std::mutex> lk(g_pres.m);
-                generated = g_pres.interp[slot];
-            }
-            if (first && generated) {
-                blitToDrawable(cb, generated, first);
-                [cb presentDrawable:first];
-            }
-        }
+    // display sync while interpolating (tear-free generated frames), else as the vsync setting says
+    static bool syncForInterp = false;
+    if (interp != syncForInterp) {
+        syncForInterp = interp;
+        bool on = interp || g_vsync;
+        dispatch_async(dispatch_get_main_queue(), ^{ layer.displaySyncEnabled = on; });
+    }
+    if (g_vsync && !interp) {   // interpolated frames are paced by the presenter
         id<CAMetalDrawable> drawable = [layer nextDrawable];
         if (drawable) {
             blitToDrawable(cb, g_pres.color[slot], drawable);
