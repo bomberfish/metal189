@@ -151,7 +151,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
     }
 
     private void changed(Opt o) {
-        if ("ctrlClickRightClick".equals(o.key)) Config.applyInput();
+        if ("ctrlClickRightClick".equals(o.key) || "maxRenderDistance".equals(o.key)) Config.applyInput();
         Pipeline.apply();
     }
 

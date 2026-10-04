@@ -239,3 +239,5 @@ metal189.opt.leavesDetailDistance.desc=With Fancy graphics, leaves farther than 
 metal189.opt.leavesDetailDistance.v0=Unlimited
 metal189.opt.smartLeaves=Smart Leaves
 metal189.opt.smartLeaves.desc=With Fancy graphics, leaves keep their see-through look but skip the faces hidden between neighbouring leaf blocks, like OptiFine's Smart leaves. Forests draw much faster; the inside of a tree looks a little emptier.
+metal189.opt.maxRenderDistance=Maximum Render Distance
+metal189.opt.maxRenderDistance.desc=How far the Render Distance slider in Video Settings goes. Past 32 chunks (the game's own limit) a world needs much more memory: in singleplayer the built-in server keeps every chunk too, so give the game at least 6 GB for 48 chunks and 10 GB for 64. Servers send no more than their own view distance.

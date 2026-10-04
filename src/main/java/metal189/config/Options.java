@@ -200,6 +200,7 @@ public final class Options {
         final int S = NEEDS_SHADERS, RT = NEEDS_SHADERS | NEEDS_RT;
         toggle("main", "shaders", 0);
         toggle("input", "ctrlClickRightClick", 0);
+        numbers("detail", "maxRenderDistance", 0, " chunks", 32, 48, 64);
         toggle("detail", "smartLeaves", 0);
         numbers("detail", "leavesDetailDistance", 0, " chunks", 0, 4, 6, 8, 12, 16, 24, 32);
 

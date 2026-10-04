@@ -37,7 +37,11 @@ public final class Patches {
         });
     }
 
-    public static void register(String className, ClassPatch patch) { PATCHES.put(className, patch); }
+    /** Adds a patch for a class (after any already registered for it). */
+    public static void register(String className, ClassPatch patch) {
+        ClassPatch before = PATCHES.get(className);
+        PATCHES.put(className, before == null ? patch : Asm.chain(before, patch));
+    }
 
     static {
         // Minecraft's framebuffer reaches the screen without a copy when possible (metal189.world.Present).
@@ -57,6 +61,68 @@ public final class Patches {
                     l.add(new org.objectweb.asm.tree.MethodInsnNode(Opcodes.INVOKESTATIC, "metal189/world/Present", "beforeCopy",
                         "(Lnet/minecraft/client/shader/Framebuffer;IIZ)V", false));
                     m.instructions.insertBefore(c, l);
+                    return true;
+                }
+                return false;
+            }
+
+            public boolean needsFrames() { return false; }
+        });
+    }
+
+    static {
+        // Render distance past 32 chunks and faster chunk loading (metal189.terrain.Limits).
+        register("net.minecraft.server.management.PlayerManager", new ClassPatch() {
+            public boolean apply(ClassNode cn) {
+                MethodNode m = Asm.find(cn, "setPlayerViewRadius", "func_152622_a", "(I)V");
+                if (m == null) return false;
+                for (AbstractInsnNode n = m.instructions.getFirst(); n != null; n = n.getNext()) {
+                    if (n.getOpcode() == Opcodes.BIPUSH && ((org.objectweb.asm.tree.IntInsnNode) n).operand == 32) {
+                        m.instructions.set(n, new org.objectweb.asm.tree.MethodInsnNode(Opcodes.INVOKESTATIC, "metal189/terrain/Limits", "maxViewRadius", "()I", false));
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            public boolean needsFrames() { return false; }
+        });
+        register("net.minecraft.client.renderer.chunk.ChunkRenderDispatcher", new ClassPatch() {
+            public boolean apply(ClassNode cn) {
+                int threads = 0, buffers = 0;
+                for (MethodNode m : cn.methods) {
+                    if (!m.name.equals("<init>") || !m.desc.equals("()V")) continue;
+                    for (AbstractInsnNode n = m.instructions.getFirst(); n != null; n = n.getNext()) {
+                        int op = n.getOpcode();
+                        if (op == Opcodes.ICONST_2 && n.getNext() != null && n.getNext().getOpcode() == Opcodes.IF_ICMPGE) {
+                            AbstractInsnNode c = new org.objectweb.asm.tree.MethodInsnNode(Opcodes.INVOKESTATIC, "metal189/terrain/Limits", "builderThreads", "()I", false);
+                            m.instructions.set(n, c);
+                            n = c;
+                            threads++;
+                        } else if (op == Opcodes.ICONST_5) {
+                            // the free-buffer queue's capacity and the loop filling it
+                            AbstractInsnNode c = new org.objectweb.asm.tree.MethodInsnNode(Opcodes.INVOKESTATIC, "metal189/terrain/Limits", "builderBuffers", "()I", false);
+                            m.instructions.set(n, c);
+                            n = c;
+                            buffers++;
+                        }
+                    }
+                }
+                return threads == 1 && buffers == 2;
+            }
+
+            public boolean needsFrames() { return false; }
+        });
+        register("net.minecraft.entity.player.EntityPlayerMP", new ClassPatch() {
+            public boolean apply(ClassNode cn) {
+                MethodNode m = Asm.find(cn, "onUpdate", "func_70071_h_", "()V");
+                if (m == null) return false;
+                for (AbstractInsnNode n = m.instructions.getFirst(); n != null; n = n.getNext()) {
+                    // while (iterator1.hasNext() && list.size() < 10)
+                    if (n.getOpcode() != Opcodes.BIPUSH || ((org.objectweb.asm.tree.IntInsnNode) n).operand != 10) continue;
+                    AbstractInsnNode prev = n.getPrevious();
+                    if (!(prev instanceof org.objectweb.asm.tree.MethodInsnNode) || !"size".equals(((org.objectweb.asm.tree.MethodInsnNode) prev).name)) continue;
+                    m.instructions.set(n, new org.objectweb.asm.tree.MethodInsnNode(Opcodes.INVOKESTATIC, "metal189/terrain/Limits", "chunksPerTick", "()I", false));
                     return true;
                 }
                 return false;
@@ -240,6 +306,36 @@ public final class Patches {
 
                 public boolean needsFrames() { return false; }
             },
+            // setupTerrain's update scheduling runs only when something it depends on changed
+            new ClassPatch() {
+                public boolean apply(ClassNode cn) {
+                    MethodNode m = Asm.find(cn, "setupTerrain", "func_174970_a",
+                        "(Lnet/minecraft/entity/Entity;DLnet/minecraft/client/renderer/culling/ICamera;IZ)V");
+                    if (m == null) return false;
+                    AbstractInsnNode clear = null, end = null;
+                    for (AbstractInsnNode n = m.instructions.getFirst(); n != null; n = n.getNext()) {
+                        if (n.getOpcode() == Opcodes.INVOKEVIRTUAL) {
+                            String name = ((org.objectweb.asm.tree.MethodInsnNode) n).name;
+                            if (name.equals("clearChunkUpdates") || name.equals("func_178513_e")) clear = n;
+                        }
+                        if (n.getOpcode() == Opcodes.INVOKEINTERFACE && "addAll".equals(((org.objectweb.asm.tree.MethodInsnNode) n).name)
+                                && n.getNext() != null && n.getNext().getOpcode() == Opcodes.POP)
+                            end = n.getNext();   // the last one: chunksToUpdate.addAll(set)
+                    }
+                    if (clear == null || end == null) return false;
+                    AbstractInsnNode receiver = clear.getPrevious() != null ? clear.getPrevious().getPrevious() : null;   // aload_0, getfield
+                    if (receiver == null || receiver.getOpcode() != Opcodes.ALOAD) return false;
+                    org.objectweb.asm.tree.LabelNode skip = new org.objectweb.asm.tree.LabelNode();
+                    m.instructions.insert(end, skip);
+                    org.objectweb.asm.tree.InsnList l = new org.objectweb.asm.tree.InsnList();
+                    l.add(new org.objectweb.asm.tree.MethodInsnNode(Opcodes.INVOKESTATIC, "metal189/terrain/Search", "scheduleNow", "()Z", false));
+                    l.add(new org.objectweb.asm.tree.JumpInsnNode(Opcodes.IFEQ, skip));
+                    m.instructions.insertBefore(receiver, l);
+                    return true;
+                }
+
+                public boolean needsFrames() { return true; }
+            },
             // renderBlockLayer's per-section loop: the layer is drawn from the engine's visible list
             new ClassPatch() {
                 public boolean apply(ClassNode cn) {
@@ -329,6 +425,22 @@ public final class Patches {
                 "metal189/world/PbrAtlas", "onStitched", "(Lnet/minecraft/client/renderer/texture/TextureMap;)V"));
 
         register("net.minecraft.client.renderer.chunk.RenderChunk", Asm.chain(
+            // sections marked for an update (metal189.terrain.Search.scheduleNow)
+            new ClassPatch() {
+                public boolean apply(ClassNode cn) {
+                    MethodNode m = Asm.find(cn, "setNeedsUpdate", "func_178575_a", "(Z)V");
+                    if (m == null) return false;
+                    org.objectweb.asm.tree.InsnList l = new org.objectweb.asm.tree.InsnList();
+                    l.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ALOAD, 0));
+                    l.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ILOAD, 1));
+                    l.add(new org.objectweb.asm.tree.MethodInsnNode(Opcodes.INVOKESTATIC, "metal189/terrain/Search", "needsUpdate",
+                        "(Lnet/minecraft/client/renderer/chunk/RenderChunk;Z)V", false));
+                    m.instructions.insert(l);
+                    return true;
+                }
+
+                public boolean needsFrames() { return false; }
+            },
             // how the section was last built (metal189.terrain.Lod)
             new ClassPatch() {
                 public boolean apply(ClassNode cn) {

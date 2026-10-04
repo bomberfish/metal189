@@ -76,10 +76,9 @@ public final class EntityCull {
         tileGeneration = Visible.generation;
         tileCompiled = metal189.terrain.Terrain.compiledGeneration;
         tileInfos.clear();
-        RenderChunk[] rc = Visible.chunks;
         Object[] vi = Visible.infos;
         for (int i = 0, c = Visible.count; i < c; i++)
-            if (!rc[i].getCompiledChunk().getTileEntities().isEmpty()) tileInfos.add(vi[i]);
+            if (Visible.hasTileEntities(i)) tileInfos.add(vi[i]);
     }
 
     /** The visible sections that may hold entities (replaces renderInfos.iterator()). */

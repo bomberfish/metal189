@@ -45,6 +45,30 @@ public final class Visible {
     public static RenderChunk[] chunks = new RenderChunk[0];
     /** Section coordinates (blocks / 16), packed by {@link #key}. */
     public static long[] keys = new long[0];
+    /** The sections' engine ids. */
+    public static int[] ids = new int[0];
+
+    // which sections (by engine id) hold tile entities, kept as they compile (any thread);
+    // 0 unknown, 1 none, 2 some
+    private static volatile byte[] tileById = new byte[4096];
+
+    static void tileEntities(int id, boolean some) {
+        byte[] t = tileById;
+        if (id > 0 && id < t.length) t[id] = (byte) (some ? 2 : 1);
+    }
+
+    /** Whether visible entry i's section holds tile entities. */
+    public static boolean hasTileEntities(int i) {
+        int id = ids[i];
+        byte[] t = tileById;
+        if (id >= t.length) tileById = t = java.util.Arrays.copyOf(t, Math.max(id + 1, t.length * 2));
+        byte v = t[id];
+        if (v == 0) {
+            v = (byte) (chunks[i].getCompiledChunk().getTileEntities().isEmpty() ? 1 : 2);   // compiled before it had an id
+            t[id] = v;
+        }
+        return v == 2;
+    }
     private static long idBuffer;
     private static int idCapacity;
 
@@ -82,12 +106,14 @@ public final class Visible {
             infos = new Object[cap];
             chunks = new RenderChunk[cap];
             keys = new long[cap];
+            Visible.ids = new int[cap];
         }
         if (idCapacity < n) {
             if (idBuffer != 0) Mem.free(idBuffer);
             idCapacity = Math.max(n, idCapacity * 2);
             idBuffer = Mem.malloc(idCapacity * 4L);
         }
+        System.arraycopy(ids, 0, Visible.ids, 0, n);
         System.arraycopy(in, 0, infos, 0, n);
         System.arraycopy(rcs, 0, chunks, 0, n);
         System.arraycopy(ks, 0, keys, 0, n);

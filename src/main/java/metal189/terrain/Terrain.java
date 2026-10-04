@@ -154,6 +154,7 @@ public final class Terrain {
     public static void moved(RenderChunk rc) {
         int id = idOf(rc);
         Search.compiledChanged(id, CompiledChunk.DUMMY);   // setPosition resets the build
+        Visible.tileEntities(id, false);
         if (id != 0) Native.sectionDelete(id);
     }
 
@@ -169,6 +170,7 @@ public final class Terrain {
     public static void compiled(RenderChunk rc, CompiledChunk cc) {
         if (cc == null) return;
         Search.compiledChanged(idOf(rc), cc);   // at once, as vanilla's search would see it
+        Visible.tileEntities(idOf(rc), !cc.getTileEntities().isEmpty());
         if (!Minecraft.getMinecraft().isCallingFromMinecraftThread()) {
             pendingCompiled.add(new Object[] {rc, cc});
             return;

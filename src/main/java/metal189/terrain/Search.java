@@ -412,6 +412,38 @@ public final class Search {
         return true;
     }
 
+    // setupTerrain's chunk update scheduling: vanilla rebuilds its pending set every frame (a new
+    // LinkedHashSet, a lookup per visible section, a copy of every pending one), thousands of
+    // entries while far chunks load. It only changes when the visible list does or a section
+    // is marked for an update, so it runs then (and at least every 250 ms).
+    private static volatile boolean marked, markedNear;
+    private static int scheduledGeneration = -1;
+    private static long scheduledAt;
+
+    /** Head of RenderChunk.setNeedsUpdate (any thread). */
+    public static void needsUpdate(RenderChunk rc, boolean needs) {
+        if (!needs) return;
+        marked = true;
+        // the player's own edits (sections around the camera) are scheduled at once
+        BlockPos p = rc.getPosition();
+        double dx = p.getX() + 8 - lastX, dy = p.getY() + 8 - lastY, dz = p.getZ() + 8 - lastZ;
+        if (dx * dx + dy * dy + dz * dz < 48 * 48) markedNear = true;
+    }
+
+    /** Patched before setupTerrain's scheduling: false skips it this frame. */
+    public static boolean scheduleNow() {
+        if (!READY) return true;
+        long now = System.nanoTime();
+        long since = now - scheduledAt;
+        boolean due = Visible.generation != scheduledGeneration && since >= 16_000_000L   // a new list: soon
+                || markedNear || (marked && since >= 50_000_000L) || since >= 250_000_000L;
+        if (!due) return false;
+        scheduledGeneration = Visible.generation;
+        marked = markedNear = false;
+        scheduledAt = now;
+        return true;
+    }
+
     /** ViewFrustum.getRenderChunk's index for a block position, or -1. */
     private static int slot(int bx, int by, int bz, int cx, int cy, int cz) {
         int i = MathHelper.bucketInt(bx, 16), j = MathHelper.bucketInt(by, 16), k = MathHelper.bucketInt(bz, 16);
