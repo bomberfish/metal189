@@ -1608,6 +1608,11 @@ void executeFrame(id<MTLCommandBuffer> cb, const uint8_t* cmds, size_t len) {
                 if ((g_optSkipPhases >> g_phase) & 1) break;
                 if (x.advReplay && (g_phase == PH_SKY || (g_phase == PH_CLOUDS && advancedCloudsActive()) ||
                                     advConsumes(g, g_phase, payload<DrawCmd>(h).prim))) break;
+                if (g_optAdvDebug == 99 && g_phase == PH_SKY) {
+                    static int n = 0;
+                    const DrawCmd& d = payload<DrawCmd>(h);
+                    if (n++ < 40) log("sky DrawCmd: prim %u count %u blend %u depthTest %u mask %u fog %u tex %u", d.prim, d.count, g.pipe.blend, g.depth.test, g.depth.mask, g.frag.fog, g.units[0].enabled);
+                }
                 drawArena(x, payload<DrawCmd>(h));
                 break;
             case OP_DRAW_MESH:
@@ -1615,6 +1620,11 @@ void executeFrame(id<MTLCommandBuffer> cb, const uint8_t* cmds, size_t len) {
                 if ((g_optSkipPhases >> g_phase) & 1) break;
                 if (x.advReplay && (g_phase == PH_SKY || (g_phase == PH_CLOUDS && advancedCloudsActive()) ||
                                     advConsumes(g, g_phase, payload<DrawMeshCmd>(h).prim))) break;
+                if (g_optAdvDebug == 99 && g_phase == PH_SKY) {
+                    static int n = 0;
+                    const DrawMeshCmd& d = payload<DrawMeshCmd>(h);
+                    if (n++ < 40) log("sky DrawMeshCmd: prim %u count %u blend %u depthTest %u mask %u fog %u tex %u", d.prim, d.count, g.pipe.blend, g.depth.test, g.depth.mask, g.frag.fog, g.units[0].enabled);
+                }
                 drawMesh(x, payload<DrawMeshCmd>(h));
                 break;
             case OP_COPY_TEX: copyTex(x, payload<CopyTexCmd>(h)); break;

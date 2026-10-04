@@ -153,6 +153,7 @@ public final class Terrain {
     /** Head of RenderChunk.setPosition: the old geometry no longer describes the world there. */
     public static void moved(RenderChunk rc) {
         int id = idOf(rc);
+        Search.compiledChanged(id, CompiledChunk.DUMMY);   // setPosition resets the build
         if (id != 0) Native.sectionDelete(id);
     }
 
@@ -167,6 +168,7 @@ public final class Terrain {
      */
     public static void compiled(RenderChunk rc, CompiledChunk cc) {
         if (cc == null) return;
+        Search.compiledChanged(idOf(rc), cc);   // at once, as vanilla's search would see it
         if (!Minecraft.getMinecraft().isCallingFromMinecraftThread()) {
             pendingCompiled.add(new Object[] {rc, cc});
             return;
@@ -200,6 +202,7 @@ public final class Terrain {
     public static void delete(RenderChunk rc) {
         solidMasks.remove(rc);
         int id = idOf(rc);
+        Search.compiledChanged(id, CompiledChunk.DUMMY);
         if (id != 0) Native.sectionDelete(id);
     }
 

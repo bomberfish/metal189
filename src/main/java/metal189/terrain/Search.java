@@ -2,6 +2,7 @@ package metal189.terrain;
 
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -38,6 +39,8 @@ public final class Search {
     private static final boolean DISABLED = Boolean.getBoolean("metal189.vanillaSearch");
     private static final boolean DEBUG = Boolean.getBoolean("metal189.searchDebug");
     private static String debugOpen = "";
+    private static long dbgSearch, dbgPublish, dbgVisited;
+    private static int dbgN, debugVisited;
     private static final EnumFacing[] FACINGS = EnumFacing.values();
     private static final int[] OPPOSITE = new int[6];
     private static final int[] DX = new int[6], DY = new int[6], DZ = new int[6];
@@ -99,10 +102,12 @@ public final class Search {
         MethodHandle frh = null, frx = null, fry = null, frz = null;
         try {
             Class<?> fc = net.minecraft.client.renderer.culling.Frustum.class;
-            frh = getter(fc, "clippingHelper", "field_78552_a");
-            frx = getter(fc, "xPosition", "field_78550_b");
-            fry = getter(fc, "yPosition", "field_78551_c");
-            frz = getter(fc, "zPosition", "field_78549_d");
+            MethodType d = MethodType.methodType(double.class, ICamera.class);
+            frh = getter(fc, "clippingHelper", "field_78552_a").asType(
+                    MethodType.methodType(net.minecraft.client.renderer.culling.ClippingHelper.class, ICamera.class));
+            frx = getter(fc, "xPosition", "field_78550_b").asType(d);
+            fry = getter(fc, "yPosition", "field_78551_c").asType(d);
+            frz = getter(fc, "zPosition", "field_78549_d").asType(d);
         } catch (Exception e) {
             Native.LOG.warn("metal189: Frustum layout not recognised; terrain search uses its box test", e);
         }
@@ -112,20 +117,21 @@ public final class Search {
         FR_Z = frz;
         try {
             Class<?> vfc = Class.forName("net.minecraft.client.renderer.ViewFrustum");
-            vf = getter(RenderGlobal.class, "viewFrustum", "field_175008_n");
+            vf = getter(RenderGlobal.class, "viewFrustum", "field_175008_n").asType(MethodType.methodType(Object.class, RenderGlobal.class));
             rd = getter(RenderGlobal.class, "renderDistanceChunks", "field_72739_F");
             ri = setter(RenderGlobal.class, "renderInfos", "field_72755_R");
             dirty = setter(RenderGlobal.class, "displayListEntitiesDirty", "field_147595_R");
             facings = method(RenderGlobal.class, new Class<?>[] {BlockPos.class}, "getVisibleFacings", "func_174978_c");
             view = method(RenderGlobal.class, new Class<?>[] {Entity.class, double.class}, "getViewVector", "func_174962_a");
-            ch = getter(vfc, "renderChunks", "field_178164_f");
-            cx = getter(vfc, "countChunksX", "field_178165_d");
-            cy = getter(vfc, "countChunksY", "field_178168_c");
-            cz = getter(vfc, "countChunksZ", "field_178166_e");
+            ch = getter(vfc, "renderChunks", "field_178164_f").asType(MethodType.methodType(RenderChunk[].class, Object.class));
+            cx = getter(vfc, "countChunksX", "field_178165_d").asType(MethodType.methodType(int.class, Object.class));
+            cy = getter(vfc, "countChunksY", "field_178168_c").asType(MethodType.methodType(int.class, Object.class));
+            cz = getter(vfc, "countChunksZ", "field_178166_e").asType(MethodType.methodType(int.class, Object.class));
             Class<?> ic = Class.forName("net.minecraft.client.renderer.RenderGlobal$ContainerLocalRenderInformation");
             Constructor<?> k = ic.getDeclaredConstructor(RenderGlobal.class, RenderChunk.class, EnumFacing.class, int.class);
             k.setAccessible(true);
-            info = MethodHandles.lookup().unreflectConstructor(k);
+            info = MethodHandles.lookup().unreflectConstructor(k)
+                    .asType(MethodType.methodType(Object.class, RenderGlobal.class, RenderChunk.class, EnumFacing.class, int.class));
             ok = !DISABLED;
         } catch (Exception e) {
             Native.LOG.warn("metal189: RenderGlobal layout not recognised; vanilla terrain search kept", e);
@@ -148,11 +154,13 @@ public final class Search {
     private static int[] stamp = new int[0];          // search id that reached the slot
     private static Object[] infoCache = new Object[0];
     private static RenderChunk[] infoChunk = new RenderChunk[0];
-    private static CompiledChunk[] visCompiled = new CompiledChunk[0];
-    private static long[] visMask = new long[0];      // bit (from * 6 + to): the section connects those faces
     private static int searchId;
     // the sections found, in order (handed to Visible)
     private static RenderChunk[] foundChunks = new RenderChunk[0];
+    private static Object[] foundInfos = new Object[0];
+    private static long[] foundKeys = new long[0];
+    private static int[] foundIds = new int[0];
+    private static int[] idCache = new int[0];   // per slot, valid with infoChunk
     private static int found;
     // the flood's queue: slot, directions taken (mask), the face it entered through (-1: start)
     private static int[] qSlot = new int[0], qDirs = new int[0], qFrom = new int[0];
@@ -188,13 +196,25 @@ public final class Search {
         lastSearch = now;
         if (!READY) return true;
         try {
-            SET_DIRTY.invoke(rg, false);
+            SET_DIRTY.invokeExact(rg, false);
+            long t0 = DEBUG ? System.nanoTime() : 0;
             List<Object> infos = new ArrayList<Object>(Math.max(256, Visible.count + 64));
             found = 0;
             search(rg, viewEntity, partialTicks, camera, playerSpectator, infos);
-            SET_RENDER_INFOS.invoke(rg, infos);
-            Visible.publish(infos, foundChunks, found);
-            if (DEBUG) Native.LOG.info("search: {} sections, frustum {}, open {}", found, fallback == null ? "planes" : "camera", debugOpen);
+            SET_RENDER_INFOS.invokeExact(rg, (List) infos);
+            long t1 = DEBUG ? System.nanoTime() : 0;
+            Visible.publish(infos, foundInfos, foundChunks, foundKeys, foundIds, found);
+            if (DEBUG) {
+                long t2 = System.nanoTime();
+                dbgSearch += t1 - t0;
+                dbgPublish += t2 - t1;
+                dbgVisited += debugVisited;
+                if (++dbgN == 300) {
+                    Native.LOG.info("search: {} us, publish {} us, {} sections found, {} reached", dbgSearch / 300 / 1000, dbgPublish / 300 / 1000, found, dbgVisited / 300);
+                    dbgN = 0;
+                    dbgSearch = dbgPublish = dbgVisited = 0;
+                }
+            }
         } catch (Throwable t) {
             throw new RuntimeException(t);
         }
@@ -203,22 +223,22 @@ public final class Search {
 
     private static void search(RenderGlobal rg, Entity viewEntity, double partialTicks, ICamera camera, boolean playerSpectator,
                                List<Object> out) throws Throwable {
-        Object vf = VIEW_FRUSTUM.invoke(rg);
-        RenderChunk[] grid = (RenderChunk[]) VF_CHUNKS.invoke(vf);
-        int cx = (int) VF_X.invoke(vf), cy = (int) VF_Y.invoke(vf), cz = (int) VF_Z.invoke(vf);
-        int renderDistance = (int) RENDER_DISTANCE.invoke(rg);
+        Object vf = (Object) VIEW_FRUSTUM.invokeExact(rg);
+        RenderChunk[] grid = (RenderChunk[]) VF_CHUNKS.invokeExact(vf);
+        int cx = (int) VF_X.invokeExact(vf), cy = (int) VF_Y.invokeExact(vf), cz = (int) VF_Z.invokeExact(vf);
+        int renderDistance = (int) RENDER_DISTANCE.invokeExact(rg);
         int n = grid.length;
         if (stamp.length != n) {
             stamp = new int[n];
             infoCache = new Object[n];
             infoChunk = new RenderChunk[n];
-            visCompiled = new CompiledChunk[n];
-            visMask = new long[n];
+            idCache = new int[n];
             qSlot = new int[n];
             qDirs = new int[n];
             qFrom = new int[n];
         }
         loadFrustum(camera);
+        debugVisited = 0;
         int id = ++searchId;
         if (id == 0) { java.util.Arrays.fill(stamp, 0); id = searchId = 1; }
 
@@ -237,11 +257,12 @@ public final class Search {
             Set<EnumFacing> open = visibleFacings(rg, eye, grid[start]);
             if (DEBUG) debugOpen = open.toString();
             if (open.size() == 1) {
-                Vector3f v = (Vector3f) VIEW_VECTOR.invoke(rg, viewEntity, partialTicks);
+                Vector3f v = (Vector3f) VIEW_VECTOR.invokeExact(rg, viewEntity, partialTicks);
                 open.remove(EnumFacing.getFacingFromVector(v.x, v.y, v.z).getOpposite());
             }
             if (open.isEmpty() && !playerSpectator) {
-                out.add(info(rg, start, grid[start]));
+                BlockPos sp = grid[start].getPosition();
+                out.add(info(rg, start, grid[start], Visible.key(sp.getX() >> 4, sp.getY() >> 4, sp.getZ() >> 4)));
                 return;
             }
             if (playerSpectator && Minecraft.getMinecraft().theWorld.getBlockState(eye).getBlock().isOpaqueCube()) occlusion = false;
@@ -268,26 +289,35 @@ public final class Search {
             }
         }
 
+        int cxy = cx * cy;
+        ensureTables(vf, cx, cz);
+        int[] colX = Search.colX, rowZ = Search.rowZ;
         while (head < tail) {
             int s = qSlot[head], dirs = qDirs[head], from = qFrom[head];
             head++;
             RenderChunk rc = grid[s];
-            out.add(info(rg, s, rc));
+            // the slot's grid coordinates: a neighbour's slot is one step over, wrapping like
+            // ViewFrustum.getRenderChunk's modulo (sections sit at the slot their position maps to)
+            int si = s % cx, sj = (s / cx) % cy, sk = s / cxy;
+            int x = colX[si], y = sj * 16, z = rowZ[sk];
+            out.add(info(rg, s, rc, Visible.key(x >> 4, y >> 4, z >> 4)));
             long vis = (occlusion && from >= 0) ? visibility(s, rc) : -1L;
-            BlockPos p = rc.getPosition();
-            int x = p.getX(), y = p.getY(), z = p.getZ();
             for (int f = 0; f < 6; f++) {
                 if (occlusion && (dirs & (1 << OPPOSITE[f])) != 0) continue;
                 // entered through face `from` (the opposite of the step taken), leaving through f
                 if (occlusion && from >= 0 && (vis & (1L << (OPPOSITE[from] * 6 + f))) == 0) continue;
                 int nx = x + DX[f] * 16, ny = y + DY[f] * 16, nz = z + DZ[f] * 16;
                 if (Math.abs(px - nx) > limit || ny < 0 || ny >= 256 || Math.abs(pz - nz) > limit) continue;
-                int t = slot(nx, ny, nz, cx, cy, cz);
-                if (t < 0 || stamp[t] == id) continue;
-                RenderChunk nb = grid[t];
-                if (nb == null) continue;
+                int ti = si + DX[f], tj = sj + DY[f], tk = sk + DZ[f];
+                if (tj < 0 || tj >= cy) continue;
+                if (ti < 0) ti += cx; else if (ti >= cx) ti -= cx;
+                if (tk < 0) tk += cz; else if (tk >= cz) tk -= cz;
+                int t = (tk * cy + tj) * cx + ti;
+                if (stamp[t] == id) continue;
+                if (grid[t] == null) continue;
                 stamp[t] = id;   // vanilla marks the section reached before testing the frustum
-                if (!inFrustum(nb)) continue;
+                if (DEBUG) debugVisited++;
+                if (!inFrustum(colX[ti], tj * 16, rowZ[tk])) continue;
                 qSlot[tail] = t;
                 qDirs[tail] = dirs | (1 << f);
                 qFrom[tail] = f;
@@ -304,11 +334,11 @@ public final class Search {
     private static void loadFrustum(ICamera camera) throws Throwable {
         fallback = camera;
         if (FR_HELPER == null || camera.getClass() != net.minecraft.client.renderer.culling.Frustum.class) return;
-        net.minecraft.client.renderer.culling.ClippingHelper h = (net.minecraft.client.renderer.culling.ClippingHelper) FR_HELPER.invoke(camera);
+        net.minecraft.client.renderer.culling.ClippingHelper h = (net.minecraft.client.renderer.culling.ClippingHelper) FR_HELPER.invokeExact(camera);
         for (int i = 0; i < 6; i++) System.arraycopy(h.frustum[i], 0, planes[i], 0, 4);
-        fx = (double) FR_X.invoke(camera);
-        fy = (double) FR_Y.invoke(camera);
-        fz = (double) FR_Z.invoke(camera);
+        fx = (double) FR_X.invokeExact(camera);
+        fy = (double) FR_Y.invokeExact(camera);
+        fz = (double) FR_Z.invokeExact(camera);
         fallback = null;
     }
 
@@ -330,6 +360,58 @@ public final class Search {
         return true;
     }
 
+    // Where each grid slot's section is: ViewFrustum places them by column (x) and row (z)
+    // alone, so two small tables replace reading positions from thousands of scattered objects.
+    private static Object tableFrustum;
+    private static int[] colX = new int[0], rowZ = new int[0];
+
+    /** End of ViewFrustum.updateChunkPositions (patched): the same placement, as tables. */
+    public static void chunkPositions(Object viewFrustum, double viewX, double viewZ) {
+        if (!READY) return;
+        try {
+            int cx = (int) VF_X.invokeExact(viewFrustum), cz = (int) VF_Z.invokeExact(viewFrustum);
+            int i = MathHelper.floor_double(viewX) - 8, j = MathHelper.floor_double(viewZ) - 8, k = cx * 16;
+            if (colX.length != cx) colX = new int[cx];
+            if (rowZ.length != cz) rowZ = new int[cz];
+            for (int l = 0; l < cx; l++) colX[l] = place(i, k, l);
+            for (int n = 0; n < cz; n++) rowZ[n] = place(j, k, n);   // vanilla uses the x extent for z too
+            tableFrustum = viewFrustum;
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+    }
+
+    /** ViewFrustum.func_178157_a. */
+    private static int place(int origin, int extent, int index) {
+        int l = index * 16;
+        int m = l - origin + extent / 2;
+        if (m < 0) m -= extent - 1;
+        return l - m / extent * extent;
+    }
+
+    /** A newly made ViewFrustum: sections at index * 16 (createRenderChunks) until first placed. */
+    private static void ensureTables(Object viewFrustum, int cx, int cz) {
+        if (tableFrustum == viewFrustum && colX.length == cx && rowZ.length == cz) return;
+        colX = new int[cx];
+        rowZ = new int[cz];
+        for (int l = 0; l < cx; l++) colX[l] = l * 16;
+        for (int n = 0; n < cz; n++) rowZ[n] = n * 16;
+        tableFrustum = viewFrustum;
+    }
+
+    /** inFrustum for the section box at (x, y, z) (RenderChunk.boundingBox: position to position + 16). */
+    private static boolean inFrustum(int x, int y, int z) {
+        if (fallback != null) return fallback.isBoundingBoxInFrustum(new net.minecraft.util.AxisAlignedBB(x, y, z, x + 16, y + 16, z + 16));
+        double x0 = x - fx, y0 = y - fy, z0 = z - fz, x1 = (x + 16) - fx, y1 = (y + 16) - fy, z1 = (z + 16) - fz;
+        for (int j = 0; j < 6; j++) {
+            float[] p = planes[j];
+            double d = (double) p[0] * (p[0] > 0 ? x1 : x0) + (double) p[1] * (p[1] > 0 ? y1 : y0)
+                    + (double) p[2] * (p[2] > 0 ? z1 : z0) + (double) p[3];
+            if (!(d > 0.0)) return false;
+        }
+        return true;
+    }
+
     /** ViewFrustum.getRenderChunk's index for a block position, or -1. */
     private static int slot(int bx, int by, int bz, int cx, int cy, int cz) {
         int i = MathHelper.bucketInt(bx, 16), j = MathHelper.bucketInt(by, 16), k = MathHelper.bucketInt(bz, 16);
@@ -339,28 +421,60 @@ public final class Search {
         return (k * cy + j) * cx + i;
     }
 
-    private static Object info(RenderGlobal rg, int s, RenderChunk rc) throws Throwable {
-        if (found == foundChunks.length) foundChunks = java.util.Arrays.copyOf(foundChunks, Math.max(1024, found * 2));
-        foundChunks[found++] = rc;
+    private static Object info(RenderGlobal rg, int s, RenderChunk rc, long key) throws Throwable {
+        if (found == foundChunks.length) {
+            int cap = Math.max(1024, found * 2);
+            foundChunks = java.util.Arrays.copyOf(foundChunks, cap);
+            foundInfos = java.util.Arrays.copyOf(foundInfos, cap);
+            foundKeys = java.util.Arrays.copyOf(foundKeys, cap);
+            foundIds = java.util.Arrays.copyOf(foundIds, cap);
+        }
         Object o = infoCache[s];
         if (o == null || infoChunk[s] != rc) {
-            o = NEW_INFO.invoke(rg, rc, (EnumFacing) null, 0);
+            o = (Object) NEW_INFO.invokeExact(rg, rc, (EnumFacing) null, 0);
             infoCache[s] = o;
             infoChunk[s] = rc;
+            idCache[s] = Terrain.idFor(rc);
         }
+        foundChunks[found] = rc;
+        foundInfos[found] = o;
+        foundKeys[found] = key;
+        foundIds[found] = idCache[s];
+        found++;
         return o;
     }
 
-    /** The section's face-to-face connections (vanilla's CompiledChunk.isVisible), cached per compiled chunk. */
-    private static long visibility(int s, RenderChunk rc) {
-        CompiledChunk cc = rc.getCompiledChunk();
-        if (visCompiled[s] == cc) return visMask[s];
+    // Each section's face-to-face connections (CompiledChunk.isVisible) by engine id, kept as
+    // its compiled chunk changes (Terrain's hooks, any thread) so the search reads no section
+    // objects. Bit 63: known.
+    private static volatile long[] visById = new long[4096];
+    private static final long KNOWN = 1L << 63;
+
+    private static long mask(CompiledChunk cc) {
         long m = 0;
         for (int a = 0; a < 6; a++)
             for (int b = 0; b < 6; b++)
                 if (cc.isVisible(FACINGS[a], FACINGS[b])) m |= 1L << (a * 6 + b);
-        visCompiled[s] = cc;
-        visMask[s] = m;
+        return m;
+    }
+
+    /** RenderChunk.setCompiledChunk (or the chunk reset to DUMMY) with the section's id (0: none yet). */
+    static void compiledChanged(int id, CompiledChunk cc) {
+        long[] v = visById;
+        if (id > 0 && id < v.length) v[id] = mask(cc) | KNOWN;
+    }
+
+    private static long visibility(int s, RenderChunk rc) {
+        int id = idCache[s];
+        long[] v = visById;
+        if (id >= v.length) {
+            long[] nv = java.util.Arrays.copyOf(v, Math.max(id + 1, v.length * 2));
+            visById = v = nv;
+        }
+        long m = v[id];
+        if ((m & KNOWN) != 0) return m;
+        m = mask(rc.getCompiledChunk()) | KNOWN;   // compiled before it had an id
+        v[id] = m;
         return m;
     }
 
@@ -370,7 +484,7 @@ public final class Search {
         long key = eye.toLong();
         CompiledChunk cc = rc != null ? rc.getCompiledChunk() : null;
         if (key != facingsKey || cc != facingsCompiled || facingsCached == null) {
-            facingsCached = (Set<EnumFacing>) VISIBLE_FACINGS.invoke(rg, eye);
+            facingsCached = (Set<EnumFacing>) VISIBLE_FACINGS.invokeExact(rg, eye);
             facingsKey = key;
             facingsCompiled = cc;
         }

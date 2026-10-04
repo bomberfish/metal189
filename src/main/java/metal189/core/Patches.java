@@ -67,6 +67,29 @@ public final class Patches {
     }
 
     static {
+        // Section placement tables for the terrain search (metal189.terrain.Search.chunkPositions).
+        register("net.minecraft.client.renderer.ViewFrustum", new ClassPatch() {
+            public boolean apply(ClassNode cn) {
+                MethodNode m = Asm.find(cn, "updateChunkPositions", "func_178163_a", "(DD)V");
+                if (m == null) return false;
+                for (AbstractInsnNode n = m.instructions.getFirst(); n != null; n = n.getNext()) {
+                    if (n.getOpcode() != Opcodes.RETURN) continue;
+                    org.objectweb.asm.tree.InsnList l = new org.objectweb.asm.tree.InsnList();
+                    l.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ALOAD, 0));
+                    l.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.DLOAD, 1));
+                    l.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.DLOAD, 3));
+                    l.add(new org.objectweb.asm.tree.MethodInsnNode(Opcodes.INVOKESTATIC, "metal189/terrain/Search", "chunkPositions",
+                        "(Ljava/lang/Object;DD)V", false));
+                    m.instructions.insertBefore(n, l);
+                }
+                return true;
+            }
+
+            public boolean needsFrames() { return false; }
+        });
+    }
+
+    static {
         // The visibility search's per-section direction sets (metal189.terrain.FacingSet).
         register("net.minecraft.client.renderer.RenderGlobal$ContainerLocalRenderInformation", new ClassPatch() {
             public boolean apply(ClassNode cn) {

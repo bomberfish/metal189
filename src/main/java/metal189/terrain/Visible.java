@@ -62,11 +62,19 @@ public final class Visible {
         } catch (Throwable t) {
             throw new RuntimeException(t);
         }
-        publish(renderInfos, rcs, n);
+        Object[] in = renderInfos.toArray();
+        long[] ks = new long[n];
+        int[] ids = new int[n];
+        for (int i = 0; i < n; i++) {
+            BlockPos p = rcs[i].getPosition();
+            ks[i] = key(p.getX() >> 4, p.getY() >> 4, p.getZ() >> 4);
+            ids[i] = Terrain.idFor(rcs[i]);
+        }
+        publish(renderInfos, in, rcs, ks, ids, n);
     }
 
-    /** A new visible list: renderInfos and its sections (in order). */
-    public static void publish(List<?> renderInfos, RenderChunk[] rcs, int n) {
+    /** A new visible list: renderInfos, and per entry its info object, section, key and engine id. */
+    public static void publish(List<?> renderInfos, Object[] in, RenderChunk[] rcs, long[] ks, int[] ids, int n) {
         list = renderInfos;
         generation++;
         if (infos.length < n) {
@@ -80,14 +88,10 @@ public final class Visible {
             idCapacity = Math.max(n, idCapacity * 2);
             idBuffer = Mem.malloc(idCapacity * 4L);
         }
-        for (int i = 0; i < n; i++) {
-            RenderChunk rc = rcs[i];
-            infos[i] = renderInfos.get(i);
-            chunks[i] = rc;
-            BlockPos p = rc.getPosition();
-            keys[i] = key(p.getX() >> 4, p.getY() >> 4, p.getZ() >> 4);
-            Mem.putInt(idBuffer + i * 4L, Terrain.idFor(rc));
-        }
+        System.arraycopy(in, 0, infos, 0, n);
+        System.arraycopy(rcs, 0, chunks, 0, n);
+        System.arraycopy(ks, 0, keys, 0, n);
+        Mem.U.copyMemory(ids, Mem.U.arrayBaseOffset(int[].class), null, idBuffer, n * 4L);
         for (int i = n; i < count; i++) { infos[i] = null; chunks[i] = null; }
         count = n;
         Native.terrainVisible(idBuffer, n);

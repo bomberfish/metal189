@@ -185,8 +185,24 @@ public final class Lod {
     }
 
     /** With each new visible-section snapshot (client thread): queues sections built at the wrong detail. */
+    private static double checkedX = Double.NaN, checkedY, checkedZ;
+    private static long checkedAt;
+    private static int checkedSettings = -1;
+
     static void check(RenderChunk[] visible, int n) {
         if (GET == null) return;
+        // sections are built at the detail their distance asks for then, so the distance only
+        // needs re-checking as the camera moves on (or settings change), not per frame
+        int settings = Config.leavesDetailDistance * 4 + (Config.smartLeaves ? 2 : 0)
+                + (Minecraft.getMinecraft().gameSettings.fancyGraphics ? 1 : 0);
+        long now = System.nanoTime();
+        double mx = camX - checkedX, my = camY - checkedY, mz = camZ - checkedZ;
+        if (settings == checkedSettings && mx * mx + my * my + mz * mz < 16.0 && now - checkedAt < 500_000_000L) return;
+        checkedSettings = settings;
+        checkedX = camX;
+        checkedY = camY;
+        checkedZ = camZ;
+        checkedAt = now;
         double d = limit();
         boolean fancy = Minecraft.getMinecraft().gameSettings.fancyGraphics;
         boolean smart = Config.smartLeaves;
