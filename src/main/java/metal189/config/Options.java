@@ -282,11 +282,16 @@ public final class Options {
         slider("metalfx", "renderScale", S, 33, 100, 1, "%");
 
         toggle("rt", "rtShadows", RT);
+        slider("rt", "rtShadowSoftness", RT, 0, 100, 5, "%");
         toggle("rt", "rtReflections", RT);
+        slider("rt", "rtReflectionDistance", RT, 32, 512, 16, " blocks");
         toggle("rt", "rtAmbientOcclusion", RT);
+        slider("rt", "rtAoRadius", RT, 10, 80, 5, "/10 blocks");
+        named("rt", "rtAoRays", RT, 4);
         named("rt", "globalIllumination", S, 3);
         slider("rt", "globalIlluminationStrength", S, 0, 300, 10, "%");
         named("rt", "globalIlluminationQuality", S, 3);
+        slider("rt", "giDistance", S, 16, 128, 8, " blocks");
         toggle("rt", "rtEntities", RT);
     }
 }

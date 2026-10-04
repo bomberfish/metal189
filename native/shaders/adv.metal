@@ -159,6 +159,8 @@ vertex GTerrainOut gbuf_terrain_vertex(uint vid [[vertex_id]],
 #define PBR_TUNE fr.tune[6]   // x: normal strength, y: specular strength, z: emission strength, w: format (0 LabPBR, 1 SEUS)
 #define POM_TUNE fr.tune[7]   // x: depth (blocks, 0 = off), y: steps, z: distance (blocks), w: PBR enabled
 #define GI_TUNE  fr.tune[15]  // x: global illumination (0 off, 1 world-space, 2 ray-traced), y: bounce strength, z: rays per texel
+#define RT_SOFT  fr.tune[16].w   // the sun's angular radius for ray-traced shadows (radians, 0: hard)
+#define RT_TUNE  fr.tune[17]  // x: reflection ray distance, y: AO radius, z: AO rays, w: GI ray distance (blocks)
 
 // Parallax occlusion mapping: march the view ray into the height field (the normal atlas'
 // alpha: 1 = surface, 0 = deepest) until it passes below it, then interpolate between the
@@ -1434,16 +1436,17 @@ fragment float4 rtao_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& 
     float3 up = abs(nWorld.y) < 0.999 ? float3(0, 1, 0) : float3(1, 0, 0);
     float3 tx = normalize(cross(up, nWorld)), ty = cross(nWorld, tx);
     float3 o = world + fr.rtCam.xyz + nWorld * (0.01 + length(eye) * 0.0002);
-    // TAA integrates over frames, so 2 rotating rays suffice with it; 4 without
-    int rays = fr.taa.w > 0.5 ? 2 : 4;
+    // rotating rays (AO Rays setting; TAA integrates them over frames, so without it twice as many)
+    int rays = clamp(int(RT_TUNE.z + 0.5) * (fr.taa.w > 0.5 ? 1 : 2), 1, 16);
+    float radius = RT_TUNE.y;
     float open = 0.0;
     float rot = hash12(in.position.xy) * 6.2831853 + float(fr.flags.z % 64u) * 2.399963;
     for (int i = 0; i < rays; i++) {
         float u = (float(i) + fract(hash12(in.position.yx + float(i)) + float(fr.flags.z % 16u) * 0.618034)) / float(rays);
         float r = sqrt(u), phi = rot + float(i) * 6.2831853 / float(rays);
         float3 dir = normalize(tx * (r * cos(phi)) + ty * (r * sin(phi)) + nWorld * sqrt(max(0.0, 1.0 - u)));
-        bool occ = rtOccluded(tlas, rtInst, atlas, pointS, o, dir, 2.5);
-        if (!occ && (fr.flags.x & ADV_RT_ENTITIES)) occ = rtEntOccludedSolid(entAs, o, dir, 2.5);
+        bool occ = rtOccluded(tlas, rtInst, atlas, pointS, o, dir, radius);
+        if (!occ && (fr.flags.x & ADV_RT_ENTITIES)) occ = rtEntOccludedSolid(entAs, o, dir, radius);
         open += occ ? 0.0 : 1.0;
     }
     return float4(open / float(rays), 1.0, 1.0, 1.0);
@@ -1462,7 +1465,7 @@ static float3 giTraceRay(constant AdvFrame& fr, float2 px, int ray, float3 world
     float r = sqrt(xi.x), phi = 6.2831853 * xi.y;
     float3 dir = normalize(tx * (r * cos(phi)) + ty * (r * sin(phi)) + nWorld * sqrt(max(0.0, 1.0 - xi.x)));
     float3 o = world + fr.rtCam.xyz + nWorld * (0.01 + length(eye) * 0.0002);
-    RtHit h = rtClosest(tlas, rtInst, atlas, pointS, o, dir, 48.0);
+    RtHit h = rtClosest(tlas, rtInst, atlas, pointS, o, dir, RT_TUNE.w);
     if (fr.flags.x & ADV_RT_ENTITIES) {
         RtHit eh = rtEntClosestSolid(entAs, o, dir, h.t);
         if (eh.hit) return rtEntShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, entV, entD, entT, eh, o, dir, true) * GI_TUNE.y;
@@ -1996,7 +1999,7 @@ fragment float4 gi_voxel_fragment(FullscreenOut in [[stage_in]], constant AdvFra
     if (any(p < 1.0) || any(p > N - 1.0)) return float4(skyAmbient(fr, skyLut, lin, nWorld) * sky * sky * fr.ambient.a, 1.0);
     float3 up = abs(nWorld.y) < 0.999 ? float3(0, 1, 0) : float3(1, 0, 0);
     float3 tx = normalize(cross(up, nWorld)), ty = cross(nWorld, tx);
-    const float len = 40.0;
+    const float len = RT_TUNE.w;
     float3 sum = float3(0.0);
     int rays = clamp(int(GI_TUNE.z + 0.5), 1, 4);
     for (int ray = 0; ray < rays; ray++) {
@@ -2165,7 +2168,15 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
             float3 Lw = fr.sunDirView.w > 0.0 ? fr.sunDirWorld.xyz : -fr.sunDirWorld.xyz;
             float3 nOff = dot(nWorld, Lw) >= 0.0 ? nWorld : -nWorld;
             float3 o = world + fr.rtCam.xyz + nOff * (0.004 + length(eye) * 0.0002);
-            rtShadow = rtOccluded(tlas, rtInst, atlas, pointS, o, Lw, 320.0) ? 0.0 : 1.0;
+            float3 Ls = Lw;
+            if (RT_SOFT > 0.0 && (fr.flags.x & ADV_TAA)) {
+                // a disc the size of the sun: one ray per pixel and frame, TAA averages the penumbra
+                float2 xi = hash22(in.position.xy * 1.31 + float(fr.flags.z % 512u) * float2(3.17, 7.53));
+                float r = sqrt(xi.x) * tan(RT_SOFT), phi = 6.2831853 * xi.y;
+                float3 a = normalize(cross(abs(Lw.y) < 0.99 ? float3(0, 1, 0) : float3(1, 0, 0), Lw)), b = cross(Lw, a);
+                Ls = normalize(Lw + (a * cos(phi) + b * sin(phi)) * r);
+            }
+            rtShadow = rtOccluded(tlas, rtInst, atlas, pointS, o, Ls, 320.0) ? 0.0 : 1.0;
             shadow = rtShadow;
             if (fr.flags.x & ADV_SHADOWS) shadow *= sampleShadow(fr, shadowMap, cmp, world, nShadow, abs(ndl));
         } else if (fr.flags.x & ADV_SHADOWS) shadow = sampleShadow(fr, shadowMap, cmp, world, nShadow, abs(ndl));
@@ -2253,7 +2264,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                 float3 traced = refl;   // the sky, where nothing is hit
                 if (ac_rt && (fr.flags.x & ADV_RT_REFL)) {
                     float3 o = world + fr.rtCam.xyz + nWorld * (0.01 + length(eye) * 0.0002);
-                    RtHit rh = rtClosest(tlas, rtInst, atlas, pointS, o, Rrw, 256.0);
+                    RtHit rh = rtClosest(tlas, rtInst, atlas, pointS, o, Rrw, RT_TUNE.x);
                     RtHit eh;
                     eh.hit = false;
                     if (fr.flags.x & ADV_RT_ENTITIES) eh = rtEntClosest(entAs, entV, entD, entT, o, Rrw, rh.t);
@@ -2736,8 +2747,8 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
         RtHit eh;
         eh.hit = false;
         if (fres > 0.02) {
-            rh = rtClosest(tlas, rtInst, atlas, pointS, o, R, 320.0);
-            if (fr.flags.x & ADV_RT_ENTITIES) eh = rtEntClosest(entAs, entV, entD, entT, o, R, rh.hit ? rh.t : 320.0);
+            rh = rtClosest(tlas, rtInst, atlas, pointS, o, R, RT_TUNE.x);
+            if (fr.flags.x & ADV_RT_ENTITIES) eh = rtEntClosest(entAs, entV, entD, entT, o, R, rh.hit ? rh.t : RT_TUNE.x);
         }
         if (eh.hit || rh.hit) {
             float3 hc = eh.hit ? rtEntShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, entV, entD, entT, eh, o, R, fres > 0.15)

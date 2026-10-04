@@ -163,6 +163,12 @@ public final class Pipeline {
         // MetalFX upscaling: mode, and the share of the output resolution the scene renders at
         t[65] = Config.upscaling;
         t[66] = Config.renderScale / 100f;
+        // ray tracing quality: the sun's angular radius (soft shadows), reflection, AO and GI ray reach
+        t[67] = Config.rtShadowSoftness / 100f * (float) Math.toRadians(3.0);
+        t[68] = Config.rtReflectionDistance;
+        t[69] = Config.rtAoRadius / 10f;
+        t[70] = 1 << Config.rtAoRays;
+        t[71] = Config.giDistance;
         for (int i = 0; i < TUNING; i++) metal189.engine.Mem.putFloat(tuning + i * 4L, t[i]);
         Native.advSetTuning(tuning, TUNING);
     }

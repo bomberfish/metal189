@@ -57,6 +57,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
             GuiButton b = o.kind == Options.Kind.SLIDER
                     ? new GuiSlider(id++, 0, 0, 150, 20, name(o) + ": ", o.unit, o.min, o.max, o.get(), false, true, this)
                     : new GuiButton(id++, 0, 0, 150, 20, "");
+            if (b instanceof GuiSlider) b.displayString = ((GuiSlider) b).dispString + shown(o, o.get());
             options.put(b, o);
             cells.add(b);
         }
@@ -89,8 +90,14 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
         if (!label.equals(named)) return label;   // options may name their values
         switch (o.kind) {
             case TOGGLE: return I18n.format(v != 0 ? "options.on" : "options.off");
-            default: return v + o.unit;
+            default: return shown(o, v);
         }
+    }
+
+    // A number as shown: options whose unit starts with "/10" are kept in tenths ("/10 blocks": 2.5 blocks).
+    private static String shown(Opt o, int v) {
+        if (o.unit.startsWith("/10")) return String.format(java.util.Locale.ROOT, "%.1f", v / 10f) + o.unit.substring(3);
+        return v + o.unit;
     }
 
     private boolean available(Opt o) {
@@ -165,7 +172,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
         int v = o.sanitize(slider.getValueInt());
         // snap the knob to the option's step without re-entering updateSlider()
         slider.sliderValue = (v - slider.minValue) / (slider.maxValue - slider.minValue);
-        slider.displayString = slider.dispString + v + slider.suffix;
+        slider.displayString = slider.dispString + shown(o, v);
         if (v != o.get()) {
             o.set(v);
             changed(o);

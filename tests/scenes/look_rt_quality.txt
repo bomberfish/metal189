@@ -1,0 +1,41 @@
+# Ray tracing quality: shadow softness 0 / 30 / 100% (A-C), AO radius 1 and 6 blocks (D, E)
+sleep 3
+world lookrtq 42 flat
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /weather clear 100000
+cmd /time set 3500
+config rtShadows true
+config rtAmbientOcclusion false
+config rtShadowSoftness 0
+cmd /tp @p -1100 8 -1088 200 35
+sleep 4
+cmd /kill @e[type=!Player]
+cmd /fill -1116 4 -1116 -1084 20 -1084 air
+cmd /fill -1116 3 -1116 -1084 3 -1084 quartz_block
+cmd /fill -1102 4 -1102 -1102 16 -1102 log
+cmd /fill -1110 4 -1110 -1106 10 -1106 stonebrick
+cmd /fill -1110 11 -1110 -1100 11 -1100 stonebrick
+cmd /fill -1096 4 -1100 -1096 4 -1094 fence
+sleep 8
+capture CAPTURE_A
+config rtShadowSoftness 30
+sleep 3
+capture CAPTURE_B
+config rtShadowSoftness 100
+sleep 3
+capture CAPTURE_C
+config rtShadowSoftness 30
+config rtAmbientOcclusion true
+config rtAoRadius 10
+sleep 3
+capture CAPTURE_D
+config rtAoRadius 60
+sleep 3
+capture CAPTURE_E
+config rtAoRadius 25
+config rtAmbientOcclusion false
+config rtShadows false
+quit

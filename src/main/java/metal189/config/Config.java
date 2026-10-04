@@ -34,6 +34,11 @@ public final class Config {
     public static boolean rtShadows = false;
     public static boolean rtReflections = false;
     public static boolean rtAmbientOcclusion = false;
+    public static int rtShadowSoftness = 30;              // the sun's size for ray-traced shadows, percent of 3 degrees
+    public static int rtReflectionDistance = 256;         // blocks
+    public static int rtAoRadius = 25;                    // tenths of a block
+    public static int rtAoRays = 1;                       // 0 one, 1 two, 2 four, 3 eight
+    public static int giDistance = 48;                    // blocks
     public static int globalIllumination = 0;            // 0 off, 1 world-space (voxels), 2 ray-traced
     public static int globalIlluminationStrength = 100;  // bounce light, percent
     public static int globalIlluminationQuality = 0;     // rays per texel: 0 one, 1 two, 2 four
