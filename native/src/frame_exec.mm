@@ -8,13 +8,16 @@
 #import "commands.h"
 #import "resources.h"
 #import "advanced.h"
+#import "gpu_profiler.h"
 #include <unordered_map>
 #include <cstring>
 
 namespace m189 {
 
 // Per-frame statistics (logged with -Dmetal189.gpuStats=true).
-struct FrameStats { uint64_t draws, terrainDraws, terrainQuads, arenaDraws, meshDraws, passes; };
+struct FrameStats { uint64_t draws, terrainDraws, terrainQuads, arenaDraws, meshDraws, passes, terrainDrawn, drawCalls; };
+bool g_optFaceCull = true;
+bool g_optTerrainSplit = false;
 static FrameStats g_stats, g_statsAcc;
 static int g_statsFrames;
 
@@ -23,6 +26,7 @@ int g_optQuadDiagonal = 1; // 1: split quads along v1-v3 like Apple's GL, 0: alo
 
 extern bool g_optPresent;
 extern bool g_optGpuStats;
+extern bool g_optSerialGpu;
 int g_optAdvDebug = 0; // advanced pipeline debug view (see light_fragment)
 extern bool g_ctrlClickRight;
 
@@ -33,6 +37,9 @@ void setOption(int key, int value) {
         case 3: g_optGpuStats = value != 0; break;
         case 4: g_optAdvDebug = value; break;
         case 5: g_ctrlClickRight = value != 0; break;
+        case 7: g_optFaceCull = value != 0; break;
+        case 8: g_optSerialGpu = value != 0; break;
+        case 9: g_optTerrainSplit = value != 0; break;
         default: if (key >= 10) advancedSetParam(key, value); break;
     }
 }
@@ -163,9 +170,11 @@ bool executorInit() {
         bool lit = false;
         [cv setConstantValue:&lit type:MTLDataTypeBool atIndex:5];
         NSError* err = nil;
-        g_vfn[v] = [e.library newFunctionWithName:(terrain ? @"terrain_vertex" : @"ff_vertex") constantValues:cv error:&err];
+        bool slim = terrain && modulate && !flat && !logic;   // terrain_vertex_slim / terrain_fragment
+        g_vfn[v] = [e.library newFunctionWithName:(slim ? @"terrain_vertex_slim" : terrain ? @"terrain_vertex" : @"ff_vertex")
+                                    constantValues:cv error:&err];
         if (!g_vfn[v]) { log("ff_vertex: %s", err.localizedDescription.UTF8String); return false; }
-        g_ffn[v] = [e.library newFunctionWithName:@"ff_fragment" constantValues:cv error:&err];
+        g_ffn[v] = [e.library newFunctionWithName:(slim ? @"terrain_fragment" : @"ff_fragment") constantValues:cv error:&err];
         if (!g_ffn[v]) { log("ff_fragment: %s", err.localizedDescription.UTF8String); return false; }
         if (!terrain) {
             g_lineVfn[v] = [e.library newFunctionWithName:@"ff_line_vertex" constantValues:cv error:&err];
@@ -563,6 +572,10 @@ static bool beginPass(Exec& x) {
         }
     }
     x.pendColor = x.pendDepth = x.pendStencil = false;
+    if (profEnabled()) {
+        static const char* names[] = {"pass 0", "pass 1", "pass 2", "pass 3", "pass 4", "pass 5", "pass 6", "pass 7+"};
+        profRender(rp, names[std::min<uint64_t>(g_stats.passes, 7)]);
+    }
     x.enc = [x.cb renderCommandEncoderWithDescriptor:rp];
     g_stats.passes++;
     x.bPso = nil;
@@ -1105,33 +1118,127 @@ static void sectionMatrix(const simd_float4x4& mv, float ox, float oy, float oz,
     }
 }
 
+// One record per section draw, read by terrain_vertex at [[instance_id]] (ff.metal TerrainDraw).
+struct TerrainDrawRecord {
+    uint64_t vertices;   // GPU address of the section's layer buffer
+    uint64_t pad;
+    float mv[16];
+};
+static_assert(sizeof(TerrainDrawRecord) == 80, "matches TerrainDraw");
+
+struct TerrainMeshlet { uint32_t record, first, count, pad; };   // ff.metal TerrainMeshlet
+constexpr uint32_t kMeshletQuads = 64;
+
+static void* allocTerrainBytes(Exec& x, size_t bytes, id<MTLBuffer>* buf, size_t* offset) {
+    FrameResources& f = *x.fr;
+    if (!f.terrainDraws || f.terrainOffset + bytes > f.terrainCapacity) {
+        if (f.terrainDraws) f.retired.push_back(f.terrainDraws);
+        f.terrainCapacity = std::max(f.terrainCapacity * 2, std::max<size_t>(bytes, 256u << 10));
+        f.terrainDraws = [device() newBufferWithLength:f.terrainCapacity
+                                               options:MTLResourceStorageModeShared | MTLResourceCPUCacheModeWriteCombined];
+        f.terrainOffset = 0;
+    }
+    *buf = f.terrainDraws;
+    *offset = f.terrainOffset;
+    f.terrainOffset += (bytes + 255) & ~(size_t)255;
+    return (uint8_t*)f.terrainDraws.contents + *offset;
+}
+
+static TerrainDrawRecord* allocTerrainDraws(Exec& x, uint32_t count, id<MTLBuffer>* buf, size_t* offset) {
+    return (TerrainDrawRecord*)allocTerrainBytes(x, (size_t)count * sizeof(TerrainDrawRecord), buf, offset);
+}
+
+// A layer of the visible sections: the records go to one buffer bound once, and each
+// section is one draw that changes no state (its record is its base instance).
 static void drawTerrain(Exec& x, const CmdHeader* h) {
     flushBatch(x);
     const TerrainCmd& t = payload<TerrainCmd>(h);
     const TerrainEntry* e = (const TerrainEntry*)((const uint8_t*)(h + 1) + sizeof(TerrainCmd));
-    if (t.layer > 3) return;
-    bool prepared = false;
-    id<MTLBuffer> qi = nil;
+    if (t.layer > 3 || t.count == 0) return;
+    if (!prepareDraw(x, 7, (int)t.format, true)) return;
+    id<MTLBuffer> table;
+    size_t tableOffset;
+    TerrainDrawRecord* rec = allocTerrainDraws(x, t.count, &table, &tableOffset);
+    // Every visible range of every section becomes 64-quad meshlets of one draw: a small draw
+    // costs the GPU about as much as its vertices, so a layer is a single draw. terrain_vertex
+    // finds a quad's meshlet (record + first quad) and drops the padding past its count.
+    static std::vector<TerrainMeshlet> meshlets;
+    static std::vector<uint32_t> sectionFirstMeshlet;   // per record, for one draw per section
+    meshlets.clear();
+    sectionFirstMeshlet.clear();
+    uint32_t n = 0;
+    auto addRun = [&](uint32_t record, uint32_t first, uint32_t quads) {
+        g_stats.terrainDrawn += quads;
+        for (uint32_t q = 0; q < quads; q += kMeshletQuads)
+            meshlets.push_back({record, first + q, std::min<uint32_t>(kMeshletQuads, quads - q), 0});
+    };
+    // Back faces are culled (GL_BACK, counter-clockwise fronts): face groups whose every quad
+    // faces away from the camera are left out.
+    bool faceCull = g.raster.cull && g.raster.cullFace == 0x405 && g.raster.frontFace == 0x901 && g_optFaceCull;
+    // the eye in the space the offsets are in (the modelview includes eye height, bobbing and
+    // the third-person distance)
+    simd_float4 ec = simd_mul(simd_inverse(g.mv), simd_make_float4(0, 0, 0, 1));
+    float eyeX = ec.x / ec.w, eyeY = ec.y / ec.w, eyeZ = ec.z / ec.w;
     for (uint32_t i = 0; i < t.count; i++) {
         Section* s = section((int)e[i].section);
         if (!s || !s->layers[t.layer]) continue;
         uint32_t quads = s->vertices[t.layer] / 4;
         if (quads == 0) continue;
-        if (!prepared) {
-            if (!prepareDraw(x, 7, (int)t.format, true)) return;
-            prepared = true;
+        const uint32_t* gs = s->groupStart[t.layer];
+        const float* pl = s->plane[t.layer];
+        // the chunk matrix scales about the section centre by 1.000001: a millimetre of slack
+        const float eps = 1e-3f;
+        float cx = eyeX - e[i].x, cy = eyeY - e[i].y, cz = eyeZ - e[i].z;
+        bool vis[FG_COUNT] = {
+            cy < pl[FG_NY] + eps, cx < pl[FG_NX] + eps, cz < pl[FG_NZ] + eps, cy > pl[FG_PY] - eps,
+            true, cz > pl[FG_PZ] - eps, cx > pl[FG_PX] - eps,
+        };
+        uint32_t record = n++;
+        sectionFirstMeshlet.push_back((uint32_t)meshlets.size());
+        TerrainDrawRecord& r = rec[record];
+        r.vertices = s->layers[t.layer].gpuAddress;
+        sectionMatrix(g.mv, e[i].x, e[i].y, e[i].z, r.mv);
+        uint32_t runStart = 0, runEnd = 0;   // the current run of visible groups (quads)
+        bool open = false;
+        for (int gi = 0; gi < FG_COUNT; gi++) {
+            uint32_t a = gs[gi], b = gs[gi + 1];
+            if (a == b) continue;   // empty groups never split a run
+            if (!faceCull || vis[gi]) {
+                if (!open) { runStart = a; open = true; }
+                runEnd = b;
+            } else if (open) {
+                addRun(record, runStart, runEnd - runStart);
+                open = false;
+            }
         }
-        float mv[16];
-        sectionMatrix(g.mv, e[i].x, e[i].y, e[i].z, mv);
-        [x.enc setVertexBytes:mv length:sizeof mv atIndex:3];
-        [x.enc setVertexBuffer:s->layers[t.layer] offset:0 atIndex:0];
-        x.bVb = s->layers[t.layer];
-        x.bVbOffset = 0;
-        qi = quadIndices(quads);
-        [x.enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:quads * 6 indexType:MTLIndexTypeUInt32
-                         indexBuffer:qi indexBufferOffset:0];
+        if (open) addRun(record, runStart, runEnd - runStart);
         g_stats.terrainDraws++;
         g_stats.terrainQuads += quads;
+    }
+    if (meshlets.empty()) return;
+    id<MTLBuffer> mbuf;
+    size_t moff;
+    void* mdst = allocTerrainBytes(x, meshlets.size() * sizeof(TerrainMeshlet), &mbuf, &moff);
+    memcpy(mdst, meshlets.data(), meshlets.size() * sizeof(TerrainMeshlet));
+    sectionHeapsUse(x.enc);
+    [x.enc setVertexBuffer:table offset:tableOffset atIndex:3];
+    [x.enc setVertexBuffer:mbuf offset:moff atIndex:4];
+    uint32_t virtualQuads = (uint32_t)meshlets.size() * kMeshletQuads;
+    id<MTLBuffer> qi = quadIndices(virtualQuads);
+    if (g_optTerrainSplit) {
+        // benchmarking: one draw per section
+        sectionFirstMeshlet.push_back((uint32_t)meshlets.size());
+        for (uint32_t r = 0; r + 1 < sectionFirstMeshlet.size(); r++) {
+            uint32_t a = sectionFirstMeshlet[r], b = sectionFirstMeshlet[r + 1];
+            if (a == b) continue;
+            g_stats.drawCalls++;
+            [x.enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:(NSUInteger)(b - a) * kMeshletQuads * 6
+                               indexType:MTLIndexTypeUInt32 indexBuffer:qi indexBufferOffset:(NSUInteger)a * kMeshletQuads * 24];
+        }
+    } else {
+        g_stats.drawCalls++;
+        [x.enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:(NSUInteger)virtualQuads * 6 indexType:MTLIndexTypeUInt32
+                         indexBuffer:qi indexBufferOffset:0];
     }
     x.xfDirty = true;
 }
@@ -1485,10 +1592,12 @@ void executeFrame(id<MTLCommandBuffer> cb, const uint8_t* cmds, size_t len) {
     if (g_optGpuStats) {
         g_statsAcc.terrainDraws += g_stats.terrainDraws; g_statsAcc.terrainQuads += g_stats.terrainQuads;
         g_statsAcc.arenaDraws += g_stats.arenaDraws; g_statsAcc.meshDraws += g_stats.meshDraws; g_statsAcc.passes += g_stats.passes;
+        g_statsAcc.terrainDrawn += g_stats.terrainDrawn; g_statsAcc.drawCalls += g_stats.drawCalls;
         if (++g_statsFrames == 600) {
             double n = g_statsFrames;
-            log("per frame: terrain draws %.0f (%.0fk quads), arena draws %.0f, mesh draws %.0f, passes %.1f",
-                g_statsAcc.terrainDraws / n, g_statsAcc.terrainQuads / n / 1000.0, g_statsAcc.arenaDraws / n,
+            log("per frame: terrain sections %.0f (%.0fk quads, %.0fk drawn in %.0f draws), arena draws %.0f, mesh draws %.0f, passes %.1f",
+                g_statsAcc.terrainDraws / n, g_statsAcc.terrainQuads / n / 1000.0, g_statsAcc.terrainDrawn / n / 1000.0,
+                g_statsAcc.drawCalls / n, g_statsAcc.arenaDraws / n,
                 g_statsAcc.meshDraws / n, g_statsAcc.passes / n);
             g_statsAcc = {};
             g_statsFrames = 0;

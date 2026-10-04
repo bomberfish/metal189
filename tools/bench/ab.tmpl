@@ -1,0 +1,54 @@
+sleep 3
+resourcepack Faithful Texture Pack 64x64 1.8.zip
+sleep 3
+fancy true
+world ref1 1234567
+waitWorld
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /gamerule doMobLoot false
+cmd /weather clear 100000
+cmd /time set 6000
+cmd /kill @e[type=!Player]
+nativeopt 8 1
+cmd /tp @p 64 78 -32 135 10
+sleep 15
+nativeopt {K} {OFF}
+sleep 1
+fps 4 off0
+nativeopt {K} {ON}
+sleep 1
+fps 4 on0
+nativeopt {K} {OFF}
+sleep 1
+fps 4 off1
+nativeopt {K} {ON}
+sleep 1
+fps 4 on1
+nativeopt {K} {OFF}
+sleep 1
+fps 4 off2
+nativeopt {K} {ON}
+sleep 1
+fps 4 on2
+cmd /tp @p 64 90 -32 45 20
+sleep 6
+nativeopt {K} {OFF}
+sleep 1
+fps 4 off0
+nativeopt {K} {ON}
+sleep 1
+fps 4 on0
+nativeopt {K} {OFF}
+sleep 1
+fps 4 off1
+nativeopt {K} {ON}
+sleep 1
+fps 4 on1
+nativeopt {K} {OFF}
+sleep 1
+fps 4 off2
+nativeopt {K} {ON}
+sleep 1
+fps 4 on2
+quit

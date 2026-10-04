@@ -20,6 +20,41 @@ static std::vector<PendingCopy> g_copies;
 static std::vector<PendingUpload> g_uploads;
 static std::vector<id> g_deferredReleases;
 
+// Section vertex buffers live in heaps so a draw can reach any of them through its GPU
+// address (the baseline terrain pass binds them once instead of per section).
+static std::vector<id<MTLHeap>> g_sectionHeaps;
+constexpr size_t kSectionHeapSize = 64u << 20;
+
+static id<MTLBuffer> newSectionBuffer(const void* data, size_t bytes) {
+    const MTLResourceOptions opts = MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked;
+    id<MTLBuffer> b = nil;
+    for (id<MTLHeap> h : g_sectionHeaps) {
+        if ([h maxAvailableSizeWithAlignment:256] < bytes) continue;
+        b = [h newBufferWithLength:bytes options:opts];
+        if (b) break;
+    }
+    if (!b) {
+        MTLHeapDescriptor* d = [MTLHeapDescriptor new];
+        d.storageMode = MTLStorageModeShared;
+        d.hazardTrackingMode = MTLHazardTrackingModeUntracked;
+        d.size = std::max(kSectionHeapSize, (bytes + 0xFFFF) & ~(size_t)0xFFFF);
+        id<MTLHeap> h = [device() newHeapWithDescriptor:d];
+        if (h) {
+            h.label = @"section vertices";
+            g_sectionHeaps.push_back(h);
+            b = [h newBufferWithLength:bytes options:opts];
+        }
+    }
+    if (!b) return [device() newBufferWithBytes:data length:bytes options:MTLResourceStorageModeShared];
+    memcpy(b.contents, data, bytes);
+    return b;
+}
+
+void sectionHeapsUse(id<MTLRenderCommandEncoder> enc) {
+    if (g_sectionHeaps.empty()) return;
+    [enc useHeaps:g_sectionHeaps.data() count:g_sectionHeaps.size() stages:MTLRenderStageVertex];
+}
+
 TexEntry* texture(int id) {
     auto it = g_textures.find(id);
     return it == g_textures.end() ? nullptr : &it->second;
@@ -354,8 +389,61 @@ void sectionUpload(int sid, int layer, const void* data, size_t bytes, uint32_t 
     if (s.layers[layer]) g_deferredReleases.push_back(s.layers[layer]);
     s.layers[layer] = nil;
     s.vertices[layer] = 0;
+    for (int g = 0; g < 8; g++) s.groupStart[layer][g] = 0;
     if (bytes == 0 || vertexCount == 0) return;
-    s.layers[layer] = [device() newBufferWithBytes:data length:bytes options:MTLResourceStorageModeShared];
+    uint32_t quads = vertexCount / 4;
+    size_t stride = bytes / vertexCount;
+    if (layer < 3 && vertexCount % 4 == 0 && stride == 28) {
+        // sort the quads by facing (stable: coplanar overlays keep their order)
+        static std::vector<uint8_t> group;
+        static std::vector<uint8_t> sorted;
+        group.resize(quads);
+        uint32_t count[FG_COUNT] = {};
+        float plane[FG_COUNT];
+        for (int g = 0; g < FG_COUNT; g++) plane[g] = (g == FG_PX || g == FG_PY || g == FG_PZ) ? 1e30f : -1e30f;
+        const uint8_t* src = (const uint8_t*)data;
+        for (uint32_t q = 0; q < quads; q++) {
+            const float* p0 = (const float*)(src + (size_t)q * 4 * 28);
+            const float* p1 = (const float*)(src + ((size_t)q * 4 + 1) * 28);
+            const float* p2 = (const float*)(src + ((size_t)q * 4 + 2) * 28);
+            float ax = p1[0] - p0[0], ay = p1[1] - p0[1], az = p1[2] - p0[2];
+            float bx = p2[0] - p1[0], by = p2[1] - p1[1], bz = p2[2] - p1[2];
+            float nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+            float len2 = nx * nx + ny * ny + nz * nz;
+            int g = FG_OTHER;
+            // GL's front faces wind counter-clockwise, so (p1 - p0) x (p2 - p1) is the outward normal
+            const float k = 0.9999f;
+            if (len2 > 0) {
+                if (nx * nx > k * len2) g = nx > 0 ? FG_PX : FG_NX;
+                else if (ny * ny > k * len2) g = ny > 0 ? FG_PY : FG_NY;
+                else if (nz * nz > k * len2) g = nz > 0 ? FG_PZ : FG_NZ;
+            }
+            if (g != FG_OTHER) {
+                int axis = (g == FG_PX || g == FG_NX) ? 0 : (g == FG_PY || g == FG_NY) ? 1 : 2;
+                bool pos = g == FG_PX || g == FG_PY || g == FG_PZ;
+                for (int v = 0; v < 4; v++) {
+                    float c = ((const float*)(src + ((size_t)q * 4 + v) * 28))[axis];
+                    plane[g] = pos ? std::min(plane[g], c) : std::max(plane[g], c);
+                }
+            }
+            group[q] = (uint8_t)g;
+            count[g]++;
+        }
+        uint32_t start[FG_COUNT + 1];
+        start[0] = 0;
+        for (int g = 0; g < FG_COUNT; g++) start[g + 1] = start[g] + count[g];
+        for (int g = 0; g <= FG_COUNT; g++) s.groupStart[layer][g] = start[g];
+        for (int g = 0; g < FG_COUNT; g++) s.plane[layer][g] = plane[g];
+        sorted.resize(bytes);
+        uint32_t at[FG_COUNT];
+        memcpy(at, start, sizeof at);
+        for (uint32_t q = 0; q < quads; q++) memcpy(&sorted[(size_t)at[group[q]]++ * 112], src + (size_t)q * 112, 112);
+        s.layers[layer] = newSectionBuffer(sorted.data(), bytes);
+    } else {
+        // one group: always drawn whole
+        for (int g = FG_OTHER + 1; g <= FG_COUNT; g++) s.groupStart[layer][g] = quads;
+        s.layers[layer] = newSectionBuffer(data, bytes);
+    }
     s.vertices[layer] = vertexCount;
 }
 

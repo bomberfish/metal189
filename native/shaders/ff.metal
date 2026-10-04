@@ -225,13 +225,44 @@ struct BlockVertex {
     packed_short2 lm;
 };
 
+// one per section draw, at the draw's base instance (frame_exec.mm TerrainDrawRecord)
+struct TerrainDraw {
+    device const BlockVertex* verts;
+    float4x4 mv;
+};
+
+// 64 quads of one section's draw record (frame_exec.mm drawTerrain): the layer's draw covers
+// meshlet m with quads [64m, 64m + 64); those past `count` are padding.
+struct TerrainMeshlet {
+    uint record, first, count, pad;
+};
+
+// The section vertex a virtual vertex id names, or false for padding.
+static bool terrainFetch(uint vid, device const TerrainDraw* draws, device const TerrainMeshlet* meshlets,
+                         thread BlockVertex& v, thread float4x4& mv) {
+    uint q = vid >> 2;
+    TerrainMeshlet m = meshlets[q >> 6];
+    uint local = q & 63u;
+    if (local >= m.count) return false;
+    device const TerrainDraw& d = draws[m.record];
+    v = d.verts[(m.first + local) * 4u + (vid & 3u)];
+    mv = d.mv;
+    return true;
+}
+
 vertex FFOut terrain_vertex(uint vid [[vertex_id]],
-                            device const BlockVertex* verts [[buffer(0)]],
                             constant FFUniforms& u [[buffer(2)]],
-                            constant float4x4& sectionMV [[buffer(3)]]) {
-    BlockVertex v = verts[vid];
-    float4 eye = sectionMV * float4(float3(v.pos), 1.0);
+                            device const TerrainDraw* draws [[buffer(3)]],
+                            device const TerrainMeshlet* meshlets [[buffer(4)]]) {
+    BlockVertex v;
+    float4x4 mv;
     FFOut o;
+    if (!terrainFetch(vid, draws, meshlets, v, mv)) {
+        o = {};
+        o.position = float4(0.0, 0.0, 0.0, 1.0);   // zero area: culled
+        return o;
+    }
+    float4 eye = mv * float4(float3(v.pos), 1.0);
     float4 clip = u.proj * eye;
     if (u.flags.x & FF_FLIP_Y) clip.y = -clip.y;
     clip.z = 0.5 * (clip.z + clip.w);
@@ -438,6 +469,74 @@ fragment FFFragOut ff_fragment(FFOut in [[stage_in]],
     FFFragOut o;
     if (fc_logicOp) o.color = logicOp(u.alpha.y, c, dst);
     else o.color = c;
+    return o;
+}
+
+// The common terrain case (every unit modulates, smooth shading, no logic op) with only
+// the varyings it needs: binning cost on a tiled GPU grows with each vertex's outputs.
+struct TerrainOut {
+    float4 position [[position]];
+    half4 color;
+    float2 uv;
+    half2 lm;
+    half fog;
+};
+
+vertex TerrainOut terrain_vertex_slim(uint vid [[vertex_id]],
+                                      constant FFUniforms& u [[buffer(2)]],
+                                      device const TerrainDraw* draws [[buffer(3)]],
+                                      device const TerrainMeshlet* meshlets [[buffer(4)]]) {
+    BlockVertex v;
+    float4x4 mv;
+    TerrainOut o;
+    if (!terrainFetch(vid, draws, meshlets, v, mv)) {
+        o = {};
+        o.position = float4(0.0, 0.0, 0.0, 1.0);   // zero area: culled
+        return o;
+    }
+    float4 eye = mv * float4(float3(v.pos), 1.0);
+    float4 clip = u.proj * eye;
+    if (u.flags.x & FF_FLIP_Y) clip.y = -clip.y;
+    clip.z = 0.5 * (clip.z + clip.w);
+    o.position = clip;
+    o.color = half4(v.color) * (1.0h / 255.0h);
+    float4 t0 = u.texMatrix0 * float4(float2(v.uv), 0.0, 1.0);
+    o.uv = t0.xy / t0.w;
+    float2 lm = float2(ushort2(v.lm) & ushort2(0xFF));
+    float4 tc1 = u.texMatrix1 * float4(lm, 0.0, 1.0);
+    o.lm = half2(tc1.xy / tc1.w);
+    uint f = u.flags.x;
+    float ff = 1.0;
+    if (f & FF_FOG) {
+        float dist = (f & FF_FOG_RADIAL) ? length(eye.xyz) : abs(eye.z);
+        uint mode = u.flags.z;
+        if (mode == 0) ff = (u.fogParams.y - dist) * u.fogParams.w;
+        else if (mode == 1) ff = exp(-u.fogParams.z * dist);
+        else { float dd = u.fogParams.z * dist; ff = exp(-dd * dd); }
+    }
+    o.fog = half(saturate(ff));
+    return o;
+}
+
+fragment FFFragOut terrain_fragment(TerrainOut in [[stage_in]],
+                                    constant FFUniforms& u [[buffer(2)]],
+                                    texture2d<float> tex0 [[texture(0)]],
+                                    texture2d<float> tex1 [[texture(1)]],
+                                    texture2d<float> tex2 [[texture(2)]],
+                                    sampler s0 [[sampler(0)]],
+                                    sampler s1 [[sampler(1)]],
+                                    sampler s2 [[sampler(2)]]) {
+    uint f = u.flags.x;
+    float4 c = float4(in.color);
+    if (f & FF_TEX0) c *= tex0.sample(s0, in.uv);
+    if (f & FF_TEX1) c *= tex1.sample(s1, float2(in.lm));
+    if (f & FF_TEX2) c *= tex2.sample(s2, float2(0.0));
+    if (f & FF_FOG) c.rgb = mix(u.fogColor.rgb, c.rgb, float(in.fog));
+    if (fc_alphaTest) {
+        if (!alphaPass(u.flags.w, c.a, u.alpha.x)) discard_fragment();
+    }
+    FFFragOut o;
+    o.color = c;
     return o;
 }
 

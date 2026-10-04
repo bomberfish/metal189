@@ -18,6 +18,9 @@ struct FrameResources {
     std::vector<id<MTLBuffer>> retired;      // buffers replaced mid-frame, kept until reuse
     id<MTLBuffer> uniforms = nil;
     size_t uniformCapacity = 0, uniformOffset = 0;
+    // Per-section draw records for the terrain pass (vertex address + modelview).
+    id<MTLBuffer> terrainDraws = nil;
+    size_t terrainCapacity = 0, terrainOffset = 0;
     // Texture upload staging.
     std::vector<id<MTLBuffer>> stagingChunks, stagingFree, staging;
     id<MTLBuffer> stagingCur = nil;

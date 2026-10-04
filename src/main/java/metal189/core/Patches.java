@@ -40,6 +40,31 @@ public final class Patches {
     public static void register(String className, ClassPatch patch) { PATCHES.put(className, patch); }
 
     static {
+        // Forge 1.8.9 bug: getSkyBlendColour caches its biome-blended sky colour by the
+        // camera's X and Z but saves Y as the Z, so the cache never hits and every sky-colour
+        // query (several a frame) re-blends up to (2r+1)^2 biomes. Save the Z.
+        register("net.minecraftforge.client.ForgeHooksClient", new ClassPatch() {
+            public boolean apply(ClassNode cn) {
+                boolean changed = false;
+                for (MethodNode m : cn.methods) {
+                    if (!"getSkyBlendColour".equals(m.name)) continue;
+                    for (AbstractInsnNode n = m.instructions.getFirst(); n != null; n = n.getNext()) {
+                        if (n.getOpcode() != Opcodes.PUTSTATIC || !"skyZ".equals(((FieldInsnNode) n).name)) continue;
+                        AbstractInsnNode prev = n.getPrevious();
+                        if (!(prev instanceof org.objectweb.asm.tree.MethodInsnNode)) continue;
+                        org.objectweb.asm.tree.MethodInsnNode call = (org.objectweb.asm.tree.MethodInsnNode) prev;
+                        if ("getY".equals(call.name)) { call.name = "getZ"; changed = true; }
+                        else if ("func_177956_o".equals(call.name)) { call.name = "func_177952_p"; changed = true; }
+                    }
+                }
+                return changed;
+            }
+
+            public boolean needsFrames() { return false; }
+        });
+    }
+
+    static {
         // Tessellator output goes straight to the engine.
         register("net.minecraft.client.renderer.WorldVertexBufferUploader",
             Asm.replaceBody("draw", "func_181679_a", "(Lnet/minecraft/client/renderer/WorldRenderer;)V",

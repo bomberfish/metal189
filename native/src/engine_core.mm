@@ -63,6 +63,7 @@ void FrameResources::reset() {
     if (arenas.size() > 1) arenas.resize(1);
     indexOffset = 0;
     uniformOffset = 0;
+    terrainOffset = 0;
     retired.clear();
     for (id<MTLBuffer> b : stagingChunks) stagingFree.push_back(b);
     stagingChunks.clear();
@@ -102,6 +103,7 @@ void arenaGrow(size_t minBytes, int64_t* info) {
 
 bool g_optPresent = true;
 bool g_optGpuStats = false;
+bool g_optSerialGpu = false;
 static bool g_vsync = false;
 
 enum ScreenState { SS_FREE, SS_WRITING, SS_READY, SS_PRESENTING };
@@ -418,10 +420,13 @@ void endFrame(const uint8_t* cmds, size_t len) {
             double gpu = (b.GPUEndTime - b.GPUStartTime) * 1000.0;
             static double acc = 0; static int n = 0;
             acc += gpu; n++;
-            if (n == 600) { if (g_optGpuStats) log("gpu frame time avg %.3f ms", acc / n); acc = 0; n = 0; }
+            int every = g_optSerialGpu ? 100 : 600;
+            if (n >= every) { if (g_optGpuStats || g_optSerialGpu) log("gpu frame time avg %.3f ms", acc / n); acc = 0; n = 0; }
             dispatch_semaphore_signal(sem);
         }];
         [cb commit];
+        // benchmarking: one frame on the GPU at a time, so its GPU time is its own
+        if (g_optSerialGpu) [cb waitUntilCompleted];
         e.lastCommitted = cb;
         releaseDeferred();
     }

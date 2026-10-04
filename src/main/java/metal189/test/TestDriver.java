@@ -339,6 +339,11 @@ public final class TestDriver {
                 // advdebug N : advanced-pipeline debug view (-Dmetal189.advDebug), 0 off
                 Native.setOption(4, Integer.parseInt(a[1]));
                 return true;
+            case "fancy":
+                // fancy true|false : fancy graphics (leaves, clouds) and reload the renderers
+                mc.gameSettings.fancyGraphics = Boolean.parseBoolean(a[1]);
+                mc.renderGlobal.loadRenderers();
+                return true;
             case "toggle":
                 // same path as the toggle keybind (saves config/metal189.properties)
                 metal189.world.Pipeline.toggle();

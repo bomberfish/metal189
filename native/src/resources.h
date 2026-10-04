@@ -41,18 +41,28 @@ void meshDelete(int id);
 struct Section {
     id<MTLBuffer> layers[4] = {nil, nil, nil, nil};
     uint32_t vertices[4] = {0, 0, 0, 0};
+    // Solid layers are stored by facing (kFaceGroups order): quads [groupStart[l][g], groupStart[l][g+1])
+    // face group g, all on or past `plane[l][g]` along its axis (towards its normal: the min for
+    // a + facing, the max for a - one). The translucent layer keeps its own order (one group).
+    uint32_t groupStart[4][8] = {};
+    float plane[4][7] = {};
     int32_t ox = 0, oy = 0, oz = 0;   // world block coordinates of the section origin
     uint64_t version = 0;             // changes when its solid layers or position do (globally unique)
     uint32_t solid[128] = {};         // opaque cubes: bit (y << 8) | (z << 4) | x (chunk builds report them)
     bool emits = false;               // some block in it gives light
     bool tinted = false;              // translucent blocks other than water (stained glass, ice, slime, portals)
 };
+// Face groups in storage order: -Y, -X, -Z, +Y, other, +Z, +X (the faces a camera above the
+// terrain sees are mostly contiguous). Group 4 holds quads that are not axis-aligned.
+enum FaceGroup { FG_NY = 0, FG_NX, FG_NZ, FG_PY, FG_OTHER, FG_PZ, FG_PX, FG_COUNT };
 Section* section(int id);
 const std::unordered_map<int, Section>& allSections();
 const Section* sectionAt(int sx, int sy, int sz);   // by position (blocks / 16)
 void sectionUpload(int id, int layer, const void* data, size_t bytes, uint32_t vertexCount, int ox, int oy, int oz);
 void sectionDelete(int id);
 void sectionSolid(int id, const uint32_t* bits, bool emits, bool tinted);
+// Makes every section vertex buffer resident for draws that reach them by GPU address.
+void sectionHeapsUse(id<MTLRenderCommandEncoder> enc);
 
 StagingAlloc stagingAlloc(size_t bytes);
 void encodePendingResourceWork(id<MTLCommandBuffer> cb);
