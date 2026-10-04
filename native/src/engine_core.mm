@@ -184,6 +184,8 @@ static void allocScreen(int w, int h) {
     g_pres.lastFinished = -1;
 }
 
+static uint64_t g_waitNs = 0;   // this frame's time waiting for a free screen slot
+
 // Picks the ring slot for the open frame's default framebuffer.
 void ensureScreenTargets() {
     Engine& e = engine();
@@ -208,7 +210,11 @@ void ensureScreenTargets() {
         }
         for (int i = 0; i < kScreenRing && slot < 0; i++) if (g_pres.state[i] == SS_FREE) slot = i;
         for (int i = 0; i < kScreenRing && slot < 0; i++) if (g_pres.state[i] == SS_READY && i != newestSlot) slot = i;
-        if (slot < 0) g_pres.cv.wait(lk);
+        if (slot < 0) {
+            uint64_t w0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+            g_pres.cv.wait(lk);
+            g_waitNs += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - w0;   // GPU backpressure, not encoding
+        }
     }
     g_pres.state[slot] = SS_WRITING;
     g_pres.current = slot;
@@ -301,9 +307,26 @@ void endFrame(const uint8_t* cmds, size_t len) {
     Engine& e = engine();
     if (!e.frameOpen) beginFrame();
     @autoreleasepool {
+        uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        g_waitNs = 0;
         id<MTLCommandBuffer> cb = encode(cmds, len);
         cb.label = @"frame";
         present(cb);
+        if (g_optGpuStats) {
+            // CPU time the engine spends turning the frame's commands into Metal work
+            static double cpuAcc = 0, waitAcc = 0, bytesAcc = 0;
+            static int cpuN = 0;
+            double total = (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) * 1e-6, wait = g_waitNs * 1e-6;
+            cpuAcc += total - wait;
+            waitAcc += wait;
+            bytesAcc += (double)len;
+            if (++cpuN == 600) {
+                log("cpu encode time avg %.3f ms, waiting for the GPU %.3f ms (%.0f KB of commands per frame)", cpuAcc / cpuN,
+                    waitAcc / cpuN, bytesAcc / cpuN / 1024.0);
+                cpuAcc = waitAcc = bytesAcc = 0;
+                cpuN = 0;
+            }
+        }
         dispatch_semaphore_t sem = e.inflight;
         [cb addCompletedHandler:^(id<MTLCommandBuffer> b) {
             if (b.status == MTLCommandBufferStatusError) log("command buffer error: %s", b.error.localizedDescription.UTF8String);

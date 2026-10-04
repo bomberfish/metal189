@@ -317,6 +317,10 @@ public final class TestDriver {
                 // compat on : enable the simple-GL mod test scene (m189compat.CompatScene)
                 if ("on".equals(a[1])) m189compat.CompatScene.enable();
                 return true;
+            case "nativeopt":
+                // nativeopt KEY VALUE : engine option (Native.setOption), e.g. 6 = GPU-driven terrain
+                Native.setOption(Integer.parseInt(a[1]), Integer.parseInt(a[2]));
+                return true;
             case "advdebug":
                 // advdebug N : advanced-pipeline debug view (-Dmetal189.advDebug), 0 off
                 Native.setOption(4, Integer.parseInt(a[1]));
