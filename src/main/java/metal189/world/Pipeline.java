@@ -160,6 +160,9 @@ public final class Pipeline {
         t[62] = 1 << Config.globalIlluminationQuality;
         t[63] = Config.glassShadows ? 1 : 0;
         t[64] = Config.colouredBlockLight ? 1 : 0;
+        // MetalFX upscaling: mode, and the share of the output resolution the scene renders at
+        t[65] = Config.upscaling;
+        t[66] = Config.renderScale / 100f;
         for (int i = 0; i < TUNING; i++) metal189.engine.Mem.putFloat(tuning + i * 4L, t[i]);
         Native.advSetTuning(tuning, TUNING);
     }

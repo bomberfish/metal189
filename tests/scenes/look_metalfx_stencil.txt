@@ -1,0 +1,33 @@
+# MetalFX upscaling with a stencil framebuffer (as with the user's mods): hand, held item,
+# particles, rain and mobs drawn after the world must sit right against the upscaled scene
+sleep 3
+world compatfx 11 flat
+waitWorld
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /time set 6000
+cmd /weather rain
+cmd /tp @p 0.5 4 0.5 180 15
+sleep 3
+cmd /kill @e[type=!Player]
+cmd /fill -6 4 -12 6 8 -2 air
+cmd /fill -6 4 -9 6 6 -9 stonebrick
+cmd /setblock 0 4 -6 torch 5
+cmd /summon Pig 1.5 4 -11 {NoAI:1,Rotation:[90f,0f]}
+cmd /summon Zombie -2.5 4 -5 {NoAI:1,Rotation:[0f,0f]}
+cmd /replaceitem entity @p slot.hotbar.0 diamond_sword
+slot 0
+compat on
+config upscaling 0
+sleep 5
+capture CAPTURE_A
+config upscaling 2
+config renderScale 50
+sleep 5
+capture CAPTURE_B
+config upscaling 1
+sleep 3
+capture CAPTURE_C
+config upscaling 0
+config renderScale 67
+quit

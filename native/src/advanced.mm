@@ -9,6 +9,7 @@
 #import "advanced.h"
 #import "raytrace.h"
 #import "voxels.h"
+#import "upscale.h"
 #import "gpu_profiler.h"
 #import "resources.h"
 #include <cmath>
@@ -75,9 +76,12 @@ id<MTLBuffer> advancedMaterials() { return g_materials; }
 namespace {
 
 struct Targets {
-    int w = 0, h = 0;
+    int w = 0, h = 0;      // render resolution
     id<MTLTexture> albedo, normal, light, linZ, spec, hdr, sceneColor, sceneDepth, taa[2], vol, ao[2];
     id<MTLTexture> giSample, giHist[2], giZ[2], giBlur[2];
+    id<MTLTexture> renderDepth, motion;   // upscaling: the scene's own depth, motion vectors
+    int ow = 0, oh = 0;    // output resolution (Minecraft's framebuffer)
+    id<MTLTexture> up[2];  // upscaled HDR (this frame's, last frame's)
     std::vector<id<MTLTexture>> bloom;
 };
 
@@ -111,6 +115,12 @@ struct State {
     int prevDim = 0;
     bool historyValid = false;
     int taaIndex = 0;
+    // MetalFX upscaling
+    int upIndex = 0;
+    bool upHistory = false;
+    int upMode = 0;
+    id<MTLRenderPipelineState> motionPso, depthUpPso[2];   // depth refill: Depth32Float, Depth32Float_Stencil8
+    id<MTLDepthStencilState> depthAlwaysWrite;
     id<MTLTexture> skyLut;
     id<MTLDepthStencilState> depthWrite, depthTestNoWrite, depthAlways;
     id<MTLSamplerState> shadowCmp, linearClamp, pointClamp;
@@ -281,6 +291,26 @@ bool initState() {
         S.giTracePso = pso(gd);
     }
     {
+        // MetalFX upscaling: motion vectors; Minecraft's depth refilled at output resolution
+        MTLRenderPipelineDescriptor* md = [MTLRenderPipelineDescriptor new];
+        md.vertexFunction = fn(@"fullscreen_vertex");
+        md.fragmentFunction = fn(@"motion_fragment");
+        md.colorAttachments[0].pixelFormat = MTLPixelFormatRG16Float;
+        S.motionPso = pso(md);
+        for (int i = 0; i < 2; i++) {
+            MTLRenderPipelineDescriptor* dd = [MTLRenderPipelineDescriptor new];
+            dd.vertexFunction = fn(@"fullscreen_vertex");
+            dd.fragmentFunction = fn(@"depth_upsample_fragment");
+            dd.depthAttachmentPixelFormat = i == 0 ? MTLPixelFormatDepth32Float : MTLPixelFormatDepth32Float_Stencil8;
+            if (i == 1) dd.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+            S.depthUpPso[i] = pso(dd);
+        }
+        MTLDepthStencilDescriptor* ad = [MTLDepthStencilDescriptor new];
+        ad.depthCompareFunction = MTLCompareFunctionAlways;
+        ad.depthWriteEnabled = YES;
+        S.depthAlwaysWrite = [device() newDepthStencilStateWithDescriptor:ad];
+    }
+    {
         // GI denoising, and world-space GI (no ray tracing needed)
         MTLRenderPipelineDescriptor* gd = [MTLRenderPipelineDescriptor new];
         gd.vertexFunction = fn(@"fullscreen_vertex");
@@ -430,6 +460,24 @@ void ensureTargets(int w, int h) {
     S.historyValid = false;
     S.t.sceneColor = rt(MTLPixelFormatRGBA16Float, w, h, @"sceneColor");
     S.t.sceneDepth = rt(MTLPixelFormatDepth32Float, w, h, @"sceneDepth");
+    S.t.renderDepth = rt(MTLPixelFormatDepth32Float, w, h, @"renderDepth");
+    S.t.motion = rt(MTLPixelFormatRG16Float, w, h, @"motion");
+    S.upHistory = false;
+}
+
+// Output-resolution targets: bloom, and the upscaled image when upscaling.
+void ensureOutputTargets(int w, int h) {
+    if (S.t.ow == w && S.t.oh == h && S.t.up[0]) return;
+    S.t.ow = w;
+    S.t.oh = h;
+    for (int i = 0; i < 2; i++) {
+        MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:w height:h mipmapped:NO];
+        d.storageMode = MTLStorageModePrivate;
+        d.usage = upscaleOutputUsage();
+        S.t.up[i] = [device() newTextureWithDescriptor:d];
+        S.t.up[i].label = @"upscaled";
+    }
+    S.upHistory = false;
     S.t.bloom.clear();
     int bw = w, bh = h;
     for (int i = 0; i < 6 && bw > 8 && bh > 8; i++) {
@@ -555,10 +603,33 @@ simd_float4x4 shadowMatrix(const EnvCmd& env, simd_float3 sunWorld, float radius
 
 const AdvLitContext& advancedLitContext() { return S.lit; }
 
-void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> color, id<MTLTexture> depth) {
-    if (!color || !depth || !initState() || !g_materials || !w.hasEnv) return;
-    int W = (int)color.width, H = (int)color.height;
+void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> color, id<MTLTexture> outDepth) {
+    if (!color || !outDepth || !initState() || !g_materials || !w.hasEnv) return;
+    // MetalFX upscaling: the scene renders at a fraction of the output resolution (W x H),
+    // MetalFX brings it to the output (OW x OH), and the post-processing runs there
+    const int OW = (int)color.width, OH = (int)color.height;
+    int upMode = (int)(g_tuning[65] + 0.5f);
+    if (upMode != UPSCALE_OFF && !upscaleSupported(upMode)) upMode = UPSCALE_OFF;
+    int W = OW, H = OH;
+    if (upMode != UPSCALE_OFF) {
+        float lo, hi;
+        upscaleScaleRange(upMode, lo, hi);
+        float ratio = std::clamp(1.0f / std::max(g_tuning[66], 0.01f), std::max(lo, 1.0f), hi);
+        W = std::max(64, (int)lroundf(OW / ratio));
+        H = std::max(64, (int)lroundf(OH / ratio));
+        if (W >= OW && H >= OH && upMode == UPSCALE_SPATIAL) upMode = UPSCALE_OFF;   // nothing to scale
+    }
+    if (upMode != S.upMode) {
+        S.upMode = upMode;
+        S.upHistory = false;
+        if (upMode == UPSCALE_OFF) upscaleRelease();
+    }
+    const bool upscaling = upMode != UPSCALE_OFF, fxTemporal = upMode == UPSCALE_TEMPORAL;
     ensureTargets(W, H);
+    ensureOutputTargets(OW, OH);
+    // the scene's depth: its own at render resolution when upscaling (Minecraft's framebuffer
+    // depth is refilled from it at the end, for what vanilla draws after)
+    id<MTLTexture> depth = upscaling ? S.t.renderDepth : outDepth;
     const EnvCmd& env = w.env;
     S.frame++;
 
@@ -641,16 +712,26 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         }
     }
 
-    // TAA: Halton(2,3) sub-pixel jitter; history is reprojected with the camera motion
-    bool taaOn = (features & ADV_TAA) && S.taaPso;
-    if (!taaOn) features &= ~ADV_TAA;
+    // TAA: Halton(2,3) sub-pixel jitter; history is reprojected with the camera motion. MetalFX
+    // temporal upscaling takes TAA's place (it anti-aliases as it upscales) and wants more jitter
+    // phases the more it upscales
+    bool taaOn = (features & ADV_TAA) && S.taaPso && !fxTemporal;
+    if (!taaOn && !fxTemporal) features &= ~ADV_TAA;
+    float jitterPx[2] = {0, 0};
     {
-        static const float h2[8] = {0.5f, 0.25f, 0.75f, 0.125f, 0.625f, 0.375f, 0.875f, 0.0625f};
-        static const float h3[8] = {1 / 3.0f, 2 / 3.0f, 1 / 9.0f, 4 / 9.0f, 7 / 9.0f, 2 / 9.0f, 5 / 9.0f, 8 / 9.0f};
-        int k = (int)(S.frame % 8);
-        if (taaOn) fr.jitter = simd_make_float4((h2[k] - 0.5f) * 2.0f / W, (h3[k] - 0.5f) * 2.0f / H, 0, 0);
+        auto halton = [](uint32_t i, uint32_t b) {
+            float f = 1.0f, r = 0.0f;
+            for (; i > 0; i /= b) { f /= (float)b; r += f * (float)(i % b); }
+            return r;
+        };
+        int phases = fxTemporal ? std::clamp((int)lroundf(8.0f * (float)(OW * OH) / (float)(W * H)), 8, 64) : 8;
+        uint32_t k = (uint32_t)(S.frame % phases) + 1;
+        jitterPx[0] = halton(k, 2) - 0.5f;
+        jitterPx[1] = halton(k, 3) - 0.5f;
+        if (taaOn || fxTemporal) fr.jitter = simd_make_float4(jitterPx[0] * 2.0f / W, jitterPx[1] * 2.0f / H, 0, 0);
         double dx = camX - S.prevCam[0], dy = camY - S.prevCam[1], dz = camZ - S.prevCam[2];
-        bool valid = taaOn && S.historyValid && S.prevDim == env.dimension && fabs(dx) + fabs(dy) + fabs(dz) < 16.0;
+        bool cut = S.prevDim != env.dimension || fabs(dx) + fabs(dy) + fabs(dz) >= 16.0;
+        bool valid = (taaOn ? S.historyValid : fxTemporal && S.upHistory) && !cut;
         bool giOn = ((features & ADV_RT_GI) && S.giTracePso && S.giTemporalPso && S.giBlurPso) || (features & ADV_WSGI);
         fr.post.w = giOn && S.giHistory && S.prevDim == env.dimension && fabs(dx) + fabs(dy) + fabs(dz) < 16.0 ? 1.0f : 0.0f;
         S.giHistory = giOn;
@@ -660,6 +741,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         S.prevCam[0] = camX; S.prevCam[1] = camY; S.prevCam[2] = camZ;
         S.prevDim = env.dimension;
         S.historyValid = taaOn;
+        if (cut) S.upHistory = false;
     }
     // entities (and the first-person player) for ray-traced reflections, AO and GI
     RtEntities ents;
@@ -1171,7 +1253,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [e setFragmentTexture:S.cloudNoise atIndex:9];
         [e setFragmentTexture:S.t.spec atIndex:10];
         // last frame's resolved image (screen-space reflections on smooth surfaces)
-        [e setFragmentTexture:taaOn ? S.t.taa[S.taaIndex ^ 1] : S.t.hdr atIndex:11];
+        [e setFragmentTexture:fxTemporal ? S.t.up[S.upIndex ^ 1] : taaOn ? S.t.taa[S.taaIndex ^ 1] : S.t.hdr atIndex:11];
         [e setFragmentTexture:(features & (ADV_RT_AO | ADV_SSAO)) ? S.t.ao[0] : S.t.light atIndex:12];
         [e setFragmentTexture:(features & (ADV_RT_GI | ADV_WSGI)) ? S.t.giBlur[1] : S.t.light atIndex:13];
         [e setFragmentTexture:(features & ADV_WATER_SHADOW) ? S.waterShadow : depth atIndex:14];
@@ -1370,6 +1452,40 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         post = out;
     }
 
+    // ---- MetalFX upscaling to the output resolution: spatial (after TAA), or temporal (in
+    // TAA's place: it anti-aliases the jittered scene as it upscales) ----
+    if (upscaling) {
+        UpscaleFrame uf;
+        uf.mode = upMode;
+        uf.inW = W; uf.inH = H; uf.outW = OW; uf.outH = OH;
+        uf.output = S.t.up[S.upIndex];
+        uf.color = post;
+        if (fxTemporal && S.motionPso) {
+            MTLRenderPassDescriptor* mp = [MTLRenderPassDescriptor renderPassDescriptor];
+            mp.colorAttachments[0].texture = S.t.motion;
+            mp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+            mp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            profRender(mp, "motion vectors", true);
+            id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:mp];
+            e.label = @"motion vectors";
+            [e setRenderPipelineState:S.motionPso];
+            [e setFragmentBytes:&fr length:sizeof fr atIndex:1];
+            [e setFragmentTexture:depth atIndex:0];
+            [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            [e endEncoding];
+            uf.depth = depth;
+            uf.motion = S.t.motion;
+            uf.jitterX = -jitterPx[0];
+            uf.jitterY = -jitterPx[1];
+            uf.reset = !S.upHistory || fr.taa.w < 0.5f;
+        }
+        if (upscaleEncode(cb, uf)) {
+            post = S.t.up[S.upIndex];
+            S.upIndex ^= 1;
+            S.upHistory = true;
+        }
+    }
+
     // ---- auto exposure (GPU-side adaptation, read by the tonemap pass) ----
     if (features & ADV_AUTOEXP) {
         if (g_optGpuStats && (S.frame % 300) == 0) {
@@ -1443,9 +1559,12 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         [e setFragmentSamplerState:S.linearClamp atIndex:0];
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [e endEncoding];
-        // remember this frame's lighting for the replayed hand/particle/weather draws
+        // remember this frame's lighting for the replayed hand/particle/weather draws (drawn
+        // at the output resolution, unjittered)
         S.lit.valid = true;
         S.lit.frame = fr;
+        S.lit.frame.screen = simd_make_float4(OW, OH, 1.0f / OW, 1.0f / OH);
+        S.lit.frame.jitter = simd_make_float4(0, 0, 0, 0);
         if (!S.dummyDepth) {
             MTLTextureDescriptor* dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
                                                                                           width:1 height:1 mipmapped:NO];
@@ -1458,6 +1577,32 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         S.lit.exposure = S.exposureState;
         S.lit.shadowCmp = S.shadowCmp;
         S.lit.linear = S.linearClamp;
+    }
+
+    // ---- Minecraft's depth at output resolution, from the scene's (upscaling) ----
+    if (upscaling) {
+        bool stencil = outDepth.pixelFormat == MTLPixelFormatDepth32Float_Stencil8;
+        id<MTLRenderPipelineState> p = S.depthUpPso[stencil ? 1 : 0];
+        if (p && (stencil || outDepth.pixelFormat == MTLPixelFormatDepth32Float)) {
+            MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.depthAttachment.texture = outDepth;
+            rp.depthAttachment.loadAction = MTLLoadActionDontCare;
+            rp.depthAttachment.storeAction = MTLStoreActionStore;
+            if (stencil) {
+                rp.stencilAttachment.texture = outDepth;
+                rp.stencilAttachment.loadAction = MTLLoadActionClear;
+                rp.stencilAttachment.clearStencil = 0;
+                rp.stencilAttachment.storeAction = MTLStoreActionStore;
+            }
+            profRender(rp, "depth refill", true);
+            id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+            e.label = @"depth refill";
+            [e setRenderPipelineState:p];
+            [e setDepthStencilState:S.depthAlwaysWrite];
+            [e setFragmentTexture:depth atIndex:0];
+            [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            [e endEncoding];
+        }
     }
 }
 

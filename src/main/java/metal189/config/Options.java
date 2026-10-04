@@ -20,7 +20,7 @@ public final class Options {
     public static final int NEEDS_SHADERS = 1, NEEDS_RT = 2;
 
     /** Settings pages after the main page, in menu order. */
-    public static final String[] PAGES = {"lighting", "materials", "water", "sky", "post", "rt", "input"};
+    public static final String[] PAGES = {"lighting", "materials", "water", "sky", "post", "rt", "metalfx", "input"};
 
     public static final class Opt {
         public final String key, page;
@@ -277,6 +277,9 @@ public final class Options {
         slider("post", "sharpening", S, 0, 300, 10, "%");
         slider("post", "saturation", S, 0, 200, 5, "%");
         slider("post", "contrast", S, 50, 150, 5, "%");
+
+        named("metalfx", "upscaling", S, 3);
+        slider("metalfx", "renderScale", S, 33, 100, 1, "%");
 
         toggle("rt", "rtShadows", RT);
         toggle("rt", "rtReflections", RT);

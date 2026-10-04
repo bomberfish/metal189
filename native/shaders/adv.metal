@@ -2873,6 +2873,35 @@ static float3 sampleCatmullRom(texture2d<float> t, sampler s, float2 uv, float2 
     return max(r / wsum, 0.0);
 }
 
+// Motion vectors for MetalFX temporal upscaling: where each pixel's surface was last frame,
+// in pixels (camera motion; the sky by direction only), without this frame's jitter (MetalFX
+// takes the jitter on its own).
+fragment float4 motion_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
+                                depth2d<float> depth [[texture(0)]]) {
+    float2 fc = in.position.xy;
+    float d = depth.read(uint2(fc));
+    float3 eye = eyeFromDepth(fr, fc, d >= 1.0 ? 0.9999999 : d);
+    float3 rel = (fr.invView * float4(eye, 1.0)).xyz;
+    float3 prevRel = d >= 1.0 ? normalize(rel) * 1e5 : rel + fr.taa.xyz;
+    float4 pc = fr.prevViewProj * float4(prevRel, 1.0);
+    if (pc.w <= 0.0) return float4(0.0);
+    float2 cur = (fc * fr.screen.zw * 2.0 - 1.0) - fr.jitter.xy;
+    return float4((pc.xy / pc.w - cur) * 0.5 * fr.screen.xy, 0.0, 0.0);
+}
+
+// Minecraft's framebuffer depth from the scene's render-resolution depth (upscaling), for the
+// hand, particles and weather vanilla draws afterwards.
+struct DepthOut {
+    float depth [[depth(any)]];
+};
+
+fragment DepthOut depth_upsample_fragment(FullscreenOut in [[stage_in]], depth2d<float> src [[texture(0)]]) {
+    constexpr sampler pt(filter::nearest, address::clamp_to_edge);
+    DepthOut o;
+    o.depth = src.sample(pt, in.uv);
+    return o;
+}
+
 fragment float4 taa_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
                              texture2d<float> cur [[texture(0)]], texture2d<float> hist [[texture(1)]],
                              depth2d<float> depth [[texture(2)]], sampler lin [[sampler(0)]]) {
@@ -3018,14 +3047,15 @@ fragment float4 tonemap_fragment(FullscreenOut in [[stage_in]], constant AdvFram
     float3 c;
     if (wobble) {
         float t = fr.params.x;
-        float2 o = float2(sin(in.uv.y * 23.0 + t * 1.9), cos(in.uv.x * 19.0 + t * 1.6)) * fr.tune[4].y * 1.5 * fr.screen.zw;
+        float2 o = float2(sin(in.uv.y * 23.0 + t * 1.9), cos(in.uv.x * 19.0 + t * 1.6)) * fr.tune[4].y * 1.5 /
+                   float2(hdr.get_width(), hdr.get_height());
         c = aces((hdr.sample(s, in.uv + o).rgb + b) * exposure);
     } else {
         c = aces((hdr.read(uint2(px)).rgb + b) * exposure);
     }
     if ((fr.flags.x & ADV_TAA) && !wobble) {
         // contrast-adaptive sharpening (after AMD CAS) to restore texture detail TAA softens
-        int2 mx = int2(fr.screen.xy) - 1;
+        int2 mx = int2(hdr.get_width(), hdr.get_height()) - 1;   // the output resolution (fr.screen is the scene's when upscaling)
         float3 n = aces((hdr.read(uint2(clamp(px + int2(0, -1), int2(0), mx))).rgb + b) * exposure);
         float3 w_ = aces((hdr.read(uint2(clamp(px + int2(-1, 0), int2(0), mx))).rgb + b) * exposure);
         float3 e = aces((hdr.read(uint2(clamp(px + int2(1, 0), int2(0), mx))).rgb + b) * exposure);

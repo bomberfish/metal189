@@ -1,0 +1,38 @@
+# MetalFX upscaling at 67% render scale: off (A), spatial (B), temporal (C), temporal at 50% (D);
+# the forest view, then a close-up of edges (E off, F temporal), turning (G temporal, H off)
+sleep 3
+world ref1 1234567
+waitWorld
+cmd /gamerule doDaylightCycle false
+cmd /weather clear 100000
+cmd /time set 6000
+config upscaling 0
+config renderScale 67
+cmd /tp @p 64 78 -32 135 10
+sleep 15
+capture CAPTURE_A
+config upscaling 1
+sleep 3
+capture CAPTURE_B
+config upscaling 2
+sleep 3
+capture CAPTURE_C
+config renderScale 50
+sleep 3
+capture CAPTURE_D
+config renderScale 67
+config upscaling 0
+cmd /tp @p 78 67 -199 160 14
+sleep 6
+capture CAPTURE_E
+config upscaling 2
+sleep 3
+capture CAPTURE_F
+spin 1.5 600
+sleep 1
+capture CAPTURE_G
+config upscaling 0
+spin 1.5 600
+sleep 1
+capture CAPTURE_H
+quit
