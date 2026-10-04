@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "metal189"
-version = "0.1.0"
+version = "0.1.1-pre"
 
 java {
     toolchain.languageVersion.set(JavaLanguageVersion.of(8))
