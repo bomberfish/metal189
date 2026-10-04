@@ -80,6 +80,7 @@ struct Targets {
     id<MTLTexture> albedo, normal, light, linZ, spec, hdr, sceneColor, sceneDepth, taa[2], vol, ao[2];
     id<MTLTexture> giSample, giHist[2], giZ[2], giBlur[2];
     id<MTLTexture> renderDepth, motion;   // upscaling: the scene's own depth, motion vectors
+    id<MTLTexture> guide[5];              // denoised upscaling: diffuse, specular, normal, roughness, mask
     int ow = 0, oh = 0;    // output resolution (Minecraft's framebuffer)
     id<MTLTexture> up[2];  // upscaled HDR (this frame's, last frame's)
     std::vector<id<MTLTexture>> bloom;
@@ -120,6 +121,7 @@ struct State {
     bool upHistory = false;
     int upMode = 0;
     id<MTLRenderPipelineState> motionPso, depthUpPso[2];   // depth refill: Depth32Float, Depth32Float_Stencil8
+    id<MTLRenderPipelineState> guidesPso;                  // the denoiser's guides
     id<MTLDepthStencilState> depthAlwaysWrite;
     id<MTLTexture> skyLut;
     id<MTLDepthStencilState> depthWrite, depthTestNoWrite, depthAlways;
@@ -297,6 +299,13 @@ bool initState() {
         md.fragmentFunction = fn(@"motion_fragment");
         md.colorAttachments[0].pixelFormat = MTLPixelFormatRG16Float;
         S.motionPso = pso(md);
+        MTLRenderPipelineDescriptor* gd = [MTLRenderPipelineDescriptor new];
+        gd.vertexFunction = fn(@"fullscreen_vertex");
+        gd.fragmentFunction = fn(@"fx_guides_fragment");
+        const MTLPixelFormat gf[5] = {MTLPixelFormatRGBA8Unorm, MTLPixelFormatRGBA8Unorm, MTLPixelFormatRGBA16Float,
+                                      MTLPixelFormatR8Unorm, MTLPixelFormatR8Unorm};
+        for (int i = 0; i < 5; i++) gd.colorAttachments[i].pixelFormat = gf[i];
+        S.guidesPso = pso(gd);
         for (int i = 0; i < 2; i++) {
             MTLRenderPipelineDescriptor* dd = [MTLRenderPipelineDescriptor new];
             dd.vertexFunction = fn(@"fullscreen_vertex");
@@ -462,6 +471,7 @@ void ensureTargets(int w, int h) {
     S.t.sceneDepth = rt(MTLPixelFormatDepth32Float, w, h, @"sceneDepth");
     S.t.renderDepth = rt(MTLPixelFormatDepth32Float, w, h, @"renderDepth");
     S.t.motion = rt(MTLPixelFormatRG16Float, w, h, @"motion");
+    for (int i = 0; i < 5; i++) S.t.guide[i] = nil;   // made when the denoiser runs
     S.upHistory = false;
 }
 
@@ -624,7 +634,9 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         S.upHistory = false;
         if (upMode == UPSCALE_OFF) upscaleRelease();
     }
-    const bool upscaling = upMode != UPSCALE_OFF, fxTemporal = upMode == UPSCALE_TEMPORAL;
+    if (upMode == UPSCALE_DENOISED && !S.guidesPso) upMode = UPSCALE_TEMPORAL;
+    const bool upscaling = upMode != UPSCALE_OFF, fxDenoised = upMode == UPSCALE_DENOISED,
+               fxTemporal = upMode == UPSCALE_TEMPORAL || fxDenoised;   // jittered, MetalFX in TAA's place
     ensureTargets(W, H);
     ensureOutputTargets(OW, OH);
     // the scene's depth: its own at render resolution when upscaling (Minecraft's framebuffer
@@ -1478,6 +1490,43 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             uf.jitterX = -jitterPx[0];
             uf.jitterY = -jitterPx[1];
             uf.reset = !S.upHistory || fr.taa.w < 0.5f;
+        }
+        if (fxDenoised && S.guidesPso) {
+            // what the denoiser needs to know about each pixel's surface
+            const MTLPixelFormat gf[5] = {MTLPixelFormatRGBA8Unorm, MTLPixelFormatRGBA8Unorm, MTLPixelFormatRGBA16Float,
+                                          MTLPixelFormatR8Unorm, MTLPixelFormatR8Unorm};
+            NSString* const names[5] = {@"guide diffuse", @"guide specular", @"guide normal", @"guide roughness", @"guide mask"};
+            MTLRenderPassDescriptor* gp = [MTLRenderPassDescriptor renderPassDescriptor];
+            for (int i = 0; i < 5; i++) {
+                if (!S.t.guide[i]) S.t.guide[i] = rt(gf[i], W, H, names[i]);
+                gp.colorAttachments[i].texture = S.t.guide[i];
+                gp.colorAttachments[i].loadAction = MTLLoadActionDontCare;
+                gp.colorAttachments[i].storeAction = MTLStoreActionStore;
+            }
+            profRender(gp, "denoiser guides", true);
+            id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:gp];
+            e.label = @"denoiser guides";
+            [e setRenderPipelineState:S.guidesPso];
+            [e setFragmentBytes:&fr length:sizeof fr atIndex:1];
+            [e setFragmentTexture:S.t.albedo atIndex:0];
+            [e setFragmentTexture:S.t.normal atIndex:1];
+            [e setFragmentTexture:S.t.light atIndex:2];
+            [e setFragmentTexture:depth atIndex:3];
+            [e setFragmentTexture:S.t.linZ atIndex:6];
+            // the opaque scene's depth: copied before translucent terrain drew (when there was any)
+            [e setFragmentTexture:w.terrain[3].empty() ? depth : S.t.sceneDepth atIndex:7];
+            [e setFragmentTexture:S.cloudNoise atIndex:9];
+            [e setFragmentTexture:S.t.spec atIndex:10];
+            [e setFragmentSamplerState:S.repeatLinear atIndex:3];
+            [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            [e endEncoding];
+            uf.diffuse = S.t.guide[0];
+            uf.specular = S.t.guide[1];
+            uf.normal = S.t.guide[2];
+            uf.roughness = S.t.guide[3];
+            uf.mask = S.t.guide[4];
+            uf.worldToView = fr.view;
+            uf.viewToClip = fr.proj;
         }
         if (upscaleEncode(cb, uf)) {
             post = S.t.up[S.upIndex];

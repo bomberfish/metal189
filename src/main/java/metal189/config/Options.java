@@ -278,7 +278,7 @@ public final class Options {
         slider("post", "saturation", S, 0, 200, 5, "%");
         slider("post", "contrast", S, 50, 150, 5, "%");
 
-        named("metalfx", "upscaling", S, 3);
+        named("metalfx", "upscaling", S, 4);
         slider("metalfx", "renderScale", S, 33, 100, 1, "%");
 
         toggle("rt", "rtShadows", RT);

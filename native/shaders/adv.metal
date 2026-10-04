@@ -2036,6 +2036,97 @@ static float waterLightPath(constant AdvFrame& fr, depth2d<float> waterShadow, s
     return max((sc.z - wz) * 512.0 - 0.02, 0.0);   // light-space depth spans 512 blocks
 }
 
+// A G-buffer surface's material: LabPBR data when present, otherwise per-material defaults,
+// and rain on what is open to the sky: exposed surfaces get wet (porous ones darken),
+// puddles form on open ground. The light pass and the denoiser's guides share it.
+struct Surface {
+    float3 albedo;   // linear
+    float3 F0;
+    float metal;
+    float rough;     // perceptual roughness (GGX alpha = rough^2)
+};
+
+static Surface surfaceAt(constant AdvFrame& fr, float4 alb, float4 spm, float rough, uint material, float skyLight,
+                         float3 world, float3 nWorld, texture3d<float> cloudNoise, sampler rep) {
+    Surface s;
+    s.albedo = toLinear(alb.rgb);
+    s.metal = 0.0;
+    s.F0 = float3(0.04);
+    s.rough = rough;
+    if (spm.z > 0.5) {
+        if (spm.x >= 229.5 / 255.0) { s.metal = 1.0; s.F0 = s.albedo; }
+        else s.F0 = float3(spm.x);
+    } else if (material == 4) {
+        s.metal = 0.85;
+        s.F0 = mix(float3(0.04), s.albedo, s.metal);
+    }
+    if (fr.params.y > 0.01 && WET_TUNE.x > 0.0 && fr.flags.y == 0 && !isFoliage(material) && material != 2 && material != 7) {
+        float exposed = smoothstep(0.8, 0.97, skyLight);
+        float up = smoothstep(0.6, 0.95, nWorld.y);
+        float3 wa = world + fr.camera.xyz;
+        float puddle = WET_TUNE.y > 0.5 ? up * smoothstep(0.45, 0.62, cloudNoise.sample(rep, float3(wa.xz / 80.0, 0.37)).g) : 0.0;
+        float wet = saturate(fr.params.y * exposed * WET_TUNE.x);
+        float porous = spm.z > 0.5 && spm.y < 0.26 ? spm.y * 4.0 : 0.6;
+        s.albedo *= mix(1.0, 0.55, wet * porous * (1.0 - puddle * 0.5));
+        s.rough = mix(s.rough, s.rough * 0.55, wet);
+        s.rough = mix(s.rough, 0.03, wet * puddle);
+        s.F0 = max(s.F0, float3(0.02 * wet));
+    }
+    return s;
+}
+
+// Split-sum environment BRDF (Lazarov's fit): reflectance scale and bias at a view angle.
+static inline float2 envBrdf(float rough, float nv) {
+    float4 c0 = float4(-1.0, -0.0275, -0.572, 0.022), c1 = float4(1.0, 0.0425, 1.04, -0.04);
+    float4 r4 = rough * c0 + c1;
+    float a004 = min(r4.x * r4.x, exp2(-9.28 * nv)) * r4.x + r4.y;
+    return float2(-1.04, 1.04) * a004 + r4.zw;
+}
+
+// The MetalFX denoiser's guides at render resolution (upscaling: Denoised): what each pixel's
+// surface reflects diffusely and specularly, its world-space normal and roughness, and a mask
+// where water and glass were drawn over the opaque scene (left as they are).
+struct GuideOut {
+    float4 diffuse [[color(0)]];
+    float4 specular [[color(1)]];
+    float4 normal [[color(2)]];
+    float roughness [[color(3)]];
+    float mask [[color(4)]];
+};
+
+fragment GuideOut fx_guides_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
+                                     texture2d<float> gAlbedo [[texture(0)]], texture2d<float> gNormal [[texture(1)]],
+                                     texture2d<float> gLight [[texture(2)]], depth2d<float> depth [[texture(3)]],
+                                     texture2d<float> gLinZ [[texture(6)]], depth2d<float> opaqueDepth [[texture(7)]],
+                                     texture3d<float> cloudNoise [[texture(9)]], texture2d<float> gSpec [[texture(10)]],
+                                     sampler rep [[sampler(3)]]) {
+    uint2 px = uint2(in.position.xy);
+    GuideOut o;
+    float d = depth.read(px);
+    o.mask = d < opaqueDepth.read(px) - 1e-7 ? 1.0 : 0.0;   // translucent surfaces in front
+    if (d >= 1.0) {
+        o.diffuse = o.specular = float4(0.0);
+        o.normal = float4(0.0, 1.0, 0.0, 0.0);
+        o.roughness = 1.0;
+        return o;
+    }
+    float2 ndc = float2(in.position.x * fr.screen.z * 2.0 - 1.0, in.position.y * fr.screen.w * 2.0 - 1.0) - fr.jitter.xy;
+    float4 pf = fr.invProj * float4(ndc, 1.0, 1.0);
+    float3 rd = pf.xyz / pf.w;
+    float3 eye = rd * (gLinZ.read(px).r / -rd.z);
+    float4 lgt = gLight.read(px);
+    float3 n = normalize(gNormal.read(px).xyz);
+    float3 nWorld = normalize((fr.invView * float4(n, 0)).xyz);
+    float3 world = (fr.invView * float4(eye, 1)).xyz;
+    Surface sf = surfaceAt(fr, gAlbedo.read(px), gSpec.read(px), lgt.w, uint(lgt.z * 255.0 + 0.5), lgt.y, world, nWorld, cloudNoise, rep);
+    float2 env = envBrdf(sf.rough, saturate(dot(n, normalize(-eye))));
+    o.diffuse = float4(sf.albedo * (1.0 - sf.metal), 1.0);
+    o.specular = float4(saturate(sf.F0 * env.x + env.y), 1.0);
+    o.normal = float4(nWorld, 0.0);
+    o.roughness = sf.rough;
+    return o;
+}
+
 fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                                constant AdvFrame& fr [[buffer(1)]],
                                texture2d<float> gAlbedo [[texture(0)]],
@@ -2095,39 +2186,16 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     float4 alb = gAlbedo.read(px);
     float4 nrm = gNormal.read(px);
     float4 lgt = gLight.read(px);
-    float3 albedo = toLinear(alb.rgb);
     float ao = alb.a;
     float3 n = normalize(nrm.xyz);
     float3 nWorld = normalize((fr.invView * float4(n, 0)).xyz);
     float3 world = (fr.invView * float4(eye, 1)).xyz;
     float3 v = normalize(-eye);
     uint material = uint(lgt.z * 255.0 + 0.5);
-    float skyLight = lgt.y, blockL = lgt.x, rough = lgt.w;
-
-    // material response: LabPBR data when present, otherwise per-material defaults
-    float4 spm = gSpec.read(px);
-    float metal = 0.0;
-    float3 F0 = float3(0.04);
-    if (spm.z > 0.5) {
-        if (spm.x >= 229.5 / 255.0) { metal = 1.0; F0 = albedo; }
-        else F0 = float3(spm.x);
-    } else if (material == 4) {
-        metal = 0.85;
-        F0 = mix(float3(0.04), albedo, metal);
-    }
-    // rain: exposed surfaces get wet (porous ones darken), puddles form on open ground
-    if (fr.params.y > 0.01 && WET_TUNE.x > 0.0 && fr.flags.y == 0 && !isFoliage(material) && material != 2 && material != 7) {
-        float exposed = smoothstep(0.8, 0.97, skyLight);
-        float up = smoothstep(0.6, 0.95, nWorld.y);
-        float3 wa = world + fr.camera.xyz;
-        float puddle = WET_TUNE.y > 0.5 ? up * smoothstep(0.45, 0.62, cloudNoise.sample(rep, float3(wa.xz / 80.0, 0.37)).g) : 0.0;
-        float wet = saturate(fr.params.y * exposed * WET_TUNE.x);
-        float porous = spm.z > 0.5 && spm.y < 0.26 ? spm.y * 4.0 : 0.6;
-        albedo *= mix(1.0, 0.55, wet * porous * (1.0 - puddle * 0.5));
-        rough = mix(rough, rough * 0.55, wet);
-        rough = mix(rough, 0.03, wet * puddle);
-        F0 = max(F0, float3(0.02 * wet));
-    }
+    float skyLight = lgt.y, blockL = lgt.x;
+    Surface sf = surfaceAt(fr, alb, gSpec.read(px), lgt.w, material, skyLight, world, nWorld, cloudNoise, rep);
+    float3 albedo = sf.albedo, F0 = sf.F0;
+    float metal = sf.metal, rough = sf.rough;
     // ray-traced ambient occlusion (half resolution, denoised; see rtao_fragment)
     if (fr.flags.x & ADV_RT_AO) ao *= mix(1.0, rtaoTex.sample(lin, in.uv).r, 0.85);
     else if (fr.flags.x & ADV_SSAO) ao *= mix(1.0, rtaoTex.sample(lin, in.uv).r, 0.7);

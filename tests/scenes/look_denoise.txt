@@ -1,0 +1,37 @@
+# MetalFX denoiser against temporal upscaling with rough reflections (the user's PBR packs),
+# ray-traced reflections and soft ray-traced shadows: temporal (A), denoised (B), denoised
+# while turning (C), temporal while turning (D)
+resourcepack Nostalgia PBR 1.2.0.zip | §bAVPBR-1-6-5.zip
+sleep 3
+world lookrefl 42 flat
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /weather clear 100000
+cmd /time set 4000
+config rtReflections true
+config rtShadows true
+config rtShadowSoftness 60
+config roughReflections 100
+config roughReflectionQuality 0
+config upscaling 2
+config renderScale 67
+cmd /tp @p -700 7 -690 180 28
+sleep 12
+capture CAPTURE_A
+config upscaling 3
+sleep 8
+capture CAPTURE_B
+spin 0.6 600
+sleep 1
+capture CAPTURE_C
+config upscaling 2
+spin 0.6 600
+sleep 2
+capture CAPTURE_D
+config upscaling 0
+config rtReflections false
+config rtShadows false
+config rtShadowSoftness 30
+config roughReflections 40
+quit
