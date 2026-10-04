@@ -1,10 +1,19 @@
-// metal189: the window on iOS (experimental, for launchers such as PojavLauncher).
+// metal189: the window on iOS (experimental, for launchers such as Amethyst / PojavLauncher).
 //
 // There is no window of our own to create: the host app (the launcher) owns the UIWindow
-// and runs UIKit on the main thread, while the game runs on a JVM thread. The "window" is a
-// full-screen view backed by a CAMetalLayer, added on top of the host's key window. Input
-// arrives as the same events the macOS window produces (platform_window.mm), so the Java
-// side's LWJGL logic is unchanged:
+// and runs UIKit on the main thread, while the game runs on a JVM thread.
+//
+// Under Amethyst (https://github.com/AngelAuraMC/Amethyst-iOS) metal189 uses the launcher's
+// own game surface and input, through the C side of its GLFW (input_bridge_v3.m,
+// egl_bridge.m): with the client API hint set to GLFW_NO_API, pojavCreateContext hands back
+// the surface's CAMetalLayer instead of making a GL context; callbacks registered like
+// LWJGL 3's receive what its touch controls, virtual mouse, keyboard and gamepad send, and
+// are delivered when the game thread pumps them each frame (platformPumpEvents). Mouse grab
+// goes back to the launcher, which switches its controls between menus and the game.
+//
+// Elsewhere the "window" is a full-screen view backed by a CAMetalLayer, added on top of
+// the host's key window. Input arrives as the same events the macOS window produces
+// (platform_window.mm), so the Java side's LWJGL logic is unchanged:
 //
 // * hardware keyboards: HID usages mapped to macOS virtual key codes;
 // * a mouse or trackpad (iPad): pointer position, buttons and the scroll wheel;
@@ -19,6 +28,7 @@
 #import "engine.h"
 #include <algorithm>
 #include <cmath>
+#include <dlfcn.h>
 
 using namespace m189;
 
@@ -112,6 +122,186 @@ UIWindow* hostWindow() {
 }
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// Amethyst: its GLFW's C entry points, looked up in the process
+
+namespace amethyst {
+
+typedef void KeyFn(void*, int, int, int, int);
+typedef void CharFn(void*, unsigned int);
+typedef void CharModsFn(void*, unsigned int, int);
+typedef void CursorPosFn(void*, double, double);
+typedef void MouseButtonFn(void*, int, int, int);
+typedef void ScrollFn(void*, double, double);
+typedef void SizeFn(void*, int, int);
+typedef jlong SetCallbackFn(JNIEnv*, jclass, jlong window, jlong callback);
+
+int (*init)(BOOL useStackQueue) = nullptr;
+void (*setWindowHint)(int hint, int value) = nullptr;
+void* (*createContext)(void* share) = nullptr;
+void (*pump)(void* window) = nullptr;
+void (*rewind)(void) = nullptr;
+void (*setShowingWindow)(JNIEnv*, jclass, jlong) = nullptr;
+void (*setGrabbing)(JNIEnv*, jclass, jboolean, jfloat, jfloat) = nullptr;
+int* windowWidth = nullptr;
+int* windowHeight = nullptr;
+void* window = nullptr;   // the surface's layer (Amethyst's window handle)
+bool active = false;
+
+constexpr int GLFW_CLIENT_API = 0x22001, GLFW_NO_API = 0;
+
+// macOS virtual key codes (kVK_*) for GLFW key codes; -1 where macOS has none
+int macKeyCode(int k) {
+    if (k >= 'A' && k <= 'Z') {
+        static const int16_t letters[26] = {0x00, 0x0B, 0x08, 0x02, 0x0E, 0x03, 0x05, 0x04, 0x22, 0x26, 0x28, 0x25, 0x2E,
+                                            0x2D, 0x1F, 0x23, 0x0C, 0x0F, 0x01, 0x11, 0x20, 0x09, 0x0D, 0x07, 0x10, 0x06};
+        return letters[k - 'A'];
+    }
+    if (k >= '0' && k <= '9') {
+        static const int16_t digits[10] = {0x1D, 0x12, 0x13, 0x14, 0x15, 0x17, 0x16, 0x1A, 0x1C, 0x19};   // 0..9
+        return digits[k - '0'];
+    }
+    if (k >= 290 && k <= 301) {   // F1..F12
+        static const int16_t f[12] = {0x7A, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6D, 0x67, 0x6F};
+        return f[k - 290];
+    }
+    if (k >= 320 && k <= 329) {   // keypad 0..9
+        static const int16_t kp[10] = {0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5B, 0x5C};
+        return kp[k - 320];
+    }
+    switch (k) {
+        case 32: return 0x31;  case 39: return 0x27;  case 44: return 0x2B;  case 45: return 0x1B;
+        case 46: return 0x2F;  case 47: return 0x2C;  case 59: return 0x29;  case 61: return 0x18;
+        case 91: return 0x21;  case 92: return 0x2A;  case 93: return 0x1E;  case 96: return 0x32;
+        case 256: return 0x35; case 257: return 0x24; case 258: return 0x30; case 259: return 0x33;
+        case 261: return 0x75; case 262: return 0x7C; case 263: return 0x7B; case 264: return 0x7D;
+        case 265: return 0x7E; case 266: return 0x74; case 267: return 0x79; case 268: return 0x73;
+        case 269: return 0x77; case 280: return 0x39;
+        case 330: return 0x41; case 331: return 0x4B; case 332: return 0x43; case 333: return 0x4E;
+        case 334: return 0x45; case 335: return 0x4C; case 336: return 0x51;
+        case 340: return 0x38; case 341: return 0x3B; case 342: return 0x3A; case 343: return 0x37;
+        case 344: return 0x3C; case 345: return 0x3E; case 346: return 0x3D; case 347: return 0x36;
+        default: return -1;
+    }
+}
+
+// GLFW reports a key press and the character it types separately (key first); macOS key
+// events carry both, so a press waits for its character until the next callback.
+int pendingKey = -1;
+double lastX = 0, lastY = 0;
+bool haveCursor = false;
+
+void flushKey() {
+    if (pendingKey >= 0) pushEvent({EV_KEY, pendingKey, 0, 1, 0, 0, 0, 0, nowNanos()});
+    pendingKey = -1;
+}
+
+void resize(int w, int h) {
+    if (w <= 0 || h <= 0) return;
+    WindowInfo& info = windowInfo();
+    bool changed = info.pixelWidth.load() != w || info.pixelHeight.load() != h;
+    info.pixelWidth = w;
+    info.pixelHeight = h;
+    CAMetalLayer* layer = g_layer;
+    dispatch_async(dispatch_get_main_queue(), ^{ layer.drawableSize = CGSizeMake(w, h); });
+    if (changed) pushEvent({EV_RESIZE, w, h, 0, 1.0f, 0, 0, 0, nowNanos()});
+}
+
+void onKey(void*, int key, int scancode, int action, int mods) {
+    flushKey();
+    int code = macKeyCode(key);
+    if (code < 0) return;
+    if (action == 0) pushEvent({EV_KEY, code, 0, 0, 0, 0, 0, 0, nowNanos()});
+    else pendingKey = code;   // press or repeat: its character may follow
+}
+
+void onChar(void*, unsigned int cp) {
+    if (cp > 0xFFFF) cp = 0xFFFD;
+    if (pendingKey >= 0) {
+        pushEvent({EV_KEY, pendingKey, (int32_t)cp, 1, 0, 0, 0, 0, nowNanos()});
+        pendingKey = -1;
+    } else {
+        pushEvent({EV_CHAR, 0, (int32_t)cp, 1, 0, 0, 0, 0, nowNanos()});   // typed without a key (on-screen keyboard)
+    }
+}
+
+void onCharMods(void* w, unsigned int cp, int) { onChar(w, cp); }
+
+// window pixels from the top-left, as AppKit reports them: points (1 px) from the bottom-left
+void onCursorPos(void*, double x, double y) {
+    flushKey();
+    double dx = haveCursor ? x - lastX : 0, dy = haveCursor ? y - lastY : 0;
+    lastX = x;
+    lastY = y;
+    haveCursor = true;
+    float h = (float)windowInfo().pixelHeight.load();
+    pushEvent({EV_MOUSE_MOVE, 0, 0, 0, (float)x, h - (float)y, (float)dx, (float)dy, nowNanos()});
+}
+
+void onMouseButton(void*, int button, int action, int) {
+    flushKey();
+    if (button < 0 || button > 2) button = 2;   // LWJGL on macOS: 0 left, 1 right, 2 any other
+    pushEvent({EV_MOUSE_BUTTON, button, 0, action != 0 ? 1 : 0, 0, 0, 0, 0, nowNanos()});
+}
+
+void onScroll(void*, double xoff, double yoff) {
+    flushKey();
+    pushEvent({EV_MOUSE_MOVE, 0, 0, 1, (float)lastX, windowInfo().pixelHeight.load() - (float)lastY, (float)xoff, (float)yoff,
+               nowNanos()});
+}
+
+void onSize(void*, int w, int h) { resize(w, h); }
+
+template <typename T> bool find(T& fn, const char* name) {
+    fn = (T)dlsym(RTLD_DEFAULT, name);
+    return fn != nullptr;
+}
+
+// Amethyst's surface, if this process is Amethyst; nil otherwise (or when its renderer gives
+// the surface no Metal layer).
+CAMetalLayer* attach() {
+    SetCallbackFn *setKey = nullptr, *setChar = nullptr, *setCharMods = nullptr, *setCursor = nullptr, *setButton = nullptr,
+                  *setScroll = nullptr, *setFbSize = nullptr, *setWinSize = nullptr;
+    bool ok = find(init, "pojavInit") && find(setWindowHint, "pojavSetWindowHint") && find(createContext, "pojavCreateContext") &&
+              find(pump, "pojavPumpEvents") && find(rewind, "pojavRewindEvents") &&
+              find(setShowingWindow, "Java_org_lwjgl_glfw_GLFW_nglfwSetShowingWindow") &&
+              find(setKey, "Java_org_lwjgl_glfw_GLFW_nglfwSetKeyCallback") &&
+              find(setChar, "Java_org_lwjgl_glfw_GLFW_nglfwSetCharCallback") &&
+              find(setCharMods, "Java_org_lwjgl_glfw_GLFW_nglfwSetCharModsCallback") &&
+              find(setCursor, "Java_org_lwjgl_glfw_GLFW_nglfwSetCursorPosCallback") &&
+              find(setButton, "Java_org_lwjgl_glfw_GLFW_nglfwSetMouseButtonCallback") &&
+              find(setScroll, "Java_org_lwjgl_glfw_GLFW_nglfwSetScrollCallback") &&
+              find(setFbSize, "Java_org_lwjgl_glfw_GLFW_nglfwSetFramebufferSizeCallback") &&
+              find(setWinSize, "Java_org_lwjgl_glfw_GLFW_nglfwSetWindowSizeCallback");
+    if (!ok) return nil;
+    find(setGrabbing, "Java_org_lwjgl_glfw_CallbackBridge_nativeSetGrabbing");
+    find(windowWidth, "windowWidth");
+    find(windowHeight, "windowHeight");
+    log("ios: Amethyst found: using its game surface and input");
+    init(YES);   // input queued for the game thread to pump
+    setWindowHint(GLFW_CLIENT_API, GLFW_NO_API);   // no GL context: the surface's layer itself
+    void* handle = createContext(nullptr);
+    id layerObj = (__bridge id)handle;
+    if (![layerObj isKindOfClass:CAMetalLayer.class]) {
+        log("ios: Amethyst's surface has no Metal layer (the OSMesa/Zink renderer?); pick another renderer for this profile");
+        return nil;
+    }
+    window = handle;
+    setShowingWindow(nullptr, nullptr, (jlong)(uintptr_t)handle);
+    setKey(nullptr, nullptr, (jlong)(uintptr_t)handle, (jlong)(uintptr_t)&onKey);
+    setChar(nullptr, nullptr, (jlong)(uintptr_t)handle, (jlong)(uintptr_t)&onChar);
+    setCharMods(nullptr, nullptr, (jlong)(uintptr_t)handle, (jlong)(uintptr_t)&onCharMods);
+    setCursor(nullptr, nullptr, (jlong)(uintptr_t)handle, (jlong)(uintptr_t)&onCursorPos);
+    setButton(nullptr, nullptr, (jlong)(uintptr_t)handle, (jlong)(uintptr_t)&onMouseButton);
+    setScroll(nullptr, nullptr, (jlong)(uintptr_t)handle, (jlong)(uintptr_t)&onScroll);
+    setFbSize(nullptr, nullptr, (jlong)(uintptr_t)handle, (jlong)(uintptr_t)&onSize);
+    setWinSize(nullptr, nullptr, (jlong)(uintptr_t)handle, (jlong)(uintptr_t)&onSize);
+    active = true;
+    return (CAMetalLayer*)layerObj;
+}
+
+} // namespace amethyst
 
 @interface M189IOSView : UIView
 @end
@@ -309,6 +499,34 @@ CAMetalLayer* metalLayer() { return g_layer; }
 bool windowCreate(int width, int height, NSString* title, int32_t flags) {
     __block bool ok = false;
     g_flags = flags;
+    // Amethyst: its own surface and input (on this, the game thread, as LWJGL would call it)
+    if (CAMetalLayer* layer = amethyst::attach()) {
+        g_layer = layer;
+        runOnMain(^{
+            layer.device = m189::device();
+            layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+            layer.framebufferOnly = NO;
+            layer.maximumDrawableCount = 3;
+            layer.allowsNextDrawableTimeout = YES;
+            layer.opaque = YES;
+        });
+        int w = amethyst::windowWidth ? *amethyst::windowWidth : 0, h = amethyst::windowHeight ? *amethyst::windowHeight : 0;
+        if (w <= 0 || h <= 0) {
+            CGSize s = layer.bounds.size;
+            float scale = (float)layer.contentsScale;
+            w = (int)lround(s.width * scale);
+            h = (int)lround(s.height * scale);
+        }
+        amethyst::resize(w, h);
+        WindowInfo& info = windowInfo();
+        info.backingScale = 1.0f;
+        info.screenScale = 1.0f;
+        info.visible = true;
+        info.focused = true;
+        info.mouseInside = true;
+        log("ios: drawing into Amethyst's %dx%d surface", w, h);
+        return true;
+    }
     runOnMain(^{
         UIWindow* host = hostWindow();
         if (!host) {
@@ -354,7 +572,18 @@ void windowSetSize(int w, int h) {}   // the host app decides the size
 void windowSetFullscreen(bool fs) { windowInfo().fullscreen = fs; }
 void windowSetVSync(bool on) { setVSync(on); }   // iOS layers always present on the refresh
 
-void cursorSetGrabbed(bool grab) { g_cursorGrabbed = grab; }
+void cursorSetGrabbed(bool grab) {
+    g_cursorGrabbed = grab;
+    // Amethyst switches its touch controls and virtual mouse between the game and menus
+    if (amethyst::active && amethyst::setGrabbing) amethyst::setGrabbing(nullptr, nullptr, grab, 0, 0);
+}
+
+void platformPumpEvents() {
+    if (!amethyst::active) return;
+    amethyst::pump(amethyst::window);
+    amethyst::rewind();
+    amethyst::flushKey();
+}
 void cursorSetPosition(int x, int y) {}
 
 void desktopMode(int* out) {

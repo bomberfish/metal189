@@ -50,6 +50,10 @@ void log(const char* fmt, ...) {
     fflush(stderr);
 }
 
+#if !TARGET_OS_IPHONE
+void platformPumpEvents() {}   // AppKit events arrive on their own
+#endif
+
 void runOnMain(void (^block)(void)) {
     if ([NSThread isMainThread]) block();
     else dispatch_sync(dispatch_get_main_queue(), block);

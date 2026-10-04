@@ -47,6 +47,7 @@ static void JNICALL n_windowSetFullscreen(JNIEnv*, jclass, jboolean f) { @autore
 static void JNICALL n_windowSetVSync(JNIEnv*, jclass, jboolean v) { @autoreleasepool { windowSetVSync(v); } }
 
 static jint JNICALL n_pollEvents(JNIEnv*, jclass, jlong addr, jint max) {
+    platformPumpEvents();
     return popEvents((Event*)ptr(addr), max);
 }
 

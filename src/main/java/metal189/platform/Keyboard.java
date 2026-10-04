@@ -42,6 +42,15 @@ public final class Keyboard {
     static void keyPressed(int keyCode, char character, long nanos) { handleKey(keyCode, (byte) 1, character, nanos); }
     static void keyReleased(int keyCode, char character, long nanos) { handleKey(keyCode, (byte) 0, character, nanos); }
 
+    /** A character typed without a key (iOS on-screen keyboards): KEY_NONE with the character, as LWJGL does for IME input. */
+    static void charTyped(char character, long nanos) {
+        flushDeferredEvent();
+        event.clear();
+        event.putInt(0).put((byte) 1).putInt(character).putLong(nanos).put((byte) 0);
+        event.flip();
+        if (queue.remaining() >= event.remaining()) queue.put(event);
+    }
+
     private static void handleKey(int key_code, byte state, int character, long nanos) {
         if (character == 65535) character = 0;
         if (state == 1) {

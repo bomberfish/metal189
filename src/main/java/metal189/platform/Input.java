@@ -12,7 +12,7 @@ final class Input {
     private Input() {}
 
     static final int EV_KEY = 1, EV_MOUSE_BUTTON = 2, EV_MOUSE_MOVE = 3, EV_FOCUS = 5, EV_RESIZE = 6,
-            EV_CLOSE = 7, EV_MOUSE_INSIDE = 8, EV_SCALE = 10;
+            EV_CLOSE = 7, EV_MOUSE_INSIDE = 8, EV_SCALE = 10, EV_CHAR = 11;
     private static final int EVENT_SIZE = 40, BATCH = 512;
     private static final long buf = Mem.malloc((long) EVENT_SIZE * BATCH);
     static boolean mouseInside;
@@ -29,6 +29,9 @@ final class Input {
                     case EV_KEY:
                         if (c != 0) Keyboard.keyPressed(a, (char) b, t);
                         else Keyboard.keyReleased(a, (char) b, t);
+                        break;
+                    case EV_CHAR:
+                        Keyboard.charTyped((char) b, t);
                         break;
                     case EV_MOUSE_BUTTON:
                         Mouse.nativeSetButton(a, c, t);

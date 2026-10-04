@@ -38,6 +38,7 @@ enum EventType : int32_t {
     EV_CLOSE = 7,
     EV_MOUSE_INSIDE = 8, // a = inside
     EV_SCALE = 10,       // f0 = window backingScaleFactor
+    EV_CHAR = 11,        // b = UTF-16 unit typed without a key event (iOS on-screen keyboards)
 };
 
 struct Event {
@@ -49,6 +50,7 @@ static_assert(sizeof(Event) == 40, "Event layout is shared with Java");
 
 void pushEvent(const Event& e);
 int popEvents(Event* out, int max);
+void platformPumpEvents();   // delivers input a host app queued (iOS / Amethyst); nothing on macOS
 
 // Window state readable from any thread.
 struct WindowInfo {

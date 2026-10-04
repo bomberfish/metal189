@@ -137,12 +137,24 @@ and shader library inside; the `-dev` jar next to it is the deobfuscated build).
 
 `./gradlew iosJar` builds `build/libs/metal189-<version>-ios.jar`: the same mod with an
 arm64 iOS native library (iOS 17+, ad-hoc signed) and an iOS shader library, for
-launchers that run Forge 1.8.9 on iOS such as PojavLauncher. It is untested on a device.
-It draws into a full-screen Metal view over the launcher's window, unpacks its natives
-inside the app's container (`$HOME/Library/Caches/metal189`), and takes input from
-touch (in menus a finger is the mouse; in game a drag looks around, a tap is a left
-click and a two-finger tap a right click), a hardware keyboard, and an iPad mouse or
-trackpad. iOS only loads signed code, so the launcher may need to allow or re-sign it.
+launchers that run Forge 1.8.9 on iOS. It is untested on a device. It unpacks its
+natives inside the app's container (`$HOME/Library/Caches/metal189`).
+
+Under [Amethyst](https://github.com/AngelAuraMC/Amethyst-iOS) (the maintained
+PojavLauncher fork) it draws into the launcher's own game surface and takes input from
+its controls (touch, virtual mouse, on-screen and hardware keyboards, mouse and
+gamepad), as a Vulkan game would: it asks Amethyst's GLFW for no OpenGL context and
+registers GLFW callbacks. Mouse grab is passed back so the launcher switches its
+controls between menus and the game. The profile needs a renderer whose surface is a
+Metal layer (not the OSMesa/Zink one); the GL renderer itself goes unused.
+
+Elsewhere it draws into a full-screen Metal view over the launcher's window and takes
+input from touch (in menus a finger is the mouse; in game a drag looks around, a tap is
+a left click and a two-finger tap a right click), a hardware keyboard, and an iPad mouse
+or trackpad.
+
+iOS only loads signed code, so the launcher may need to allow or re-sign the library
+(Amethyst does when JIT is enabled).
 
 ## Development and testing
 
