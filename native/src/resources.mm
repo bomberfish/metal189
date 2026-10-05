@@ -4,6 +4,7 @@
 #import "resources.h"
 #import "commands.h"
 #import "raytrace.h"
+#import "terrain_gpu.h"
 #include <unordered_map>
 
 namespace m189 {
@@ -424,7 +425,10 @@ void sectionUpload(int sid, int layer, const void* data, size_t bytes, uint32_t 
     s.layers[layer] = nil;
     s.vertices[layer] = 0;
     for (int g = 0; g < 8; g++) s.groupStart[layer][g] = 0;
-    if (bytes == 0 || vertexCount == 0) return;
+    if (bytes == 0 || vertexCount == 0) {
+        terrainMetaChanged(sid, &s);
+        return;
+    }
     uint32_t quads = vertexCount / 4;
     size_t stride = bytes / vertexCount;
     if (layer < 3 && vertexCount % 4 == 0 && stride == 28) {
@@ -479,6 +483,7 @@ void sectionUpload(int sid, int layer, const void* data, size_t bytes, uint32_t 
         s.layers[layer] = newSectionBuffer(data, bytes);
     }
     s.vertices[layer] = vertexCount;
+    terrainMetaChanged(sid, &s);
 }
 
 void sectionSolid(int sid, const uint32_t* bits, bool emits, bool tinted) {
@@ -501,6 +506,7 @@ void sectionDelete(int sid) {
     for (id<MTLBuffer> b : it->second.layers) if (b) g_deferredReleases.push_back(b);
     if (sid >= 0 && (size_t)sid < g_sectionById.size()) g_sectionById[sid] = nullptr;
     g_sections.erase(it);
+    terrainMetaChanged(sid, nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -597,6 +603,17 @@ void encodePendingResourceWork(id<MTLCommandBuffer> cb) {
 
 // Objects deleted during a frame stay alive until that frame's command buffer
 // has been encoded (the command buffer then retains what it uses).
-void releaseDeferred() { g_deferredReleases.clear(); }
+// Called after each frame's commit. Objects replaced while recording frame N may still be in
+// use by frames N - 1 and earlier, and section buffers are reached by GPU address (command
+// buffers do not retain them): they are kept until frames that old have certainly finished.
+void releaseDeferred() {
+    static std::vector<id> ring[kFramesInFlight + 1];
+    static uint64_t n = 0;
+    std::vector<id>& oldest = ring[(n + 1) % (kFramesInFlight + 1)];
+    oldest.clear();
+    ring[n % (kFramesInFlight + 1)].swap(g_deferredReleases);
+    g_deferredReleases.clear();
+    n++;
+}
 
 } // namespace m189

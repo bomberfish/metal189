@@ -349,6 +349,14 @@ public final class TestDriver {
                 // renderdistance CHUNKS : render (and integrated server view) distance; options are not saved
                 mc.gameSettings.renderDistanceChunks = Integer.parseInt(a[1]);
                 return true;
+            case "terraininfo": {
+                net.minecraft.entity.Entity cam = mc.getRenderViewEntity();
+                net.minecraft.util.BlockPos eye = new net.minecraft.util.BlockPos(cam.posX, cam.posY + cam.getEyeHeight(), cam.posZ);
+                Native.LOG.info("metal189-test terraininfo: {} | visible {} | eye {} block {} | chunk loaded {}",
+                    mc.renderGlobal.getDebugInfoRenders(), metal189.terrain.Visible.count, eye,
+                    mc.theWorld.getBlockState(eye).getBlock().getUnlocalizedName(), mc.theWorld.getChunkFromBlockCoords(eye).isLoaded());
+                return true;
+            }
             case "fancy":
                 // fancy true|false : fancy graphics (leaves, clouds) and reload the renderers
                 mc.gameSettings.fancyGraphics = Boolean.parseBoolean(a[1]);

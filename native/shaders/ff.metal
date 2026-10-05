@@ -231,18 +231,17 @@ struct TerrainDraw {
     float4x4 mv;
 };
 
-// 64 quads of one section's draw record (frame_exec.mm drawTerrain): the layer's draw covers
-// meshlet m with quads [64m, 64m + 64); those past `count` are padding.
+// 64 quads of one section's layer (frame_exec.mm drawTerrain, terrain.metal): a layer's draw is
+// one instance per meshlet over a 64-quad index pattern; quads past `count` are padding.
 struct TerrainMeshlet {
     uint record, first, count, layer;
 };
 
-// The section vertex a virtual vertex id names, or false for padding.
-static bool terrainFetch(uint vid, device const TerrainDraw* draws, device const TerrainMeshlet* meshlets,
+// The section vertex of meshlet `iid`'s pattern vertex `vid` (0..255), or false for padding.
+static bool terrainFetch(uint vid, uint iid, device const TerrainDraw* draws, device const TerrainMeshlet* meshlets,
                          thread BlockVertex& v, thread float4x4& mv) {
-    uint q = vid >> 2;
-    TerrainMeshlet m = meshlets[q >> 6];
-    uint local = q & 63u;
+    TerrainMeshlet m = meshlets[iid];
+    uint local = vid >> 2;
     if (local >= m.count) return false;
     device const TerrainDraw& d = draws[m.record];
     v = d.verts[m.layer][(m.first + local) * 4u + (vid & 3u)];
@@ -250,14 +249,14 @@ static bool terrainFetch(uint vid, device const TerrainDraw* draws, device const
     return true;
 }
 
-vertex FFOut terrain_vertex(uint vid [[vertex_id]],
+vertex FFOut terrain_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                             constant FFUniforms& u [[buffer(2)]],
                             device const TerrainDraw* draws [[buffer(3)]],
                             device const TerrainMeshlet* meshlets [[buffer(4)]]) {
     BlockVertex v;
     float4x4 mv;
     FFOut o;
-    if (!terrainFetch(vid, draws, meshlets, v, mv)) {
+    if (!terrainFetch(vid, iid, draws, meshlets, v, mv)) {
         o = {};
         o.position = float4(0.0, 0.0, 0.0, 1.0);   // zero area: culled
         return o;
@@ -482,14 +481,14 @@ struct TerrainOut {
     half fog;
 };
 
-vertex TerrainOut terrain_vertex_slim(uint vid [[vertex_id]],
+vertex TerrainOut terrain_vertex_slim(uint vid [[vertex_id]], uint iid [[instance_id]],
                                       constant FFUniforms& u [[buffer(2)]],
                                       device const TerrainDraw* draws [[buffer(3)]],
                                       device const TerrainMeshlet* meshlets [[buffer(4)]]) {
     BlockVertex v;
     float4x4 mv;
     TerrainOut o;
-    if (!terrainFetch(vid, draws, meshlets, v, mv)) {
+    if (!terrainFetch(vid, iid, draws, meshlets, v, mv)) {
         o = {};
         o.position = float4(0.0, 0.0, 0.0, 1.0);   // zero area: culled
         return o;

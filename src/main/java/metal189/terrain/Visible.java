@@ -52,20 +52,35 @@ public final class Visible {
     // 0 unknown, 1 none, 2 some
     private static volatile byte[] tileById = new byte[4096];
 
+    private static final Object TILE_LOCK = new Object();
+
     static void tileEntities(int id, boolean some) {
-        byte[] t = tileById;
-        if (id > 0 && id < t.length) t[id] = (byte) (some ? 2 : 1);
+        if (id <= 0) return;
+        synchronized (TILE_LOCK) {   // not into an array the client thread is replacing
+            byte[] t = tileById;
+            if (id >= t.length) tileById = t = java.util.Arrays.copyOf(t, Math.max(id + 1, t.length * 2));
+            t[id] = (byte) (some ? 2 : 1);
+        }
     }
 
     /** Whether visible entry i's section holds tile entities. */
     public static boolean hasTileEntities(int i) {
         int id = ids[i];
         byte[] t = tileById;
-        if (id >= t.length) tileById = t = java.util.Arrays.copyOf(t, Math.max(id + 1, t.length * 2));
+        if (id >= t.length) {
+            synchronized (TILE_LOCK) {
+                t = tileById;
+                if (id >= t.length) tileById = t = java.util.Arrays.copyOf(t, Math.max(id + 1, t.length * 2));
+            }
+        }
         byte v = t[id];
         if (v == 0) {
             v = (byte) (chunks[i].getCompiledChunk().getTileEntities().isEmpty() ? 1 : 2);   // compiled before it had an id
-            t[id] = v;
+            synchronized (TILE_LOCK) {
+                byte[] cur = tileById;
+                if (cur[id] == 0) cur[id] = v;
+                else v = cur[id];
+            }
         }
         return v == 2;
     }

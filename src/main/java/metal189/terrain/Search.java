@@ -494,23 +494,37 @@ public final class Search {
         return m;
     }
 
+    private static final Object VIS_LOCK = new Object();
+
     /** RenderChunk.setCompiledChunk (or the chunk reset to DUMMY) with the section's id (0: none yet). */
     static void compiledChanged(int id, CompiledChunk cc) {
-        long[] v = visById;
-        if (id > 0 && id < v.length) v[id] = mask(cc) | KNOWN;
+        if (id <= 0) return;
+        long m = mask(cc) | KNOWN;
+        // under the lock: a write must not land in an array the client thread is replacing
+        synchronized (VIS_LOCK) {
+            long[] v = visById;
+            if (id >= v.length) visById = v = java.util.Arrays.copyOf(v, Math.max(id + 1, v.length * 2));
+            v[id] = m;
+        }
     }
 
     private static long visibility(int s, RenderChunk rc) {
         int id = idCache[s];
         long[] v = visById;
         if (id >= v.length) {
-            long[] nv = java.util.Arrays.copyOf(v, Math.max(id + 1, v.length * 2));
-            visById = v = nv;
+            synchronized (VIS_LOCK) {
+                v = visById;
+                if (id >= v.length) visById = v = java.util.Arrays.copyOf(v, Math.max(id + 1, v.length * 2));
+            }
         }
         long m = v[id];
         if ((m & KNOWN) != 0) return m;
         m = mask(rc.getCompiledChunk()) | KNOWN;   // compiled before it had an id
-        v[id] = m;
+        synchronized (VIS_LOCK) {
+            long[] cur = visById;
+            if ((cur[id] & KNOWN) == 0) cur[id] = m;   // unless a compile reported a newer one meanwhile
+            else m = cur[id];
+        }
         return m;
     }
 

@@ -10,6 +10,7 @@
 #import "advanced.h"
 #import "gpu_profiler.h"
 #import "interp.h"
+#import "terrain_gpu.h"
 #include <unordered_map>
 #include <cstring>
 
@@ -18,6 +19,7 @@ namespace m189 {
 // Per-frame statistics (logged with -Dmetal189.gpuStats=true).
 struct FrameStats { uint64_t draws, terrainDraws, terrainQuads, arenaDraws, meshDraws, passes, terrainDrawn, drawCalls; };
 bool g_optFaceCull = true;
+bool g_optGpuTerrain = true;   // terrain culled on the GPU (terrain_gpu.mm)
 bool g_optDepthDiscard = false;
 bool g_optAdopt = true;
 uint32_t g_optSkipPhases = 0;
@@ -44,6 +46,7 @@ void setOption(int key, int value) {
         case 5: g_ctrlClickRight = value != 0; break;
         case 7: g_optFaceCull = value != 0; break;
         case 8: g_optSerialGpu = value != 0; break;
+        case 9: g_optGpuTerrain = value != 0; break;
         case 6: g_optPresentDraw = value != 0; break;
         case 104: g_optAdopt = value != 0; break;   // present Minecraft's framebuffer without copying it
         case 103: g_optSkipPhases = (uint32_t)value; break;   // benchmarking: skip the draws of these phases (bit per PH_*)
@@ -490,6 +493,7 @@ struct Exec {
     bool lastOk = false;
     bool advReplay = false;  // replaying a world segment already rendered by the advanced pipeline
     bool skipCopyDraw = false;   // the next draw is the framebuffer copy an adoption made unnecessary
+    id<MTLCommandBuffer> pre = nil;   // work that must run before the frame's (terrain culling)
     int auxDepth = 0;        // inside auxiliary world segments (rendered with the baseline, no filtering)
     bool advReplaySaved = false;
     // batch of merged arena draws
@@ -1100,16 +1104,8 @@ static void drawMesh(Exec& x, const DrawMeshCmd& d) {
     [x.enc drawIndexedPrimitives:metalPrim(pc) indexCount:n indexType:MTLIndexTypeUInt32 indexBuffer:ib indexBufferOffset:start * 4];
 }
 
-// Section transform, computed with the same float operations GL uses for
-// glTranslatef(offset) followed by glMultMatrixf(chunk matrix).
-static void sectionMatrix(const simd_float4x4& mv, float ox, float oy, float oz, float* out) {
-    float m[16];
-    memcpy(m, &mv, sizeof m);
-    m[12] += m[0] * ox + m[4] * oy + m[8] * oz;
-    m[13] += m[1] * ox + m[5] * oy + m[9] * oz;
-    m[14] += m[2] * ox + m[6] * oy + m[10] * oz;
-    m[15] += m[3] * ox + m[7] * oy + m[11] * oz;
-    // chunk matrix from RenderChunk.initModelviewMatrix: T(-8) S(1.000001) T(8)
+// RenderChunk's model matrix (initModelviewMatrix: T(8) S(1.000001) T(-8)), column-major.
+static const float* chunkMatrix() {
     static float chunk[16];
     static bool init = false;
     if (!init) {
@@ -1123,9 +1119,19 @@ static void sectionMatrix(const simd_float4x4& mv, float ox, float oy, float oz,
         memcpy(chunk, c, sizeof c);
         init = true;
     }
+    return chunk;
+}
+
+// Section transform: glTranslatef(offset) then glMultMatrixf(chunk matrix), with explicit
+// fused operations so the GPU culling (terrain.metal sectionMatrix) computes the same bits.
+static void sectionMatrix(const simd_float4x4& mv, float ox, float oy, float oz, float* out) {
+    float m[16];
+    memcpy(m, &mv, sizeof m);
+    for (int r = 0; r < 4; r++) m[12 + r] = fmaf(m[8 + r], oz, fmaf(m[4 + r], oy, fmaf(m[r], ox, m[12 + r])));
+    const float* chunk = chunkMatrix();
     for (int col = 0; col < 4; col++) {
         float b0 = chunk[col * 4], b1 = chunk[col * 4 + 1], b2 = chunk[col * 4 + 2], b3 = chunk[col * 4 + 3];
-        for (int r = 0; r < 4; r++) out[col * 4 + r] = m[r] * b0 + m[4 + r] * b1 + m[8 + r] * b2 + m[12 + r] * b3;
+        for (int r = 0; r < 4; r++) out[col * 4 + r] = fmaf(m[12 + r], b3, fmaf(m[8 + r], b2, fmaf(m[4 + r], b1, m[r] * b0)));
     }
 }
 
@@ -1168,6 +1174,8 @@ struct TerrainSet {
     std::vector<simd_float3> offset; // per entry: vanilla's camera-relative section offset
     id<MTLBuffer> table = nil;
     size_t tableOffset = 0;
+    bool gpu = false;                // culled on the GPU (gpuDraws)
+    TerrainGpuDraws gpuDraws;
 };
 
 static uint64_t g_execSerial = 0;
@@ -1215,7 +1223,26 @@ static void drawTerrain(Exec& x, const CmdHeader* h) {
             TerrainCmd all = t;
             all.layer = 4;   // every visible section, whatever its layers
             const TerrainEntry* e = terrainEntries(all, body, count);
-            buildTerrainSet(x, set, e, count);
+            set.gpu = false;
+            if (g_optGpuTerrain && count > 0) {
+                // the GPU makes the records and meshlets, in a command buffer ahead of this frame's
+                static std::vector<uint32_t> ids;
+                static std::vector<simd_float3> offs;
+                ids.resize(count);
+                offs.resize(count);
+                for (uint32_t i = 0; i < count; i++) { ids[i] = e[i].section; offs[i] = simd_make_float3(e[i].x, e[i].y, e[i].z); }
+                if (!x.pre) {
+                    x.pre = [engine().queue commandBuffer];
+                    x.pre.label = @"terrain cull";
+                    [x.pre enqueue];   // ahead of the frame's command buffer
+                }
+                simd_float4 ec = simd_mul(simd_inverse(g.mv), simd_make_float4(0, 0, 0, 1));
+                bool faceCull = g.raster.cull && g.raster.cullFace == 0x405 && g.raster.frontFace == 0x901 && g_optFaceCull;
+                set.gpu = terrainGpuCull(x.pre, ids.data(), offs.data(), count, g.mv, simd_make_float3(ec.x / ec.w, ec.y / ec.w, ec.z / ec.w),
+                                         faceCull, chunkMatrix(), set.gpuDraws);
+                set.sections.clear();
+            }
+            if (!set.gpu) buildTerrainSet(x, set, e, count);
             set.visibleList = true;
             set.frame = x.fr;
             set.serial = g_execSerial;
@@ -1226,6 +1253,18 @@ static void drawTerrain(Exec& x, const CmdHeader* h) {
         const TerrainEntry* e = terrainEntries(t, body, count);
         buildTerrainSet(x, set, e, count);
         set.visibleList = false;
+    }
+    if (set.gpu && set.visibleList) {
+        // one indirect draw: an instance per meshlet the culling wrote for this layer
+        if (!prepareDraw(x, 7, (int)t.format, true)) return;
+        sectionHeapsUse(x.enc);
+        [x.enc setVertexBuffer:set.gpuDraws.records offset:0 atIndex:3];
+        [x.enc setVertexBuffer:set.gpuDraws.meshlets offset:(NSUInteger)set.gpuDraws.meshletBase[t.layer] * 16 atIndex:4];
+        g_stats.drawCalls++;
+        [x.enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexType:MTLIndexTypeUInt16 indexBuffer:terrainMeshletIndices()
+                   indexBufferOffset:0 indirectBuffer:set.gpuDraws.args indirectBufferOffset:(NSUInteger)t.layer * 20];
+        x.xfDirty = true;
+        return;
     }
     count = (uint32_t)set.sections.size();
     if (count == 0) return;
@@ -1289,11 +1328,9 @@ static void drawTerrain(Exec& x, const CmdHeader* h) {
     sectionHeapsUse(x.enc);
     [x.enc setVertexBuffer:set.table offset:set.tableOffset atIndex:3];
     [x.enc setVertexBuffer:mbuf offset:moff atIndex:4];
-    uint32_t virtualQuads = (uint32_t)meshlets.size() * kMeshletQuads;
-    id<MTLBuffer> qi = quadIndices(virtualQuads);
     g_stats.drawCalls++;
-    [x.enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:(NSUInteger)virtualQuads * 6 indexType:MTLIndexTypeUInt32
-                     indexBuffer:qi indexBufferOffset:0];
+    [x.enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:kMeshletQuads * 6 indexType:MTLIndexTypeUInt16
+                     indexBuffer:terrainMeshletIndices() indexBufferOffset:0 instanceCount:meshlets.size()];
     x.xfDirty = true;
 }
 
@@ -1685,6 +1722,7 @@ void executeFrame(id<MTLCommandBuffer> cb, const uint8_t* cmds, size_t len) {
         }
     }
     endPass(x);
+    if (x.pre) [x.pre commit];   // enqueued ahead of `cb`, which is committed after this
     if (g_optGpuStats) {
         g_statsAcc.terrainDraws += g_stats.terrainDraws; g_statsAcc.terrainQuads += g_stats.terrainQuads;
         g_statsAcc.arenaDraws += g_stats.arenaDraws; g_statsAcc.meshDraws += g_stats.meshDraws; g_statsAcc.passes += g_stats.passes;
