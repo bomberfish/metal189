@@ -146,6 +146,9 @@ void (*setShowingWindow)(JNIEnv*, jclass, jlong) = nullptr;
 void (*setGrabbing)(JNIEnv*, jclass, jboolean, jfloat, jfloat) = nullptr;
 int* windowWidth = nullptr;
 int* windowHeight = nullptr;
+jboolean* hostGrabbing = nullptr;   // Amethyst's own idea of whether the game holds the mouse (diagnostics)
+long movesGrabbed = 0;              // cursor callbacks while grabbed, and their summed movement (diagnostics)
+double movedGrabbed = 0;
 void* window = nullptr;   // the surface's layer (Amethyst's window handle)
 bool active = false;
 
@@ -235,6 +238,10 @@ void onCursorPos(void*, double x, double y) {
     lastX = x;
     lastY = y;
     haveCursor = true;
+    if (g_cursorGrabbed) {
+        amethyst::movesGrabbed++;
+        amethyst::movedGrabbed += fabs(dx) + fabs(dy);
+    }
     float h = (float)windowInfo().pixelHeight.load();
     pushEvent({EV_MOUSE_MOVE, 0, 0, 0, (float)x, h - (float)y, (float)dx, (float)dy, nowNanos()});
 }
@@ -276,6 +283,7 @@ CAMetalLayer* attach() {
               find(setWinSize, "Java_org_lwjgl_glfw_GLFW_nglfwSetWindowSizeCallback");
     if (!ok) return nil;
     find(setGrabbing, "Java_org_lwjgl_glfw_CallbackBridge_nativeSetGrabbing");
+    find(hostGrabbing, "isGrabbing");
     find(windowWidth, "windowWidth");
     find(windowHeight, "windowHeight");
     log("ios: Amethyst found: using its game surface and input");
@@ -574,12 +582,49 @@ void windowSetVSync(bool on) { setVSync(on); }   // iOS layers always present on
 
 void cursorSetGrabbed(bool grab) {
     g_cursorGrabbed = grab;
-    // Amethyst switches its touch controls and virtual mouse between the game and menus
+    // Amethyst switches its touch controls and virtual mouse between the game and menus, and
+    // locks the pointer (mouse, trackpad) while the game holds it
     if (amethyst::active && amethyst::setGrabbing) amethyst::setGrabbing(nullptr, nullptr, grab, 0, 0);
+    log("ios: mouse %s (Amethyst told: %s)", grab ? "grabbed" : "released",
+        amethyst::active ? (amethyst::setGrabbing ? "yes" : "no hook") : "not Amethyst");
 }
 
 void platformPumpEvents() {
     if (!amethyst::active) return;
+    {
+        // diagnostics: what Amethyst and UIKit think, logged when it changes, and the cursor
+        // movement that arrives while grabbed (every 5 seconds)
+        static int lastHost = -1, lastLock = -1;
+        static double lastReport = 0;
+        int host = amethyst::hostGrabbing ? (int)*amethyst::hostGrabbing : -2;
+        if (host != lastHost) {
+            log("ios: Amethyst isGrabbing = %d", host);
+            lastHost = host;
+        }
+        __block int lock = -1;
+        static double lastLockCheck = 0;
+        double now = CACurrentMediaTime();
+        if (now - lastLockCheck > 1.0) {
+            lastLockCheck = now;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                UIWindowScene* sc = nil;
+                for (UIScene* s in UIApplication.sharedApplication.connectedScenes)
+                    if ([s isKindOfClass:UIWindowScene.class]) sc = (UIWindowScene*)s;
+                int l = sc ? (sc.pointerLockState.locked ? 1 : 0) : -1;
+                if (l != lastLock) {
+                    log("ios: pointer locked = %d", l);
+                    lastLock = l;
+                }
+            });
+        }
+        (void)lock;
+        if (now - lastReport > 5.0) {
+            if (g_cursorGrabbed) log("ios: %ld cursor moves while grabbed in 5 s (%.0f px)", amethyst::movesGrabbed, amethyst::movedGrabbed);
+            amethyst::movesGrabbed = 0;
+            amethyst::movedGrabbed = 0;
+            lastReport = now;
+        }
+    }
     amethyst::pump(amethyst::window);
     amethyst::rewind();
     amethyst::flushKey();

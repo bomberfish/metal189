@@ -83,6 +83,13 @@ class Jit:
             if resp != "OK":
                 log(f"touching page {addr + i * PAGE:#x} failed: {resp}")
                 return 0
+            if i % 2048 == 2047:
+                log(f"  {i + 1}/{pages} pages ({time.time() - t:.1f}s)")
+            if time.time() - t > 60:
+                # normally 5 s: something is wrong; never leave the app stopped
+                log("preparing the region is taking too long: giving up")
+                self.detach()
+                return 0
         log(f"prepared {addr:#x} + {size:#x} ({pages} pages, {time.time() - t:.1f}s)")
         return addr
 
@@ -244,6 +251,11 @@ def main():
     import threading
     threading.Thread(target=watchdog, daemon=True).start()
 
+    # over Wi-Fi the 8192 page writes take minutes instead of seconds
+    info = subprocess.run(["xcrun", "devicectl", "device", "info", "details", "--device", args.device],
+                          capture_output=True, text=True).stdout
+    if "Transport Type: wired" not in info:
+        log("warning: the device is not connected over USB; preparing JIT memory will be very slow (plug it in)")
     if not args.no_launch:
         log(f"launching {args.bundle}")
         subprocess.run(["xcrun", "devicectl", "device", "process", "launch", "--device", args.device,
@@ -281,6 +293,7 @@ def main():
     # Without symbols for this iOS build cached (Xcode's iOS DeviceSupport), lldb would read
     # every system library out of the device's memory.
     cmd("settings set target.memory-module-load-level minimal")
+    cmd("settings set plugin.process.gdb-remote.packet-timeout 10")   # a packet that never answers must not hang the app
     cmd(f"device select {coredevice_id(args.device)}", check=False)   # connects, yet reports failure
     log("attaching")
     cmd(f"device process attach -n {args.name}")
