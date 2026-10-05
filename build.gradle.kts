@@ -86,7 +86,10 @@ tasks.build { dependsOn(reobfJar) }
 // ./gradlew iosJar  ->  build/libs/metal189-<version>-ios.jar
 val buildNativeIos by tasks.registering(Exec::class) {
     workingDir = file("native")
-    commandLine("make", "-j8", "ios")
+    // IOS_SIGN_IDENTITY=<identity> signs the library for the launcher's team instead of ad-hoc
+    val identity = System.getenv("IOS_SIGN_IDENTITY") ?: "-"
+    commandLine("make", "-j8", "ios", "IOS_SIGN_IDENTITY=$identity")
+    inputs.property("signIdentity", identity)
     inputs.dir("native/src")
     inputs.dir("native/shaders")
     inputs.file("native/Makefile")

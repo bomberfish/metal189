@@ -50,10 +50,12 @@ $(IOS_BUILD)/obj/%.o: src/%.mm $(HDR)
 	@mkdir -p $(dir $@)
 	clang++ $(IOS_CXXFLAGS) -c $< -o $@
 
-# ad-hoc signed: iOS loads only signed code (a launcher may re-sign it with its own identity)
+# iOS loads only signed code: ad-hoc unless IOS_SIGN_IDENTITY names the launcher's team
+# identity (a launcher may also re-sign it, or bypass library validation while debugged)
+IOS_SIGN_IDENTITY ?= -
 $(IOS_BUILD)/libmetal189.dylib: $(IOS_OBJ)
 	clang++ $(IOS_LDFLAGS) $(IOS_OBJ) -o $@
-	codesign --force --sign - $@
+	codesign --force --timestamp=none --sign "$(IOS_SIGN_IDENTITY)" $@
 
 $(IOS_BUILD)/air/%.air: shaders/%.metal $(wildcard shaders/*.h)
 	@mkdir -p $(dir $@)
