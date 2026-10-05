@@ -19,6 +19,51 @@ public final class Limits {
         if (gs != null && gs.renderDistanceChunks > Config.maxRenderDistance) gs.renderDistanceChunks = Config.maxRenderDistance;
     }
 
+    private static int serverDistance;
+    private static long serverStepAt;
+    private static Object serverSeen;
+
+    /**
+     * The view distance a singleplayer server takes from the render distance (IntegratedServer.tick,
+     * patched). A server generates every chunk in a newly covered radius at once, holding up its
+     * tick (and a joining player): 64 chunks is ~16,600 chunks. Up to 32 this is vanilla; past it the
+     * server starts at 16 chunks and widens by 2 at most every second, once the players have been sent
+     * what it covers, so the world is playable while the far rings generate.
+     */
+    public static int serverViewDistance(int wanted) {
+        MinecraftServer s = MinecraftServer.getServer();
+        long now = System.nanoTime();
+        if (s != serverSeen) {   // a new world: start over
+            serverSeen = s;
+            serverDistance = 0;
+        }
+        if (wanted <= 32) {
+            serverDistance = wanted;
+            return wanted;
+        }
+        if (serverDistance < 16 || serverDistance > wanted) {
+            serverDistance = Math.min(wanted, 16);
+            serverStepAt = now;
+        } else if (serverDistance < wanted && now - serverStepAt >= 1_000_000_000L && caughtUp(s)) {
+            serverDistance = Math.min(wanted, serverDistance + 2);
+            serverStepAt = now;
+        }
+        return serverDistance;
+    }
+
+    /**
+     * Whether every player has been sent the chunks the current distance covers, but for the
+     * outer ring: a chunk is sent once populated, which needs its neighbours, so the edge waits
+     * for the next ring.
+     */
+    private static boolean caughtUp(MinecraftServer s) {
+        if (s == null || s.getConfigurationManager() == null) return true;
+        int edge = 8 * (serverDistance + 1) + 64;
+        for (net.minecraft.entity.player.EntityPlayerMP p : s.getConfigurationManager().playerEntityList)
+            if (p.loadedChunks.size() > edge) return false;
+        return true;
+    }
+
     /** PlayerManager.setPlayerViewRadius's upper clamp (vanilla 32). */
     public static int maxViewRadius() {
         return Math.max(32, Config.maxRenderDistance);

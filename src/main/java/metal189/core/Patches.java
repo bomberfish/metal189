@@ -113,6 +113,23 @@ public final class Patches {
 
             public boolean needsFrames() { return false; }
         });
+        register("net.minecraft.server.integrated.IntegratedServer", new ClassPatch() {
+            public boolean apply(ClassNode cn) {
+                MethodNode m = Asm.find(cn, "tick", "func_71217_p", "()V");
+                if (m == null) return false;
+                int n = 0;
+                for (AbstractInsnNode i = m.instructions.getFirst(); i != null; i = i.getNext()) {
+                    if (i.getOpcode() != Opcodes.GETFIELD) continue;
+                    String f = ((FieldInsnNode) i).name;
+                    if (!f.equals("renderDistanceChunks") && !f.equals("field_151451_c")) continue;
+                    m.instructions.insert(i, new org.objectweb.asm.tree.MethodInsnNode(Opcodes.INVOKESTATIC, "metal189/terrain/Limits", "serverViewDistance", "(I)I", false));
+                    n++;
+                }
+                return n > 0;
+            }
+
+            public boolean needsFrames() { return false; }
+        });
         register("net.minecraft.entity.player.EntityPlayerMP", new ClassPatch() {
             public boolean apply(ClassNode cn) {
                 MethodNode m = Asm.find(cn, "onUpdate", "func_70071_h_", "()V");
