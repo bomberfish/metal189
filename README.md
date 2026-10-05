@@ -137,8 +137,9 @@ and shader library inside; the `-dev` jar next to it is the deobfuscated build).
 
 `./gradlew iosJar` builds `build/libs/metal189-<version>-ios.jar`: the same mod with an
 arm64 iOS native library (iOS 17+, ad-hoc signed) and an iOS shader library, for
-launchers that run Forge 1.8.9 on iOS. It is untested on a device. It unpacks its
-natives inside the app's container (`$HOME/Library/Caches/metal189`).
+launchers that run Forge 1.8.9 on iOS. It unpacks its natives inside the app's
+container (`$HOME/Library/Caches/metal189`). Tested under Amethyst on an iPad Pro (M5,
+iPadOS 27): 120 fps (the display's limit) at 2816×1940, 42–47 fps with shaders.
 
 Under [Amethyst](https://github.com/AngelAuraMC/Amethyst-iOS) (the maintained
 PojavLauncher fork) it draws into the launcher's own game surface and takes input from
@@ -153,8 +154,30 @@ input from touch (in menus a finger is the mouse; in game a drag looks around, a
 a left click and a two-finger tap a right click), a hardware keyboard, and an iPad mouse
 or trackpad.
 
-iOS only loads signed code, so the launcher may need to allow or re-sign the library
-(Amethyst does when JIT is enabled).
+iOS only loads signed code: `IOS_SIGN_IDENTITY="<identity>" ./gradlew iosJar` signs the
+library for the launcher's team (otherwise it is ad-hoc signed, and loads only while the
+launcher bypasses library validation).
+
+#### Amethyst on a device over USB, with JIT from a Mac
+
+1. Sign Amethyst for development (get-task-allow) with a profile that grants the
+   increased memory limit, swapping in a Java 8 with the iOS 27 JIT fixes, patched
+   (`build-ios`-style paths are examples):
+
+       tools/amethyst-jvm-fix.py jre8/lib/server/libjvm.dylib
+       JRE8=jre8 tools/amethyst-sign.sh amethyst.ipa dev.mobileprovision "<identity>" signed.ipa
+       xcrun devicectl device install app --device <udid> Payload/AngelAuraAmethyst.app
+
+   (Java 8 from angelauramc-openjdk-build f03a5a05 or later; Amethyst's July builds carry
+   an older one whose JIT faults on iOS 27.)
+2. Put `metal189-<version>-ios.jar` in the instance's `mods`, and give Java these
+   arguments (Amethyst settings): `-XX:+PreferInterpreterNativeStubs
+   -XX:ReservedCodeCacheSize=128m -XX:InitialCodeCacheSize=128m
+   -XX:CompressedClassSpaceSize=128m`, with at most about 1.5 GB of memory (the process
+   gets about 4 GB of address space in all).
+3. `tools/amethyst-jit.py --play "<profile>"` launches Amethyst, attaches Xcode's lldb,
+   presses Play and serves Amethyst's JIT requests (what StikDebug does on the device),
+   then detaches. Without `--play`, tap Play yourself once it says it is attached.
 
 ## Development and testing
 
