@@ -1257,6 +1257,74 @@ kernel void light_flood_kernel(texture3d<uint, access::read> props [[texture(0)]
     dst.write(float4(L, 1.0), tc);
 }
 
+// ---------------------------------------------------------------------------
+// ray-traced block light: the lights of the voxel volume, binned by 8-block cell
+
+// Every light-giving block of the volume into `lights` (volume coordinates), except those
+// buried in solid blocks and other lights (the inside of a lava lake lights nothing).
+kernel void light_list_kernel(texture3d<uint, access::read> props [[texture(0)]], constant int4& wrap [[buffer(0)]],
+                              device atomic_uint* count [[buffer(1)]], device RtLight* lights [[buffer(2)]],
+                              uint3 gid [[thread_position_in_grid]]) {
+    int N = wrap.w;
+    if (any(gid >= uint(N))) return;
+    uint m = uint(N - 1);
+    uint3 w = uint3(wrap.xyz);
+    uint4 p = props.read((gid + w) & m);
+    if (p.w != 3u) return;
+    float3 col = float3(p.xyz) * (1.0 / 255.0);
+    float level = max(col.r, max(col.g, col.b)) * 15.0;
+    if (level < 0.5) return;
+    bool open = false;
+    for (int k = 0; k < 6 && !open; k++) {
+        int3 o = int3(gid);
+        o[k >> 1] += (k & 1) ? 1 : -1;
+        if (any(o < 0) || any(o >= N)) { open = true; break; }
+        uint ow = props.read((uint3(o) + w) & m).w;
+        open = ow == 0u || ow == 2u;
+    }
+    if (!open) return;
+    uint i = atomic_fetch_add_explicit(count, 1u, memory_order_relaxed);
+    if (i >= RT_LIGHT_CAP) return;
+    RtLight L;
+    L.pos = float4(float3(gid) + 0.5, 0.0);
+    L.color = float4(col, level);
+    lights[i] = L;
+}
+
+// Per cell: the lights that can reach it (vanilla's reach: level - distance > 0), the
+// strongest at its centre first. grid[cell * (RT_LIGHTS_PER_CELL + 1)] holds the count.
+kernel void light_grid_kernel(device const RtLight* lights [[buffer(0)]], device atomic_uint* count [[buffer(1)]],
+                              device uint* grid [[buffer(2)]], uint3 gid [[thread_position_in_grid]]) {
+    if (any(gid >= uint(RT_LIGHT_CELLS))) return;
+    float3 lo = float3(gid) * float(RT_LIGHT_CELL), hi = lo + float(RT_LIGHT_CELL), ctr = lo + float(RT_LIGHT_CELL) * 0.5;
+    uint n = min(atomic_load_explicit(count, memory_order_relaxed), uint(RT_LIGHT_CAP));
+    uint ids[RT_LIGHTS_PER_CELL];
+    float sc[RT_LIGHTS_PER_CELL];
+    uint k = 0;
+    for (uint i = 0; i < n; i++) {
+        RtLight L = lights[i];
+        float reach = L.color.w;
+        float3 q = clamp(L.pos.xyz, lo, hi);
+        if (distance(q, L.pos.xyz) >= reach) continue;
+        float dc = max(distance(ctr, L.pos.xyz) - float(RT_LIGHT_CELL) * 0.4, 0.0);
+        float f = saturate((reach - dc) / 15.0);
+        float s = dot(L.color.rgb, float3(0.2126, 0.7152, 0.0722)) / max(L.color.w, 1e-3) * f * f + 1e-6;
+        if (k == RT_LIGHTS_PER_CELL && s <= sc[k - 1]) continue;
+        int j = int(min(k, uint(RT_LIGHTS_PER_CELL - 1)));
+        while (j > 0 && sc[j - 1] < s) {
+            sc[j] = sc[j - 1];
+            ids[j] = ids[j - 1];
+            j--;
+        }
+        sc[j] = s;
+        ids[j] = i;
+        k = min(k + 1u, uint(RT_LIGHTS_PER_CELL));
+    }
+    uint base = ((gid.z * RT_LIGHT_CELLS + gid.y) * RT_LIGHT_CELLS + gid.x) * (RT_LIGHTS_PER_CELL + 1);
+    grid[base] = k;
+    for (uint i = 0; i < k; i++) grid[base + 1 + i] = ids[i];
+}
+
 // Which 4-block bricks of a slot hold any block, and whether the slot (16 blocks) does, so
 // traces cross empty space a slot or a brick at a time. One threadgroup of 4^3 per slot.
 kernel void voxel_occ_kernel(texture3d<ushort, access::read> vox [[texture(0)]], texture3d<ushort, access::write> occ [[texture(1)]],
@@ -1455,8 +1523,10 @@ fragment float4 rtao_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& 
 // ---------------------------------------------------------------------------
 // ray-traced global illumination (one diffuse bounce, half resolution)
 
-// One cosine-weighted GI ray (ray index `ray` decorrelates several per texel).
-static float3 giTraceRay(constant AdvFrame& fr, float2 px, int ray, float3 world, float3 eye, float3 nWorld, float3 tx, float3 ty,
+// One cosine-weighted GI ray (ray index `ray` decorrelates several per texel): rgb the
+// radiance it brings back, a 1 if it reached the sky. With GI off (ray-traced sky light
+// alone) it only asks whether the sky is visible that way.
+static float4 giTraceRay(constant AdvFrame& fr, float2 px, int ray, float3 world, float3 eye, float3 nWorld, float3 tx, float3 ty,
                          texture2d<float> skyLut, instance_acceleration_structure tlas, device const RtInstance* rtInst,
                          primitive_acceleration_structure entAs, device const RtEntVertex* entV, device const RtEntDraw* entD,
                          device const RtEntTex* entT, device const uchar* emissions, texture2d<float> atlas, sampler pointS,
@@ -1465,15 +1535,19 @@ static float3 giTraceRay(constant AdvFrame& fr, float2 px, int ray, float3 world
     float r = sqrt(xi.x), phi = 6.2831853 * xi.y;
     float3 dir = normalize(tx * (r * cos(phi)) + ty * (r * sin(phi)) + nWorld * sqrt(max(0.0, 1.0 - xi.x)));
     float3 o = world + fr.rtCam.xyz + nWorld * (0.01 + length(eye) * 0.0002);
+    // sky (no sun disc: direct sun is handled by the deferred pass)
+    float3 skyC = (fr.flags.y != 0 ? toLinear(fr.fogColor.rgb) * 0.3 : skyBase(fr, skyLut, lin, dir)) * fr.ambient.a;
+    if (GI_TUNE.x < 1.5) {
+        bool occ = rtOccluded(tlas, rtInst, atlas, pointS, o, dir, RT_TUNE.w);
+        if (!occ && (fr.flags.x & ADV_RT_ENTITIES)) occ = rtEntOccludedSolid(entAs, o, dir, RT_TUNE.w);
+        return occ ? float4(0.0) : float4(skyC, 1.0);
+    }
     RtHit h = rtClosest(tlas, rtInst, atlas, pointS, o, dir, RT_TUNE.w);
     if (fr.flags.x & ADV_RT_ENTITIES) {
         RtHit eh = rtEntClosestSolid(entAs, o, dir, h.t);
-        if (eh.hit) return rtEntShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, entV, entD, entT, eh, o, dir, true) * GI_TUNE.y;
+        if (eh.hit) return float4(rtEntShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, entV, entD, entT, eh, o, dir, true) * GI_TUNE.y, 0.0);
     }
-    if (!h.hit) {
-        // sky (no sun disc: direct sun is handled by the deferred pass)
-        return (fr.flags.y != 0 ? toLinear(fr.fogColor.rgb) * 0.3 : skyBase(fr, skyLut, lin, dir)) * fr.ambient.a;
-    }
+    if (!h.hit) return float4(skyC, 1.0);
     device const BlockVertex* v = rtInst[h.inst].verts[h.geom];
     uint3 t = rtTri(h.prim);
     float3 w = rtBary(h.bary);
@@ -1493,16 +1567,19 @@ static float3 giTraceRay(constant AdvFrame& fr, float2 px, int ray, float3 world
     float3 lightCol = sunUp ? fr.sunColor.rgb : fr.moonColor.rgb;
     float3 c = float3(0);
     float ndl = saturate(dot(n, L));
-    if (ndl > 0.0 && fr.flags.y == 0 && !rtOccluded(tlas, rtInst, atlas, pointS, p + n * 0.01, L, 256.0))
-        c += lightCol * albedo * ndl;
+    // (no sun deep under cover, as in the lighting pass: no shadow ray needed there)
+    float sunGate = smoothstep(0.35, 0.9, lm.y);
+    if (ndl > 0.0 && sunGate > 0.0 && fr.flags.y == 0 && !rtOccluded(tlas, rtInst, atlas, pointS, p + n * 0.01, L, 128.0))
+        c += lightCol * albedo * ndl * sunGate;
     c += albedo * skyAmbient(fr, skyLut, lin, n) * lm.y * lm.y * fr.ambient.a;
     c += albedo * fr.blockLight.rgb * pow(lm.x, fr.blockLight.a) * 0.5;
     c += albedo * float(emissions[state]) * (6.0 / 255.0);
-    return c * GI_TUNE.y;
+    return float4(c * GI_TUNE.y, 0.0);
 }
 
 // Cosine-weighted rays per texel (GI quality); hits are shaded with sun (shadow ray), sky
-// light and emission, misses see the sky. Output: incoming indirect radiance (Lambert-normalised).
+// light and emission, misses see the sky. Output: rgb incoming indirect radiance
+// (Lambert-normalised), a the share of rays that reached the sky (ray-traced sky light).
 fragment float4 gi_trace_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
                                   depth2d<float> depth [[texture(0)]], texture2d<float> gLinZ [[texture(1)]],
                                   texture2d<float> gNormal [[texture(2)]], texture2d<float> skyLut [[texture(5)]],
@@ -1526,20 +1603,181 @@ fragment float4 gi_trace_fragment(FullscreenOut in [[stage_in]], constant AdvFra
     float3 nWorld = normalize((fr.invView * float4(normalize(gNormal.read(fp).xyz), 0)).xyz);
     float3 up = abs(nWorld.y) < 0.999 ? float3(0, 1, 0) : float3(1, 0, 0);
     float3 tx = normalize(cross(up, nWorld)), ty = cross(nWorld, tx);
-    float3 sum = float3(0.0);
+    float4 sum = float4(0.0);
     int rays = clamp(int(GI_TUNE.z + 0.5), 1, 4);
     for (int ray = 0; ray < rays; ray++)
         sum += giTraceRay(fr, in.position.xy, ray, world, eye, nWorld, tx, ty, skyLut, tlas, rtInst, entAs, entV, entD, entT, emissions, atlas, pointS, lin);
-    return float4(sum / float(rays), 1.0);
+    return sum / float(rays);
+}
+
+// Temporal accumulation targets (GI, ray-traced block light): rgba, and depth with the count.
+struct GiTemporalOut {
+    float4 gi [[color(0)]];
+    float2 z [[color(1)]];
+};
+
+// ---------------------------------------------------------------------------
+// ray-traced block light (full resolution): each pixel weighs the lights of its 8-block cell
+// by what they would give it unshadowed (vanilla's falloff curve, N.L, colour), picks two in
+// proportion (resampled importance sampling over the whole cell list) and traces a shadow ray
+// to a random point of each light's block: unbiased, soft-shadowed, averaged by TAA.
+// Output: rgb the block light reaching the point (times fr.blockLight in the lighting pass),
+// a 1, or a 0 outside the light volume (the lighting pass then uses the lightmap).
+#define RTL_TUNE fr.tune[18]   // x: frame interpolation, y: ray-traced sky light, z: ray-traced block light, w: block light samples
+
+fragment float4 blocklight_trace_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
+                                          depth2d<float> depth [[texture(0)]], texture2d<float> gLinZ [[texture(1)]],
+                                          texture2d<float> gNormal [[texture(2)]],
+                                          instance_acceleration_structure tlas [[buffer(10)]],
+                                          device const RtInstance* rtInst [[buffer(11)]],
+                                          primitive_acceleration_structure entAs [[buffer(12)]],
+                                          device const RtLight* lights [[buffer(16)]],
+                                          device const uint* grid [[buffer(17)]],
+                                          texture3d<uint> props [[texture(3)]],
+                                          texture2d<float> atlas [[texture(7)]], sampler pointS [[sampler(2)]]) {
+    uint2 px = uint2(in.position.xy);
+    if (depth.read(px) >= 1.0) return float4(0.0, 0.0, 0.0, 1.0);
+    float2 ndc = float2(in.position.x * fr.screen.z * 2.0 - 1.0, in.position.y * fr.screen.w * 2.0 - 1.0) - fr.jitter.xy;
+    float4 pf = fr.invProj * float4(ndc, 1.0, 1.0);
+    float3 rd = pf.xyz / pf.w;
+    float3 eye = rd * (gLinZ.read(px).r / -rd.z);
+    float3 world = (fr.invView * float4(eye, 1)).xyz;
+    float3 nWorld = normalize((fr.invView * float4(normalize(gNormal.read(px).xyz), 0)).xyz);
+    float3 vol = world + fr.voxCam.xyz + nWorld * 0.02;
+    int3 cell = int3(floor(vol / float(RT_LIGHT_CELL)));
+    if (any(cell < 0) || any(cell >= RT_LIGHT_CELLS)) return float4(0.0);
+    uint base = ((uint(cell.z) * RT_LIGHT_CELLS + uint(cell.y)) * RT_LIGHT_CELLS + uint(cell.x)) * (RT_LIGHTS_PER_CELL + 1);
+    uint k = min(grid[base], uint(RT_LIGHTS_PER_CELL));
+    bool coloured = fr.tune[16].x > 0.5;   // coloured block light setting: lights keep their colour
+    float w[RT_LIGHTS_PER_CELL];
+    float wsum = 0.0;
+    for (uint i = 0; i < k; i++) {
+        RtLight L = lights[grid[base + 1 + i]];
+        float3 dv = L.pos.xyz - vol;
+        float d = length(dv);
+        float fall = saturate((L.color.w - d) / 15.0);
+        float geom = d > 0.05 ? saturate((dot(nWorld, dv / d) + 0.15) / 1.15) : 1.0;
+        float3 c = coloured ? L.color.rgb / max(L.color.w / 15.0, 1e-3) : float3(1.0);
+        w[i] = fall > 0.0 ? dot(c, float3(0.2126, 0.7152, 0.0722)) * pow(fall, fr.blockLight.a) * geom : 0.0;
+        wsum += w[i];
+    }
+    if (wsum <= 0.0) return float4(0.0, 0.0, 0.0, 1.0);
+    float3 o = world + fr.rtCam.xyz + nWorld * (0.01 + length(eye) * 0.0002);
+    float3 toRt = fr.rtCam.xyz - fr.voxCam.xyz;   // volume coordinates -> ray tracing space
+    int samples = clamp(int(RTL_TUNE.w + 0.5), 1, 4);
+    float3 sum = float3(0.0);
+    for (int s = 0; s < samples; s++) {
+        float4 xi = float4(hash22(in.position.xy * 0.913 + float(fr.flags.z % 1024u) * float2(3.31, 7.17) + float(s) * float2(1.9, 4.3)),
+                           hash22(in.position.yx * 1.137 + float(fr.flags.z % 1024u) * float2(5.73, 2.11) + float(s) * float2(6.1, 0.7)));
+        float pick = xi.x * wsum;
+        uint j = 0;
+        for (; j + 1 < k; j++) {
+            pick -= w[j];
+            if (pick < 0.0) break;
+        }
+        if (w[j] <= 0.0) continue;
+        RtLight L = lights[grid[base + 1 + j]];
+        // a random point of the light's block: soft shadows
+        float3 target = L.pos.xyz + (float3(xi.yzw) - 0.5) * 0.6 + toRt;
+        float3 dv = target - o;
+        float dist = length(dv);
+        float tmax = dist - 0.9;   // stop short of the light's own block
+        bool vis = true;
+        if (tmax > 0.0) {
+            float3 dir = dv / dist;
+            vis = !rtOccluded(tlas, rtInst, atlas, pointS, o, dir, tmax);
+            if (vis && (fr.flags.x & ADV_RT_ENTITIES)) vis = !rtEntOccludedSolid(entAs, o, dir, tmax);
+        }
+        if (!vis) continue;
+        // through stained glass and the like (not in the acceleration structures): their colour,
+        // from the voxel volume's light properties along the way
+        float3 T = float3(1.0);
+        if (coloured) {
+            float3 a = vol, b = L.pos.xyz;
+            float len = distance(a, b);
+            int n = int(ceil(len * 2.0));
+            int3 last = int3(floor(a)), lc = int3(floor(b));
+            uint m = uint(fr.voxel.w - 1);
+            for (int i = 1; i < n && i < 40; i++) {
+                int3 cc = int3(floor(mix(a, b, float(i) / float(n))));
+                if (all(cc == last) || all(cc == lc)) continue;
+                last = cc;
+                if (any(cc < 0) || any(cc >= fr.voxel.w)) continue;
+                uint4 pr = props.read((uint3(cc) + uint3(fr.voxel.xyz)) & m);
+                if (pr.w == 2u) T *= float3(pr.xyz) * (1.0 / 255.0);
+            }
+        }
+        float3 dvc = L.pos.xyz - vol;
+        float d = length(dvc);
+        float fall = saturate((L.color.w - d) / 15.0);
+        float geom = d > 0.05 ? saturate((dot(nWorld, dvc / d) + 0.15) / 1.15) : 1.0;
+        float3 c = coloured ? L.color.rgb / max(L.color.w / 15.0, 1e-3) : float3(1.0);
+        sum += T * c * pow(fall, fr.blockLight.a) * geom * (wsum / w[j]);
+    }
+    sum /= float(samples);
+    if (!all(isfinite(sum))) sum = float3(0.0);   // a degenerate normal must not poison the history
+    return float4(min(sum, float3(64.0)), 1.0);
+}
+
+// Temporal accumulation of the ray-traced block light (full resolution), as the GI's: last
+// frame's history reprojected with the camera motion, disocclusions rejected by depth, up to
+// 24 frames. `valid`: the history can be used.
+fragment GiTemporalOut block_temporal_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
+                                               constant float& valid [[buffer(0)]],
+                                               texture2d<float> sample [[texture(0)]], texture2d<float> hist [[texture(1)]],
+                                               texture2d<float> histZ [[texture(2)]], texture2d<float> gLinZ [[texture(3)]],
+                                               depth2d<float> depth [[texture(4)]], sampler lin [[sampler(0)]]) {
+    GiTemporalOut o;
+    uint2 c = uint2(in.position.xy);
+    float4 cur = sample.read(c);
+    float z = gLinZ.read(c).r;
+    o.z = float2(z, 1.0);
+    o.gi = cur;
+    if (valid < 0.5 || depth.read(c) >= 1.0) return o;
+    float2 ndc = float2(in.position.x * fr.screen.z * 2.0 - 1.0, in.position.y * fr.screen.w * 2.0 - 1.0) - fr.jitter.xy;
+    float4 pf = fr.invProj * float4(ndc, 1.0, 1.0);
+    float3 rd = pf.xyz / pf.w;
+    float3 rel = (fr.invView * float4(rd * (z / -rd.z), 1.0)).xyz;
+    float4 pc = fr.prevViewProj * float4(rel + fr.taa.xyz, 1.0);
+    if (pc.w <= 0.0) return o;
+    float2 puv = (pc.xy / pc.w) * 0.5 + 0.5;
+    if (any(puv < 0.0) || any(puv > 1.0)) return o;
+    uint2 ph = min(uint2(puv * float2(hist.get_width(), hist.get_height())), uint2(hist.get_width() - 1, hist.get_height() - 1));
+    float2 pz = histZ.read(ph).rg;
+    if (abs(pz.x - pc.w) > max(pc.w * 0.03, 0.05)) return o;   // disocclusion
+    float4 h = hist.sample(lin, puv);
+    if (!all(isfinite(h))) return o;
+    float n = min(pz.y + 1.0, 24.0);
+    o.gi = mix(h, cur, 1.0 / n);
+    o.z = float2(z, n);
+    return o;
+}
+
+// Separable depth/normal-aware blur of the ray-traced block light (full resolution, p.xy:
+// direction, p.z: radius in pixels between taps).
+fragment float4 blockblur_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
+                                   texture2d<float> src [[texture(0)]], texture2d<float> gLinZ [[texture(1)]],
+                                   texture2d<float> gNormal [[texture(2)]], constant float4& p [[buffer(0)]]) {
+    int2 c = int2(in.position.xy);
+    int2 mx = int2(src.get_width(), src.get_height()) - 1;
+    float z0 = gLinZ.read(uint2(c)).r;
+    float3 n0 = gNormal.read(uint2(c)).xyz;
+    float4 sum = 0.0;
+    float wsum = 0.0;
+    for (int i = -4; i <= 4; i++) {
+        int2 q = clamp(c + int2(p.xy * p.z) * i, int2(0), mx);
+        float z = gLinZ.read(uint2(q)).r;
+        float3 nq = gNormal.read(uint2(q)).xyz;
+        float w = exp(-float(i * i) / 8.0) * exp(-abs(z - z0) / max(z0 * 0.02, 0.03)) * pow(saturate(dot(nq, n0)), 16.0);
+        sum += src.read(uint2(q)) * w;
+        wsum += w;
+    }
+    return sum / max(wsum, 1e-4);
 }
 
 // Temporal accumulation of the GI samples: reprojects last frame's history with the camera
-// motion, rejects disocclusions by depth, and keeps up to 32 frames (count in alpha).
-struct GiTemporalOut {
-    float4 gi [[color(0)]];
-    float z [[color(1)]];
-};
-
+// motion, rejects disocclusions by depth, and keeps up to 32 frames. rgba accumulate
+// together (a: sky visibility); the depth target's second channel keeps the count.
 fragment GiTemporalOut gi_temporal_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
                                             texture2d<float> sample [[texture(0)]], texture2d<float> hist [[texture(1)]],
                                             texture2d<float> histZ [[texture(2)]], texture2d<float> gLinZ [[texture(3)]],
@@ -1547,10 +1785,10 @@ fragment GiTemporalOut gi_temporal_fragment(FullscreenOut in [[stage_in]], const
     GiTemporalOut o;
     uint2 c = uint2(in.position.xy);
     uint2 fp = min(c * 2u + 1u, uint2(fr.screen.xy) - 1u);
-    float3 cur = sample.read(c).rgb;
+    float4 cur = sample.read(c);
     float z = gLinZ.read(fp).r;
-    o.z = z;
-    o.gi = float4(cur, 1.0);
+    o.z = float2(z, 1.0);
+    o.gi = cur;
     if (fr.post.w < 0.5 || depth.read(fp) >= 1.0) return o;
     float2 ndc = float2((float(fp.x) + 0.5) * fr.screen.z * 2.0 - 1.0, (float(fp.y) + 0.5) * fr.screen.w * 2.0 - 1.0) - fr.jitter.xy;
     float4 pf = fr.invProj * float4(ndc, 1.0, 1.0);
@@ -1562,11 +1800,12 @@ fragment GiTemporalOut gi_temporal_fragment(FullscreenOut in [[stage_in]], const
     float2 puv = (pc.xy / pc.w) * 0.5 + 0.5;
     if (any(puv < 0.0) || any(puv > 1.0)) return o;
     uint2 ph = min(uint2(puv * float2(hist.get_width(), hist.get_height())), uint2(hist.get_width() - 1, hist.get_height() - 1));
-    float pz = histZ.read(ph).r;
-    if (abs(pz - pc.w) > max(pc.w * 0.04, 0.08)) return o;   // disocclusion
+    float2 pz = histZ.read(ph).rg;
+    if (abs(pz.x - pc.w) > max(pc.w * 0.04, 0.08)) return o;   // disocclusion
     float4 h = hist.sample(lin, puv);
-    float n = min(h.a + 1.0, 32.0);
-    o.gi = float4(mix(h.rgb, cur, 1.0 / n), n);
+    float n = min(pz.y + 1.0, 32.0);
+    o.gi = mix(h, cur, 1.0 / n);
+    o.z = float2(z, n);
     return o;
 }
 
@@ -1614,7 +1853,7 @@ fragment float4 ssao_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& 
     return float4(ao, 1.0, 1.0, 1.0);
 }
 
-// Separable depth/normal-aware blur of the half-resolution GI (rgb), radius 6.
+// Separable depth/normal-aware blur of the half-resolution GI (rgb, and a: sky visibility), radius 6.
 fragment float4 giblur_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
                                 texture2d<float> src [[texture(0)]], texture2d<float> gLinZ [[texture(1)]],
                                 texture2d<float> gNormal [[texture(2)]], constant float4& p [[buffer(0)]]) {
@@ -1623,8 +1862,7 @@ fragment float4 giblur_fragment(FullscreenOut in [[stage_in]], constant AdvFrame
     uint2 fpc = min(uint2(c) * 2u + 1u, uint2(fr.screen.xy) - 1u);
     float z0 = gLinZ.read(fpc).r;
     float3 n0 = gNormal.read(fpc).xyz;
-    float4 center = src.read(uint2(c));
-    float3 sum = 0.0;
+    float4 sum = 0.0;
     float wsum = 0.0;
     for (int i = -6; i <= 6; i++) {
         int2 q = clamp(c + int2(p.xy) * i, int2(0), mx);
@@ -1632,10 +1870,10 @@ fragment float4 giblur_fragment(FullscreenOut in [[stage_in]], constant AdvFrame
         float z = gLinZ.read(fq).r;
         float3 nq = gNormal.read(fq).xyz;
         float w = exp(-float(i * i) / 18.0) * exp(-abs(z - z0) / max(z0 * 0.03, 0.05)) * pow(saturate(dot(nq, n0)), 16.0);
-        sum += src.read(uint2(q)).rgb * w;
+        sum += src.read(uint2(q)) * w;
         wsum += w;
     }
-    return float4(sum / max(wsum, 1e-4), center.a);
+    return sum / max(wsum, 1e-4);
 }
 
 // Separable depth/normal-aware blur of the half-resolution AO (p.xy: texel step).
@@ -2206,6 +2444,49 @@ fragment float4 refl_trace_fragment(FullscreenOut in [[stage_in]],
     return float4(sum / float(samples), hits / float(samples));
 }
 
+// The lighting pass's rays, in their own pass (a ray-tracing variant of the lighting shader
+// runs it all slower): r the sun's (or moon's) visibility, one ray per pixel and frame to a
+// random point of a disc the sun's size (TAA averages the penumbra); g whether the camera
+// sees the point (the held item's light).
+fragment float4 sun_trace_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
+                                   depth2d<float> depth [[texture(0)]], texture2d<float> gLinZ [[texture(1)]],
+                                   texture2d<float> gNormal [[texture(2)]], texture2d<float> gLight [[texture(3)]],
+                                   instance_acceleration_structure tlas [[buffer(10)]],
+                                   device const RtInstance* rtInst [[buffer(11)]],
+                                   texture2d<float> atlas [[texture(7)]], sampler pointS [[sampler(2)]]) {
+    uint2 px = uint2(in.position.xy);
+    if (depth.read(px) >= 1.0) return float4(1.0);
+    float2 ndc = float2(in.position.x * fr.screen.z * 2.0 - 1.0, in.position.y * fr.screen.w * 2.0 - 1.0) - fr.jitter.xy;
+    float4 pf = fr.invProj * float4(ndc, 1.0, 1.0);
+    float3 rd = pf.xyz / pf.w;
+    float3 eye = rd * (gLinZ.read(px).r / -rd.z);
+    float3 world = (fr.invView * float4(eye, 1)).xyz;
+    float3 n = normalize(gNormal.read(px).xyz);
+    float3 nWorld = normalize((fr.invView * float4(n, 0)).xyz);
+    float4 r = float4(1.0);
+    float3 lightDir = fr.sunDirView.w > 0.0 ? fr.sunDirView.xyz : fr.moonDirView.xyz;
+    uint material = uint(gLight.read(px).z * 255.0 + 0.5);
+    if ((dot(n, lightDir) > 0.0 || isFoliage(material)) && fr.flags.y == 0) {
+        float3 Lw = fr.sunDirView.w > 0.0 ? fr.sunDirWorld.xyz : -fr.sunDirWorld.xyz;
+        float3 nOff = dot(nWorld, Lw) >= 0.0 ? nWorld : -nWorld;
+        float3 o = world + fr.rtCam.xyz + nOff * (0.004 + length(eye) * 0.0002);
+        float3 Ls = Lw;
+        if (RT_SOFT > 0.0 && (fr.flags.x & ADV_TAA)) {
+            float2 xi = hash22(in.position.xy * 1.31 + float(fr.flags.z % 512u) * float2(3.17, 7.53));
+            float rr = sqrt(xi.x) * tan(RT_SOFT), phi = 6.2831853 * xi.y;
+            float3 a = normalize(cross(abs(Lw.y) < 0.99 ? float3(0, 1, 0) : float3(1, 0, 0), Lw)), b = cross(Lw, a);
+            Ls = normalize(Lw + (a * cos(phi) + b * sin(phi)) * rr);
+        }
+        r.r = rtOccluded(tlas, rtInst, atlas, pointS, o, Ls, 320.0) ? 0.0 : 1.0;
+    }
+    float dcam = length(eye);
+    if (fr.post.z > 0.5 && dcam > 1.0 && dcam < fr.post.z) {
+        float3 o = world + fr.rtCam.xyz + nWorld * 0.02;
+        r.g = rtOccluded(tlas, rtInst, atlas, pointS, o, normalize(-world), dcam - 0.8) ? 0.0 : 1.0;
+    }
+    return r;
+}
+
 fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                                constant AdvFrame& fr [[buffer(1)]],
                                texture2d<float> gAlbedo [[texture(0)]],
@@ -2230,6 +2511,8 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                                texture2d<float> glassDepth [[texture(21)]], texture2d<float> glassColor [[texture(22)]],
                                texture3d<float> blockLightVol [[texture(23)]],
                                texture2d<float> reflTex [[texture(24)]],
+                               texture2d<float> blockRt [[texture(25)]],
+                               texture2d<float> sunRt [[texture(26)]],
                                sampler cmp [[sampler(0)]], sampler lin [[sampler(1)]],
                                sampler rep [[sampler(3)]], sampler wrep [[sampler(4)]],
                                instance_acceleration_structure tlas [[buffer(10), function_constant(ac_rt)]],
@@ -2299,6 +2582,10 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     waterSun *= glassT;
     float3 skyTint = mix(float3(1.0), glassT, 0.7);
     float3 color = float3(0);
+    // GI (half resolution, denoised): rgb sky light and bounce, a the share of rays that saw
+    // the sky, which ray-traced sky light uses instead of the lightmap's sky level
+    float4 giS = (fr.flags.x & (ADV_RT_GI | ADV_WSGI)) ? giTex.sample(lin, in.uv) : float4(0.0);
+    bool rtSky = (fr.flags.x & ADV_RT_SKY) && (fr.flags.x & ADV_RT_GI);
     float3 lightDir = fr.sunDirView.w > 0.0 ? fr.sunDirView.xyz : fr.moonDirView.xyz;
     float3 lightCol = fr.sunDirView.w > 0.0 ? fr.sunColor.rgb : fr.moonColor.rgb;
     float ndl = dot(n, lightDir);
@@ -2311,26 +2598,16 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
         float shadow = 1.0;
         // shadow lookups offset towards the light (a backlit leaf must not shadow itself)
         float3 nShadow = ndl < 0.0 ? -nWorld : nWorld;
-        if (ac_rt && (fr.flags.x & ADV_RT_SHADOW)) {
-            // terrain: exact ray-traced shadows over the whole loaded world;
-            // the shadow map then only holds dynamic geometry (entities)
-            float3 Lw = fr.sunDirView.w > 0.0 ? fr.sunDirWorld.xyz : -fr.sunDirWorld.xyz;
-            float3 nOff = dot(nWorld, Lw) >= 0.0 ? nWorld : -nWorld;
-            float3 o = world + fr.rtCam.xyz + nOff * (0.004 + length(eye) * 0.0002);
-            float3 Ls = Lw;
-            if (RT_SOFT > 0.0 && (fr.flags.x & ADV_TAA)) {
-                // a disc the size of the sun: one ray per pixel and frame, TAA averages the penumbra
-                float2 xi = hash22(in.position.xy * 1.31 + float(fr.flags.z % 512u) * float2(3.17, 7.53));
-                float r = sqrt(xi.x) * tan(RT_SOFT), phi = 6.2831853 * xi.y;
-                float3 a = normalize(cross(abs(Lw.y) < 0.99 ? float3(0, 1, 0) : float3(1, 0, 0), Lw)), b = cross(Lw, a);
-                Ls = normalize(Lw + (a * cos(phi) + b * sin(phi)) * r);
-            }
-            rtShadow = rtOccluded(tlas, rtInst, atlas, pointS, o, Ls, 320.0) ? 0.0 : 1.0;
+        if (fr.flags.x & ADV_RT_SHADOW) {
+            // terrain: exact ray-traced shadows over the whole loaded world (traced in
+            // sun_trace_fragment, its own pass); the shadow map then only holds dynamic
+            // geometry (entities)
+            rtShadow = sunRt.read(px).r;
             shadow = rtShadow;
             if (fr.flags.x & ADV_SHADOWS) shadow *= sampleShadow(fr, shadowMap, cmp, world, nShadow, abs(ndl));
         } else if (fr.flags.x & ADV_SHADOWS) shadow = sampleShadow(fr, shadowMap, cmp, world, nShadow, abs(ndl));
         // no direct light deep inside caves; under water the light path above decides instead
-        float skyGate = waterPath > 0.0 ? 1.0 : smoothstep(0.35, 0.9, skyLight);
+        float skyGate = waterPath > 0.0 ? 1.0 : rtSky ? smoothstep(0.0, 0.15, giS.a) : smoothstep(0.35, 0.9, skyLight);
         sunVis = shadow;
         if (fr.flags.x & ADV_CLOUDS) {
             float3 Lw = fr.sunDirView.w > 0.0 ? fr.sunDirWorld.xyz : -fr.sunDirWorld.xyz;
@@ -2377,9 +2654,9 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                 envCol = mix(skyRadiance(fr, skyLut, lin, Rh, cloudMap, false), envCol, smoothstep(0.02, 0.25, rough));
         }
         envCol *= mix(1.0, 0.3, saturate(-Rw.y * 2.5));
-        float3 skyVis = skyLight * skyLight * ao * fr.ambient.a * skyTint;
+        float3 skyVis = (rtSky ? saturate(giS.a) : skyLight * skyLight) * ao * fr.ambient.a * skyTint;
         if (fr.flags.x & (ADV_RT_GI | ADV_WSGI))
-            color += albedo * (1.0 - metal) * giTex.sample(lin, in.uv).rgb * ao * skyTint;   // traced sky light + bounce
+            color += albedo * (1.0 - metal) * giS.rgb * ao * skyTint;   // traced sky light + bounce
         else
             color += albedo * (1.0 - metal) * skyAmbient(fr, skyLut, lin, nWorld) * skyVis;
         // the glow of daylight scattered in the water above: only where daylight reaches (sky
@@ -2450,22 +2727,30 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     }
     // dynamic light from the player's held item: vanilla falloff (one level per block);
     // ray-traced visibility when RT shadows are on, otherwise it passes walls like OptiFine's
+    float handL = 0.0;
     if (fr.post.z > 0.5) {
         float dcam = length(eye);
         float lvl = saturate((fr.post.z - dcam) / 15.0);
         if (lvl > 0.0) {
             float vis = 1.0;
-            if (ac_rt && (fr.flags.x & ADV_RT_SHADOW) && dcam > 1.0) {
-                float3 o = world + fr.rtCam.xyz + nWorld * 0.02;
-                vis = rtOccluded(tlas, rtInst, atlas, pointS, o, normalize(-world), dcam - 0.8) ? 0.0 : 1.0;
-            }
-            blockL = max(blockL, lvl * vis * (0.6 + 0.4 * saturate(dot(n, v))));
+            if ((fr.flags.x & ADV_RT_SHADOW) && dcam > 1.0) vis = sunRt.read(px).g;
+            handL = lvl * vis * (0.6 + 0.4 * saturate(dot(n, v)));
         }
     }
     // block light fades in daylight (vanilla's lightmap is closer to max(sky, block) than a sum)
-    float daySky = skyLight * skyLight * fr.sunDirWorld.w;
-    float3 blockTint = blockLightTint(fr, blockLightVol, world + fr.voxCam.xyz + nWorld * 0.5);
-    color += albedo * fr.blockLight.rgb * blockTint * pow(blockL, fr.blockLight.a) * ao * (1.0 - 0.75 * daySky);
+    float daySky = (rtSky ? saturate(giS.a) : skyLight * skyLight) * fr.sunDirWorld.w;
+    float4 rtb = (fr.flags.x & ADV_RT_BLOCK) ? blockRt.read(px) : float4(0.0);
+    if (rtb.a > 0.5) {
+        // ray traced (blocklight_trace_fragment): every light with its own shadows; the held
+        // light adds to it
+        float3 bl = rtb.rgb + pow(handL, fr.blockLight.a);
+        color += albedo * fr.blockLight.rgb * bl * ao * (1.0 - 0.75 * daySky);
+        blockL = max(dot(rtb.rgb, float3(0.2126, 0.7152, 0.0722)), handL);   // (debug view 8)
+    } else {
+        blockL = max(blockL, handL);
+        float3 blockTint = blockLightTint(fr, blockLightVol, world + fr.voxCam.xyz + nWorld * 0.5);
+        color += albedo * fr.blockLight.rgb * blockTint * pow(blockL, fr.blockLight.a) * ao * (1.0 - 0.75 * daySky);
+    }
     color += albedo * nrm.w * 6.0;
     color += albedo * 0.004 * LIGHT_TUNE.x * ao;
     if (int(fr.flags.y) == -1) color += albedo * 0.03; // Nether ambient

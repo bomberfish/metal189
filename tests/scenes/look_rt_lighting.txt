@@ -1,0 +1,69 @@
+# Ray-traced lighting: the coloured light hall at night (a torch boxed in behind red stained
+# glass, redstone torches, a sea lantern, glowstone, lava, a plain torch, and a pillar casting
+# shadows), with lightmap block light (A), ray-traced block light (B) and the Full level (C, D);
+# then by day under an overhang among trees: lightmap sky light (E) and ray-traced (F)
+sleep 3
+world lookrtlight 42 flat
+waitWorld
+fly
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /weather clear
+cmd /time set 18000
+config colouredBlockLight true
+config rtShadows true
+config rtAmbientOcclusion true
+config globalIllumination 2
+config rtBlockLight false
+config rtSkyLight false
+cmd /tp @p -985 6 -985 180 15
+sleep 4
+cmd /kill @e[type=!Player]
+cmd /fill -1001 2 -1001 -969 12 -969 stonebrick
+cmd /fill -1000 4 -1000 -970 10 -970 air
+cmd /fill -1000 3 -1000 -970 3 -970 quartz_block
+cmd /fill -993 4 -1000 -987 8 -995 stonebrick
+cmd /fill -992 4 -999 -988 7 -996 air
+cmd /setblock -990 4 -998 torch 5
+cmd /fill -992 4 -995 -988 7 -995 stained_glass 14
+cmd /setblock -981 4 -990 redstone_torch 5
+cmd /setblock -979 4 -990 redstone_torch 5
+cmd /setblock -975 4 -982 sea_lantern
+cmd /setblock -996 4 -982 glowstone
+cmd /fill -986 3 -976 -984 3 -974 lava
+cmd /setblock -975 4 -974 torch 5
+cmd /fill -980 4 -986 -980 8 -986 stonebrick
+cmd /setblock -982 4 -986 torch 5
+sleep 10
+capture CAPTURE_A
+config rtBlockLight true
+sleep 4
+capture CAPTURE_B
+config rtSkyLight true
+sleep 4
+capture CAPTURE_C
+cmd /tp @p -985 6 -978 0 25
+sleep 4
+capture CAPTURE_D
+config rtSkyLight false
+config rtBlockLight false
+cmd /time set 6000
+cmd /fill -960 3 -960 -940 3 -940 grass
+cmd /fill -955 7 -955 -945 7 -945 stonebrick
+cmd /fill -955 4 -955 -955 6 -955 stonebrick
+cmd /fill -945 4 -945 -945 6 -945 stonebrick
+cmd /setblock -958 4 -948 sapling 2
+cmd /setblock -942 4 -952 sapling 0
+cmd /tp @p -962 6 -962 -45 12
+sleep 6
+capture CAPTURE_E
+config rtSkyLight true
+sleep 5
+capture CAPTURE_F
+cmd /tp @p -950 5 -950 -45 30
+sleep 4
+capture CAPTURE_H
+config rtSkyLight false
+sleep 4
+capture CAPTURE_G
+quit

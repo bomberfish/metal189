@@ -339,6 +339,11 @@ public final class TestDriver {
                 // compat on : enable the simple-GL mod test scene (m189compat.CompatScene)
                 if ("on".equals(a[1])) m189compat.CompatScene.enable();
                 return true;
+            case "rtlighting":
+                // rtlighting LEVEL : the ray-traced lighting level, as the settings menu sets it
+                metal189.config.Options.applyRtLighting(Integer.parseInt(a[1]));
+                metal189.world.Pipeline.apply();
+                return true;
             case "nativeopt":
                 // nativeopt KEY VALUE : engine option (Native.setOption), e.g. 6 = GPU-driven terrain
                 Native.setOption(Integer.parseInt(a[1]), Integer.parseInt(a[2]));

@@ -15,7 +15,8 @@ entity models, GUI layout). It ships two renderers and an optional ray tracing t
   bloom, TAA, auto exposure and LabPBR resource pack support.
 * **Ray tracing** (optional): hardware-accelerated ray-traced sun shadows over the
   whole loaded world, ray-traced reflections (water, metals, polished and wet
-  surfaces), ray-traced ambient occlusion and one-bounce global illumination.
+  surfaces), ray-traced ambient occlusion, one-bounce global illumination, and
+  ray-traced block light (torches and lava cast soft shadows) and sky light.
 
 It is an OptiFine replacement: if OptiFine is installed too, metal189 stays disabled
 (the game runs with vanilla OpenGL and a notice on the main menu explains why).
@@ -92,6 +93,9 @@ Intel Macs are not supported.
 | RT Reflections | off | Ray-traced reflections on water, metals, polished and wet surfaces |
 | RT Ambient Occlusion | off | Short-range ray-traced occlusion of indirect light (denoised) |
 | RT Global Illumination | off | One-bounce ray-traced diffuse GI (sky light, sun bounce, emissive blocks), temporally accumulated |
+| RT Block Light | off | Torches, lava and other light-giving blocks light their surroundings with ray-traced soft shadows (tinted by stained glass) |
+| RT Sky Light | off | Sky light, sky reflections and where the sun reaches follow how much sky each point sees (traced) instead of light levels |
+| Ray-Traced Lighting | Off | Level that sets the above: Partial (shadows, AO, GI), Full (block and sky light too) |
 
 ### PBR resource packs
 

@@ -80,6 +80,17 @@ Pass order per frame:
 5. **Deferred lighting**: Cook-Torrance sun/moon light with PCF or ray-traced
    shadows, cloud shadows, split-sum sky reflection, sky ambient, block light,
    emission, fog/haze; sky pixels get atmosphere + clouds + discs + stars.
+   Its rays are traced in passes of their own before it (a ray-tracing variant of
+   the lighting shader runs everything slower): sun shadows and the held light's
+   visibility (`sun_trace_fragment`), reflections (`refl_trace_fragment`), and
+   ray-traced block light (`blocklight_trace_fragment`): the voxel volume's light
+   properties give a list of light-giving blocks, binned per 8-block cell
+   (`light_list_kernel`, `light_grid_kernel`, rebuilt when blocks change); each
+   pixel picks two of its cell's lights in proportion to what they would give it
+   and traces a shadow ray to a random point of each (tinted by stained glass along
+   the way), then the result is accumulated over frames and blurred. Ray-traced sky
+   light takes how much sky a point sees from the GI rays (the share that escape)
+   instead of the lightmap.
 6. **Translucent terrain** (water, glass, ice) forward-shaded over copies of the
    opaque scene: refraction, absorption, SSR or ray-traced reflections.
 7. **Light shafts** (half-res shadow-map raymarch) added to HDR.

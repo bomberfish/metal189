@@ -165,6 +165,30 @@ public final class Options {
         return o.def;
     }
 
+    /**
+     * Ray-traced lighting levels: Off, Partial (sun shadows, AO and GI ray traced) and Full
+     * (block and sky light too: no lightmap left in direct lighting).
+     */
+    private static final String[] RT_LIGHTING_KEYS = {"rtShadows", "rtAmbientOcclusion", "globalIllumination", "rtBlockLight", "rtSkyLight"};
+    private static final int[][] RT_LIGHTING_VALUES = {{0, 0, 0, 0, 0}, {1, 1, 2, 0, 0}, {1, 1, 2, 1, 1}};
+
+    public static void applyRtLighting(int level) {
+        for (int i = 0; i < RT_LIGHTING_KEYS.length; i++) get(RT_LIGHTING_KEYS[i]).set(RT_LIGHTING_VALUES[level][i]);
+        // one GI ray per pixel (temporal accumulation smooths it; four cost about twice the rest)
+        if (level > 0) get("globalIlluminationQuality").set(0);
+        Config.rtLighting = level;
+    }
+
+    /** The level the current settings match, or -1 (custom). */
+    public static int rtLightingLevel() {
+        for (int l = 0; l < RT_LIGHTING_VALUES.length; l++) {
+            boolean match = true;
+            for (int i = 0; i < RT_LIGHTING_KEYS.length && match; i++) match = get(RT_LIGHTING_KEYS[i]).get() == RT_LIGHTING_VALUES[l][i];
+            if (match) return l;
+        }
+        return -1;
+    }
+
     public static List<Opt> all() { return Collections.unmodifiableList(ALL); }
 
     public static List<Opt> page(String page) {
@@ -285,6 +309,7 @@ public final class Options {
         slider("metalfx", "renderScale", S, 33, 100, 1, "%");
         toggle("metalfx", "frameInterpolation", S);
 
+        named("rt", "rtLighting", RT, 3);
         toggle("rt", "rtShadows", RT);
         slider("rt", "rtShadowSoftness", RT, 0, 100, 5, "%");
         toggle("rt", "rtReflections", RT);
@@ -296,6 +321,9 @@ public final class Options {
         slider("rt", "globalIlluminationStrength", S, 0, 300, 10, "%");
         named("rt", "globalIlluminationQuality", S, 3);
         slider("rt", "giDistance", S, 16, 128, 8, " blocks");
+        toggle("rt", "rtBlockLight", RT);
+        named("rt", "rtBlockLightRays", RT, 3);
+        toggle("rt", "rtSkyLight", RT);
         toggle("rt", "rtEntities", RT);
     }
 }

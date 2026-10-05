@@ -57,6 +57,20 @@ struct AdvFrame {
 #define ADV_WSGI         (1u << 18) // engine-set: global illumination from the voxel volume (giTex)
 #define ADV_GLASS_SHADOW (1u << 19) // engine-set: the glass shadow map (tinted translucents in light space) is valid
 #define ADV_COLORED_LIGHT (1u << 20) // engine-set: coloured block light spread through the voxel volume is bound
+#define ADV_RT_BLOCK     (1u << 21) // ray-traced block light (lights from the voxel volume, shadow rays)
+#define ADV_RT_SKY       (1u << 22) // ray-traced sky light: sky visibility from the GI rays replaces the lightmap's
+
+// Ray-traced block light: the light-giving blocks of the voxel volume (voxels.mm), and per
+// 8-block cell of it the ones that can reach the cell, strongest first.
+#define RT_LIGHT_CELL     8
+#define RT_LIGHT_CELLS    16     // per axis (128-block volume)
+#define RT_LIGHTS_PER_CELL 24
+#define RT_LIGHT_CAP      16384
+
+struct RtLight {
+    m189_float4 pos;     // xyz: the block's centre, volume coordinates (blocks from the volume's min corner)
+    m189_float4 color;   // rgb: colour times level / 15, w: level (0..15)
+};
 
 // Per-item data for G-buffer/shadow draws of captured (non-terrain) geometry.
 struct AdvItem {

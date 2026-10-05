@@ -12,7 +12,8 @@ public final class Pipeline {
     private Pipeline() {}
 
     public static final int SHADOWS = 1, BLOOM = 2, SKY = 4, WATER = 8, SSAO = 16, PCSS = 32, RT_SHADOWS = 64, RT_REFLECTIONS = 128,
-            TAA = 256, CLOUDS = 512, VOLUMETRICS = 1024, AUTO_EXPOSURE = 2048, RT_AO = 8192, RT_GI = 16384;
+            TAA = 256, CLOUDS = 512, VOLUMETRICS = 1024, AUTO_EXPOSURE = 2048, RT_AO = 8192, RT_GI = 16384,
+            RT_BLOCK_LIGHT = 1 << 21, RT_SKY_LIGHT = 1 << 22;
 
     private static final String SHADERS_OVERRIDE = System.getProperty("metal189.shaders");
     private static final Integer FEATURES_OVERRIDE = Integer.getInteger("metal189.shaderFeatures");
@@ -57,6 +58,9 @@ public final class Pipeline {
             if (Config.ssao) features |= SSAO;
             if (Config.rtAmbientOcclusion) features |= RT_AO;
             if (Config.globalIllumination == 2) features |= RT_GI;   // world-space where ray tracing is unavailable
+            if (Config.rtBlockLight) features |= RT_BLOCK_LIGHT;
+            // sky light comes from the GI rays (with GI off or world-space they bring back the sky alone)
+            if (Config.rtSkyLight) features |= RT_SKY_LIGHT | RT_GI;
         }
         if (advanced) Materials.upload();
         Native.setOption(OPT_SHADOW_RES, Config.shadowResolution);
@@ -65,7 +69,7 @@ public final class Pipeline {
         Native.setOption(OPT_BLOOM, Config.bloomStrength);
         Native.setOption(OPT_WAVING, Config.waving ? 1 : 0);
         Native.setOption(OPT_RT_ENTITIES, Config.rtEntities ? 1 : 0);
-        boolean rtOn = advanced && (features & (RT_SHADOWS | RT_REFLECTIONS | RT_AO | RT_GI)) != 0;
+        boolean rtOn = advanced && (features & (RT_SHADOWS | RT_REFLECTIONS | RT_AO | RT_GI | RT_BLOCK_LIGHT | RT_SKY_LIGHT)) != 0;
         if (rtWasOn && !rtOn) Native.setOption(OPT_RT_RELEASE, 1); // free acceleration structures
         rtWasOn = rtOn;
         pushTuning();
@@ -170,6 +174,10 @@ public final class Pipeline {
         t[70] = 1 << Config.rtAoRays;
         t[71] = Config.giDistance;
         t[72] = Config.frameInterpolation ? 1 : 0;
+        // ray-traced lighting: sky light, block light, block light shadow rays per pixel
+        t[73] = Config.rtSkyLight ? 1 : 0;
+        t[74] = Config.rtBlockLight ? 1 : 0;
+        t[75] = 1 << Config.rtBlockLightRays;
         for (int i = 0; i < TUNING; i++) metal189.engine.Mem.putFloat(tuning + i * 4L, t[i]);
         Native.advSetTuning(tuning, TUNING);
     }

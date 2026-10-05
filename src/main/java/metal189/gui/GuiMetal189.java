@@ -85,6 +85,11 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
     private static String name(Opt o) { return I18n.format("metal189.opt." + o.key); }
 
     private static String value(Opt o) {
+        if ("rtLighting".equals(o.key)) {
+            // the level the individual settings add up to
+            int l = Options.rtLightingLevel();
+            return I18n.format(l < 0 ? "metal189.profile.custom" : "metal189.opt.rtLighting." + l);
+        }
         int v = o.get();
         String named = "metal189.opt." + o.key + "." + v, label = I18n.format(named);
         if (!label.equals(named)) return label;   // options may name their values
@@ -145,6 +150,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
         }
         Opt o = options.get(b);
         if (o == null || b instanceof GuiSlider) return;
+        if ("rtLighting".equals(o.key)) o.set(Math.max(0, Options.rtLightingLevel()));   // cycle from what is in effect
         o.cycle(backwards);
         changed(o);
         refresh();
@@ -152,6 +158,7 @@ public class GuiMetal189 extends GuiScreen implements GuiSlider.ISlider {
 
     private void changed(Opt o) {
         if ("ctrlClickRightClick".equals(o.key) || "maxRenderDistance".equals(o.key)) Config.applyInput();
+        if ("rtLighting".equals(o.key)) Options.applyRtLighting(o.get());
         Pipeline.apply();
     }
 

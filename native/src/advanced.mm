@@ -82,6 +82,9 @@ struct Targets {
     id<MTLTexture> albedo, normal, light, linZ, spec, hdr, sceneColor, sceneDepth, taa[2], vol, ao[2];
     id<MTLTexture> giSample, giHist[2], giZ[2], giBlur[2];
     id<MTLTexture> reflTrace;   // ray-traced reflections (refl_trace_fragment)
+    id<MTLTexture> blockRt;     // ray-traced block light (blocklight_trace_fragment)
+    id<MTLTexture> sunRt;       // the lighting pass's rays: sun visibility, held light visibility (sun_trace_fragment)
+    id<MTLTexture> blockHist[2], blockZ[2], blockBlur[2];   // its temporal accumulation and denoising
     id<MTLTexture> renderDepth, motion;   // upscaling: the scene's own depth, motion vectors
     id<MTLTexture> guide[5];              // denoised upscaling: diffuse, specular, normal, roughness, mask
     int ow = 0, oh = 0;    // output resolution (Minecraft's framebuffer)
@@ -96,7 +99,9 @@ struct State {
     id<MTLTexture> glassDepth, glassColor;   // tinted translucents in light space: nearest depth, light let through
     int glassRes = 0;
     int waterShadowRes = 0;
-    id<MTLRenderPipelineState> reflTracePso = nil;
+    id<MTLRenderPipelineState> reflTracePso = nil, sunTracePso = nil, blockTracePso = nil, blockTemporalPso = nil, blockBlurPso = nil;
+    int blockIndex = 0;
+    bool blockHistory = false;
     // terrain shadow cache (see the shadow pass)
     id<MTLTexture> shadowTerrainMap = nil;
     bool shadowCacheValid = false;
@@ -232,6 +237,18 @@ bool initState() {
         S.lightPso[1] = pso(ld);
         ld.fragmentFunction = fn(@"refl_trace_fragment");
         S.reflTracePso = pso(ld);
+        ld.fragmentFunction = fn(@"sun_trace_fragment");
+        ld.colorAttachments[0].pixelFormat = MTLPixelFormatRG8Unorm;
+        S.sunTracePso = pso(ld);
+        ld.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+        ld.fragmentFunction = fn(@"blocklight_trace_fragment");
+        S.blockTracePso = pso(ld);
+        ld.fragmentFunction = fn(@"blockblur_fragment");
+        S.blockBlurPso = pso(ld);
+        ld.fragmentFunction = fn(@"block_temporal_fragment");
+        ld.colorAttachments[1].pixelFormat = MTLPixelFormatRG32Float;   // depth, sample count
+        S.blockTemporalPso = pso(ld);
+        ld.colorAttachments[1].pixelFormat = MTLPixelFormatInvalid;
     }
 
     {
@@ -344,7 +361,7 @@ bool initState() {
         gd.fragmentFunction = fn(@"giblur_fragment");
         S.giBlurPso = pso(gd);
         gd.fragmentFunction = fn(@"gi_temporal_fragment");
-        gd.colorAttachments[1].pixelFormat = MTLPixelFormatR32Float;
+        gd.colorAttachments[1].pixelFormat = MTLPixelFormatRG32Float;   // depth, sample count
         S.giTemporalPso = pso(gd);
     }
 
@@ -476,9 +493,17 @@ void ensureTargets(int w, int h) {
     S.t.ao[1] = rt(MTLPixelFormatR16Float, (w + 1) / 2, (h + 1) / 2, @"rtao1");
     S.t.giSample = rt(MTLPixelFormatRGBA16Float, (w + 1) / 2, (h + 1) / 2, @"giSample");
     S.t.reflTrace = rt(MTLPixelFormatRGBA16Float, w, h, @"reflTrace");
+    S.t.blockRt = rt(MTLPixelFormatRGBA16Float, w, h, @"blockLightRt");
+    S.t.sunRt = rt(MTLPixelFormatRG8Unorm, w, h, @"sunRt");
+    for (int i = 0; i < 2; i++) {
+        S.t.blockHist[i] = rt(MTLPixelFormatRGBA16Float, w, h, @"blockLightHistory");
+        S.t.blockZ[i] = rt(MTLPixelFormatRG32Float, w, h, @"blockLightDepth");
+        S.t.blockBlur[i] = rt(MTLPixelFormatRGBA16Float, w, h, @"blockLightBlur");
+    }
+    S.blockHistory = false;
     for (int i = 0; i < 2; i++) {
         S.t.giHist[i] = rt(MTLPixelFormatRGBA16Float, (w + 1) / 2, (h + 1) / 2, @"giHistory");
-        S.t.giZ[i] = rt(MTLPixelFormatR32Float, (w + 1) / 2, (h + 1) / 2, @"giDepth");
+        S.t.giZ[i] = rt(MTLPixelFormatRG32Float, (w + 1) / 2, (h + 1) / 2, @"giDepth");
         S.t.giBlur[i] = rt(MTLPixelFormatRGBA16Float, (w + 1) / 2, (h + 1) / 2, @"giBlur");
     }
     S.giHistory = false;
@@ -744,9 +769,12 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
     double camX = env.camBlockX + (double)env.camFracX, camY = env.camBlockY + (double)env.camFracY,
            camZ = env.camBlockZ + (double)env.camFracZ;
     RtScene rts;
-    bool rtOn = (features & (ADV_RT_SHADOW | ADV_RT_REFL | ADV_RT_AO | ADV_RT_GI)) && S.lightPso[1] && S.waterPso[1] &&
+    constexpr uint32_t kRtAll = ADV_RT_SHADOW | ADV_RT_REFL | ADV_RT_AO | ADV_RT_GI | ADV_RT_BLOCK | ADV_RT_SKY;
+    bool rtOn = (features & kRtAll) && S.lightPso[1] && S.waterPso[1] &&
                 rtPrepare(cb, camX, camY, camZ, std::max(env.renderDistance, 32.0f) + 16.0f, rts);
-    if (!rtOn) features &= ~(ADV_RT_SHADOW | ADV_RT_REFL | ADV_RT_AO | ADV_RT_GI);
+    if (!rtOn) features &= ~kRtAll;
+    if (!S.blockTracePso) features &= ~ADV_RT_BLOCK;
+    if (!S.sunTracePso) features &= ~ADV_RT_SHADOW;
     fr.rtCam = simd_make_float4(rts.camera, 0);
 
     // world-space reflections and GI without ray tracing (and where ray tracing is asked for but
@@ -755,17 +783,22 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
     {
         int giMode = (int)(g_tuning[60] + 0.5f);
         bool wantWsr = (int)(g_tuning[48] + 0.5f) == 2 && !(features & ADV_RT_REFL);
-        bool wantWsgi = (giMode == 1 || (giMode == 2 && !(features & ADV_RT_GI))) && S.giVoxPso && S.giTemporalPso && S.giBlurPso;
+        // (ray-traced sky light traces the GI rays even with GI off or world-space: those then
+        // bring back the sky alone)
+        bool wantWsgi = (giMode == 1 || giMode == 2) && !(features & ADV_RT_GI) && S.giVoxPso && S.giTemporalPso && S.giBlurPso;
         bool wantLight = g_tuning[64] > 0.5f;
-        TexEntry* atlasV = (wantWsr || wantWsgi || wantLight) ? texture(w.atlasTex) : nullptr;
-        if (atlasV && atlasV->tex && voxelsUpdate(cb, camX, camY, camZ, atlasV->tex, wantLight, vox)) {
+        bool wantLights = (features & ADV_RT_BLOCK) != 0;   // ray-traced block light finds its lights there
+        TexEntry* atlasV = (wantWsr || wantWsgi || wantLight || wantLights) ? texture(w.atlasTex) : nullptr;
+        if (atlasV && atlasV->tex && voxelsUpdate(cb, camX, camY, camZ, atlasV->tex, wantLight, wantLights, vox)) {
             if (wantWsr) features |= ADV_WSR;
             if (wantWsgi) features |= ADV_WSGI;
             if (vox.light) features |= ADV_COLORED_LIGHT;
+            if (!vox.lights) features &= ~ADV_RT_BLOCK;
             fr.voxel = vox.wrap;
             fr.voxCam = vox.cam;
-        } else if (!wantWsr && !wantWsgi && !wantLight) {
-            voxelsRelease();
+        } else {
+            features &= ~ADV_RT_BLOCK;
+            if (!wantWsr && !wantWsgi && !wantLight && !wantLights) voxelsRelease();
         }
     }
 
@@ -1438,12 +1471,115 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             [te drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
             [te endEncoding];
         }
+        // the lighting pass's rays (sun shadows, the held light), in their own pass too
+        if (features & ADV_RT_SHADOW) {
+            MTLRenderPassDescriptor* tp = [MTLRenderPassDescriptor renderPassDescriptor];
+            tp.colorAttachments[0].texture = S.t.sunRt;
+            tp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+            tp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            profRender(tp, "sun shadow rays", true);
+            id<MTLRenderCommandEncoder> te = [cb renderCommandEncoderWithDescriptor:tp];
+            te.label = @"sun shadow rays";
+            [te setRenderPipelineState:S.sunTracePso];
+            [te setFragmentBytes:&fr length:sizeof fr atIndex:1];
+            [te setFragmentTexture:depth atIndex:0];
+            [te setFragmentTexture:S.t.linZ atIndex:1];
+            [te setFragmentTexture:S.t.normal atIndex:2];
+            [te setFragmentTexture:S.t.light atIndex:3];
+            TexEntry* atlasS = texture(w.atlasTex);
+            [te setFragmentTexture:atlasS && atlasS->tex ? atlasS->tex : S.t.albedo atIndex:7];
+            [te setFragmentSamplerState:S.pointClamp atIndex:2];
+            [te setFragmentAccelerationStructure:rts.tlas atBufferIndex:10];
+            [te setFragmentBuffer:rts.instances offset:0 atIndex:11];
+            if (rts.resources)
+                [te useResources:rts.resources->data() count:rts.resources->size() usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
+            [te drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            [te endEncoding];
+        }
+        // ray-traced block light, also in its own pass
+        bool rtBlock = (features & ADV_RT_BLOCK) && vox.lights && vox.lightGrid && vox.props && S.blockTemporalPso && S.blockBlurPso;
+        if (rtBlock) {
+            MTLRenderPassDescriptor* tp = [MTLRenderPassDescriptor renderPassDescriptor];
+            tp.colorAttachments[0].texture = S.t.blockRt;
+            tp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+            tp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            profRender(tp, "block light", true);
+            id<MTLRenderCommandEncoder> te = [cb renderCommandEncoderWithDescriptor:tp];
+            te.label = @"block light";
+            [te setRenderPipelineState:S.blockTracePso];
+            [te setFragmentBytes:&fr length:sizeof fr atIndex:1];
+            [te setFragmentTexture:depth atIndex:0];
+            [te setFragmentTexture:S.t.linZ atIndex:1];
+            [te setFragmentTexture:S.t.normal atIndex:2];
+            TexEntry* atlasB = texture(w.atlasTex);
+            [te setFragmentTexture:atlasB && atlasB->tex ? atlasB->tex : S.t.albedo atIndex:7];
+            [te setFragmentSamplerState:S.pointClamp atIndex:2];
+            [te setFragmentAccelerationStructure:rts.tlas atBufferIndex:10];
+            [te setFragmentBuffer:rts.instances offset:0 atIndex:11];
+            [te setFragmentBuffer:vox.lights offset:0 atIndex:16];
+            [te setFragmentBuffer:vox.lightGrid offset:0 atIndex:17];
+            [te setFragmentTexture:vox.props atIndex:3];
+            if (rts.resources)
+                [te useResources:rts.resources->data() count:rts.resources->size() usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
+            bindEntities(te);
+            [te drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            [te endEncoding];
+            // accumulated over frames, then an edge-aware blur
+            int cur = S.blockIndex, prev = S.blockIndex ^ 1;
+            S.blockIndex ^= 1;
+            float valid = S.blockHistory && !cameraCut ? 1.0f : 0.0f;
+            S.blockHistory = true;
+            MTLRenderPassDescriptor* hp = [MTLRenderPassDescriptor renderPassDescriptor];
+            hp.colorAttachments[0].texture = S.t.blockHist[cur];
+            hp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+            hp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            hp.colorAttachments[1].texture = S.t.blockZ[cur];
+            hp.colorAttachments[1].loadAction = MTLLoadActionDontCare;
+            hp.colorAttachments[1].storeAction = MTLStoreActionStore;
+            profRender(hp, "block light temporal", true);
+            te = [cb renderCommandEncoderWithDescriptor:hp];
+            te.label = @"block light temporal";
+            [te setRenderPipelineState:S.blockTemporalPso];
+            [te setFragmentBytes:&fr length:sizeof fr atIndex:1];
+            [te setFragmentBytes:&valid length:sizeof valid atIndex:0];
+            [te setFragmentTexture:S.t.blockRt atIndex:0];
+            [te setFragmentTexture:S.t.blockHist[prev] atIndex:1];
+            [te setFragmentTexture:S.t.blockZ[prev] atIndex:2];
+            [te setFragmentTexture:S.t.linZ atIndex:3];
+            [te setFragmentTexture:depth atIndex:4];
+            [te setFragmentSamplerState:S.linearClamp atIndex:0];
+            [te drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            [te endEncoding];
+            for (int pass = 0; pass < 2; pass++) {
+                MTLRenderPassDescriptor* bp = [MTLRenderPassDescriptor renderPassDescriptor];
+                bp.colorAttachments[0].texture = S.t.blockBlur[pass];
+                bp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+                bp.colorAttachments[0].storeAction = MTLStoreActionStore;
+                profRender(bp, "block light blur", true);
+                id<MTLRenderCommandEncoder> b = [cb renderCommandEncoderWithDescriptor:bp];
+                b.label = @"block light blur";
+                [b setRenderPipelineState:S.blockBlurPso];
+                [b setFragmentBytes:&fr length:sizeof fr atIndex:1];
+                simd_float4 step = pass == 0 ? simd_make_float4(1, 0, 1.5f, 0) : simd_make_float4(0, 1, 1.5f, 0);
+                [b setFragmentBytes:&step length:sizeof step atIndex:0];
+                [b setFragmentTexture:pass == 0 ? S.t.blockHist[cur] : S.t.blockBlur[0] atIndex:0];
+                [b setFragmentTexture:S.t.linZ atIndex:1];
+                [b setFragmentTexture:S.t.normal atIndex:2];
+                [b drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                [b endEncoding];
+            }
+        } else {
+            S.blockHistory = false;
+            features &= ~ADV_RT_BLOCK;
+            fr.flags.x = features;
+        }
         profRender(rp, "lighting", true);
         id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
         e.label = @"lighting";
-        bool rtLight = (features & ADV_RT_SHADOW) != 0;
+        [e setFragmentTexture:rtBlock ? S.t.blockBlur[1] : S.t.light atIndex:25];
+        [e setFragmentTexture:(features & ADV_RT_SHADOW) ? S.t.sunRt : S.t.light atIndex:26];
         [e setFragmentTexture:rtRefl ? S.t.reflTrace : S.t.light atIndex:24];
-        [e setRenderPipelineState:S.lightPso[rtLight ? 1 : 0]];
+        [e setRenderPipelineState:S.lightPso[0]];   // its rays are traced in the passes before
         [e setFragmentBytes:&fr length:sizeof fr atIndex:1];
         [e setFragmentTexture:S.t.albedo atIndex:0];
         [e setFragmentTexture:S.t.normal atIndex:1];
@@ -1488,16 +1624,6 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         }
         [e setFragmentSamplerState:S.repeatLinear atIndex:3];
         [e setFragmentSamplerState:S.waveSampler atIndex:4];
-        if (rtLight) {
-            TexEntry* atlas = texture(w.atlasTex);
-            [e setFragmentAccelerationStructure:rts.tlas atBufferIndex:10];
-            [e setFragmentBuffer:rts.instances offset:0 atIndex:11];
-            [e setFragmentTexture:atlas && atlas->tex ? atlas->tex : S.t.albedo atIndex:7];
-            [e setFragmentSamplerState:S.pointClamp atIndex:2];
-            if (rts.resources)
-                [e useResources:rts.resources->data() count:rts.resources->size() usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
-            bindEntities(e);
-        }
         [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [e endEncoding];
     }

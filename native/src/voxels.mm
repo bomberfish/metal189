@@ -46,6 +46,13 @@ constexpr int kFloodSettleSteps = 40;
 bool g_lightFilled = false;   // every slot has its light properties
 id<MTLBuffer> g_scratch = nil, g_dummy = nil;
 id<MTLComputePipelineState> g_accum = nil, g_resolve = nil, g_occK = nil, g_tintK = nil, g_floodK = nil;
+// ray-traced block light: the volume's lights and their cells, rebuilt when blocks change or
+// the volume moves
+id<MTLComputePipelineState> g_listK = nil, g_gridK = nil;
+id<MTLBuffer> g_lights = nil, g_lightCount = nil, g_lightGrid = nil;
+bool g_listValid = false;
+int g_listOrigin[3] = {0, 0, 0};
+constexpr int kLightCap = 16384, kLightCells = 16, kLightsPerCell = 24;   // adv.h RT_LIGHT_*
 bool g_tried = false;
 Slot g_slot[kSlots][kSlots][kSlots];
 
@@ -124,6 +131,8 @@ bool init() {
     g_occK = kernel(@"voxel_occ_kernel");
     g_tintK = kernel(@"voxel_tint_kernel");
     g_floodK = kernel(@"light_flood_kernel");
+    g_listK = kernel(@"light_list_kernel");
+    g_gridK = kernel(@"light_grid_kernel");
     if (!g_accum || !g_resolve || !g_occK) {
         log("voxels: unavailable: %s", err ? err.localizedDescription.UTF8String : "no kernels");
         g_accum = nil;
@@ -160,17 +169,22 @@ bool ensureLight(bool on) {
 void voxelsRelease() {
     // command buffers in flight hold their own references
     g_tex = g_shape = g_occ = g_occSlot = nil;
+    g_lights = g_lightCount = g_lightGrid = nil;
+    g_listValid = false;
     g_props = g_flood[0] = g_flood[1] = nil;
     g_lightFilled = false;
     g_lightSlots.clear();
     g_scratch = g_dummy = nil;
 }
 
-bool voxelsUpdate(id<MTLCommandBuffer> cb, double camX, double camY, double camZ, id<MTLTexture> atlas, bool light, VoxelScene& out) {
+bool voxelsUpdate(id<MTLCommandBuffer> cb, double camX, double camY, double camZ, id<MTLTexture> atlas, bool light, bool lights,
+                  VoxelScene& out) {
     out = VoxelScene();
     if (!atlas || !init()) return false;
     int atlasW = (int)atlas.width, atlasH = (int)atlas.height;
-    bool lightOn = ensureLight(light) && advancedLightColors() && advancedMaterials();
+    // light properties serve both the coloured light flood and the light list
+    lights = lights && g_listK && g_gridK;
+    bool lightOn = ensureLight(light || lights) && advancedLightColors() && advancedMaterials();
     if (lightOn && !g_lightFilled) {
         // every slot needs its light properties: voxelize them all again
         resetSlots();
@@ -283,11 +297,57 @@ bool voxelsUpdate(id<MTLCommandBuffer> cb, double camX, double camY, double camZ
             sl.sx = jb.sx; sl.sy = jb.sy; sl.sz = jb.sz;
             sl.version = jb.s ? jb.s->version : 0;
         }
-        if (!jobs.empty()) g_floodRemaining = kFloodSettleSteps;   // new or changed blocks in the volume
+        if (!jobs.empty()) {
+            g_floodRemaining = kFloodSettleSteps;   // new or changed blocks in the volume
+            g_listValid = false;
+        }
     }
     int ox = cx * 16, oy = cy * 16, oz = cz * 16;   // the volume's min corner (blocks)
     out.wrap = simd_make_int4(mod(ox, kN), mod(oy, kN), mod(oz, kN), kN);
-    if (lightOn) {
+    if (lightOn && lights) {
+        if (!g_lights) {
+            id<MTLDevice> dev = device();
+            g_lights = [dev newBufferWithLength:(NSUInteger)kLightCap * 32 options:MTLResourceStorageModePrivate];
+            g_lightCount = [dev newBufferWithLength:16 options:MTLResourceStorageModePrivate];
+            g_lightGrid = [dev newBufferWithLength:(NSUInteger)kLightCells * kLightCells * kLightCells * (kLightsPerCell + 1) * 4
+                                           options:MTLResourceStorageModePrivate];
+            g_lights.label = @"lights";
+            g_lightGrid.label = @"light grid";
+            g_listValid = false;
+        }
+        if (g_listOrigin[0] != ox || g_listOrigin[1] != oy || g_listOrigin[2] != oz) g_listValid = false;
+        if (g_lights && g_lightCount && g_lightGrid && !g_listValid) {
+            id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+            b.label = @"light list reset";
+            [b fillBuffer:g_lightCount range:NSMakeRange(0, 16) value:0];
+            [b endEncoding];
+            MTLComputePassDescriptor* cp = [MTLComputePassDescriptor computePassDescriptor];
+            profCompute(cp, "light list");
+            id<MTLComputeCommandEncoder> e = [cb computeCommandEncoderWithDescriptor:cp];
+            e.label = @"light list";
+            [e setComputePipelineState:g_listK];
+            [e setTexture:g_props atIndex:0];
+            [e setBytes:&out.wrap length:sizeof out.wrap atIndex:0];
+            [e setBuffer:g_lightCount offset:0 atIndex:1];
+            [e setBuffer:g_lights offset:0 atIndex:2];
+            [e dispatchThreads:MTLSizeMake(kN, kN, kN) threadsPerThreadgroup:MTLSizeMake(8, 8, 4)];
+            [e memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            [e setComputePipelineState:g_gridK];
+            [e setBuffer:g_lights offset:0 atIndex:0];
+            [e setBuffer:g_lightCount offset:0 atIndex:1];
+            [e setBuffer:g_lightGrid offset:0 atIndex:2];
+            [e dispatchThreads:MTLSizeMake(kLightCells, kLightCells, kLightCells) threadsPerThreadgroup:MTLSizeMake(4, 4, 4)];
+            [e endEncoding];
+            g_listValid = true;
+            g_listOrigin[0] = ox; g_listOrigin[1] = oy; g_listOrigin[2] = oz;
+        }
+        out.lights = g_lights;
+        out.lightGrid = g_lightGrid;
+    } else {
+        g_lights = g_lightCount = g_lightGrid = nil;
+        g_listValid = false;
+    }
+    if (lightOn && light) {
         // spread coloured light a block per step through what lets it pass, in sections with
         // something that gives light and their neighbours (light reaches 14 blocks)
         auto key = [](int x, int y, int z) {
@@ -362,6 +422,7 @@ bool voxelsUpdate(id<MTLCommandBuffer> cb, double camX, double camY, double camZ
     } else {
         g_lightSlots.clear();
     }
+    if (lightOn) out.props = g_props;
     out.tex = g_tex;
     out.shape = g_shape;
     out.occ = g_occ;

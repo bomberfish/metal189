@@ -1,0 +1,23 @@
+# The ray tracing settings page at each ray-traced lighting level, and Custom
+sleep 3
+world ref1 1234567
+waitWorld
+fly
+config shaders true
+cmd /time set 5000
+cmd /tp @p 64 96 -32 135 12
+sleep 8
+rtlighting 0
+gui metal189 rt
+sleep 2
+capturescreen CAPTURE_A
+rtlighting 2
+gui metal189 rt
+sleep 3
+capturescreen CAPTURE_B
+config rtSkyLight false
+gui metal189 rt
+sleep 2
+capturescreen CAPTURE_C
+gui none
+quit

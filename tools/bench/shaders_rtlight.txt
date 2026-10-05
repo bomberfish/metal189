@@ -1,0 +1,41 @@
+sleep 3
+resourcepack Nostalgia PBR 1.2.0.zip | §bAVPBR-1-6-5.zip
+sleep 4
+fancy true
+world ref1 1234567
+waitWorld
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /gamerule doMobLoot false
+cmd /weather clear 100000
+cmd /time set 6000
+cmd /kill @e[type=!Player]
+cmd /tp @p 64 78 -32 135 10
+nativeopt 8 1
+config rtShadows false
+config rtAmbientOcclusion false
+config globalIllumination 0
+config rtBlockLight false
+config rtSkyLight false
+sleep 20
+fps 6 off_forest
+config rtShadows true
+config rtAmbientOcclusion true
+config globalIllumination 2
+sleep 6
+fps 6 partial_forest
+config rtBlockLight true
+config rtSkyLight true
+sleep 6
+fps 6 full_forest
+cmd /time set 18000
+cmd /setblock 66 78 -34 torch
+cmd /setblock 62 78 -30 torch
+cmd /setblock 60 79 -36 glowstone
+sleep 6
+fps 6 full_night
+config rtBlockLight false
+config rtSkyLight false
+sleep 6
+fps 6 partial_night
+quit

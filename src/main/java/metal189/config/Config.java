@@ -45,6 +45,13 @@ public final class Config {
     public static int globalIllumination = 0;            // 0 off, 1 world-space (voxels), 2 ray-traced
     public static int globalIlluminationStrength = 100;  // bounce light, percent
     public static int globalIlluminationQuality = 0;     // rays per texel: 0 one, 1 two, 2 four
+    /** Ray-traced block light: torches, lava and other light-giving blocks cast shadows (lights from the voxel volume). */
+    public static boolean rtBlockLight = false;
+    public static int rtBlockLightRays = 1;              // shadow rays per pixel: 0 one, 1 two, 2 four
+    /** Ray-traced sky light: how much sky a point sees comes from the GI rays instead of the lightmap. */
+    public static boolean rtSkyLight = false;
+    /** The ray-traced lighting level the menu last set (0 off, 1 partial, 2 full); the settings it sets decide. */
+    public static int rtLighting = 0;
     /** Entities (and the first-person player) in ray-traced reflections, AO and GI. */
     public static boolean rtEntities = true;
     /** Shaders mode: the first-person player casts a shadow (and appears in ray tracing). */
