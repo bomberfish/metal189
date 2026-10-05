@@ -161,8 +161,7 @@ launcher bypasses library validation).
 #### Amethyst on a device over USB, with JIT from a Mac
 
 1. Sign Amethyst for development (get-task-allow) with a profile that grants the
-   increased memory limit, swapping in a Java 8 with the iOS 27 JIT fixes, patched
-   (`build-ios`-style paths are examples):
+   increased memory limit, swapping in a Java 8 with the iOS 27 JIT fixes, patched:
 
        tools/amethyst-jvm-fix.py jre8/lib/server/libjvm.dylib
        JRE8=jre8 tools/amethyst-sign.sh amethyst.ipa dev.mobileprovision "<identity>" signed.ipa
