@@ -34,7 +34,9 @@ public final class TestDriver {
             String inline = System.getProperty("metal189.testScript");
             String file = System.getProperty("metal189.test");
             if (inline != null) script = new ArrayList<String>(Arrays.asList(inline.split(";")));
-            else if (file != null) script = Files.readAllLines(new File(file).toPath(), StandardCharsets.UTF_8);
+            // relative paths (scripts, captures) are relative to user.dir, which a launcher may
+            // set to the game directory without changing the process's working directory (iOS)
+            else if (file != null) script = Files.readAllLines(new File(file).getAbsoluteFile().toPath(), StandardCharsets.UTF_8);
             active = script != null;
         } catch (Exception e) {
             Native.LOG.error("metal189: cannot read test script", e);
@@ -163,7 +165,7 @@ public final class TestDriver {
                 return true;
             case "capturescreen": {
                 // the screen's image as presented (engine screen target)
-                boolean ok = Native.capture(0, a[1]);
+                boolean ok = Native.capture(0, new File(a[1]).getAbsolutePath());
                 Native.LOG.info("metal189-test capturescreen {} -> {}", a[1], ok ? "ok" : "FAILED");
                 return true;
             }
@@ -173,7 +175,7 @@ public final class TestDriver {
                     waitFrames = 1;
                     return false;
                 }
-                boolean ok = Capture.metalFramebuffer(a[1]);
+                boolean ok = Capture.metalFramebuffer(new File(a[1]).getAbsolutePath());
                 Native.LOG.info("metal189-test capture {} -> {}", a[1], ok ? "ok" : "FAILED");
                 return true;
             }

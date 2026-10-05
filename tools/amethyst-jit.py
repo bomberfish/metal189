@@ -44,6 +44,8 @@ class Jit:
         self.guarded = None
         self.pending_detach = False
         self.guard_commit = False
+        self.breaks = []
+        self.break_names = {}
 
     def reg(self, frame, name):
         return frame.FindRegister(name).GetValueAsUnsigned()
@@ -119,7 +121,15 @@ class Jit:
             addr = self.prepare(0, x0)
             if addr and self.guard_commit:
                 self.guard(addr, x0)
-            if self.no_detach:      # watch what the app does with its memory from here on
+            for off, name in self.breaks:
+                res = lldb.SBCommandReturnObject()
+                self.ci.HandleCommand("image list -b -h libjvm.dylib", res)
+                import re
+                base = int(re.search(r"0x[0-9a-fA-F]+", res.GetOutput()).group(0), 16)
+                self.ci.HandleCommand(f"breakpoint set -a {base + off:#x}", res)
+                self.break_names[base + off] = name
+                log(f"breakpoint on {name} at {base + off:#x}")
+            if self.no_detach and not self.breaks:      # watch what the app does with its memory
                 for fn in ("mmap", "munmap", "vm_protect", "mach_vm_protect", "vm_remap", "mach_vm_remap"):
                     res = lldb.SBCommandReturnObject()
                     self.ci.HandleCommand(f"breakpoint set -n {fn} -s libsystem_kernel.dylib", res)
@@ -216,8 +226,23 @@ def main():
     ap.add_argument("--guard-commit", action="store_true",
                     help="skip the JVM's mprotect(RW) of its JIT region (Java 8 built before "
                          "angelauramc-openjdk-build f03a5a05; also pass -XX:InitialCodeCacheSize=128m)")
+    ap.add_argument("--break", action="append", default=[], metavar="SYMBOL",
+                    help="with --no-detach: log each call of SYMBOL (arguments, callers)")
+    ap.add_argument("--timeout", type=float, default=300,
+                    help="detach and exit after this many seconds whatever is happening (so the "
+                         "app is never left stopped under a debugger)")
     ap.add_argument("--play-delay", type=float, default=12, help="seconds to let the launcher load first")
     args = ap.parse_args()
+    start = time.time()
+
+    def watchdog():
+        # last resort if lldb itself blocks: dropping the debugger connection makes
+        # debugserver let go of the app
+        time.sleep(args.timeout + 60)
+        log("watchdog: exiting")
+        os._exit(3)
+    import threading
+    threading.Thread(target=watchdog, daemon=True).start()
 
     if not args.no_launch:
         log(f"launching {args.bundle}")
@@ -277,9 +302,9 @@ def main():
             raise SystemExit("could not interrupt the app")
         process.SetSelectedThread(process.GetThreadAtIndex(0))   # the main thread
         debugger.SetAsync(False)
-        cmd("expr -l objc -- @import UIKit")
+        cmd("expr --timeout 60000000 -l objc -- @import UIKit")
         for e in args.eval:
-            log(f"eval {e}: {cmd(f'expr -l objc -O -- {e}', check=False).strip()}")
+            log(f"eval {e}: {cmd(f'expr --timeout 20000000 -l objc -O -- {e}', check=False).strip()}")
         debugger.SetAsync(True)
         if not args.play:
             process.Detach()
@@ -297,20 +322,41 @@ def main():
                 '(void)[nav performInstallOrShowDetails:nil]; '
                 '(id)[[nav valueForKey:@"versionTextField"] text]')
         debugger.SetAsync(False)
-        out = cmd(f"expr -l objc -O -- {expr}")
+        out = cmd(f"expr --timeout 20000000 -l objc -O -- {expr}")
         debugger.SetAsync(True)
         log(f"pressed Play on {out.strip()}")
 
+    deadline = start + args.timeout
     jit = Jit(process, ci)
     jit.no_detach = args.no_detach
     jit.guard_commit = args.guard_commit
+    if args.__dict__["break"]:
+        # by address once libjvm is loaded (minimal module loading leaves lldb without its
+        # symbols): offsets from the local copy of the library
+        lib = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "build", "ios-amethyst", "jre8fix", "lib", "server", "libjvm.dylib")
+        out = subprocess.check_output(["nm", "-C", "-arch", "arm64", lib], text=True)
+        jit.breaks = []
+        for sym in args.__dict__["break"]:
+            hits = [l for l in out.splitlines() if l.split(" ", 2)[-1].startswith(sym)]
+            if not hits:
+                raise SystemExit(f"no symbol {sym} in {lib}")
+            jit.breaks.append((int(hits[0].split()[0], 16), hits[0].split(" ", 2)[-1]))
+        jit.heap_sym = int([l for l in out.splitlines() if l.endswith(" CodeCache::_heap")][0].split()[0], 16)
     last_pc, repeats = None, 0
     while not jit.detached:
         err = process.Continue()
         if err.Fail():
             log(f"resume failed: {err}")
             return 1
-        state = wait_state()
+        state = None
+        while state is None:
+            state = wait_state(1)
+            if state is None and time.time() > deadline:
+                log(f"timed out after {args.timeout:.0f}s: detaching")
+                process.SendAsyncInterrupt()
+                wait_state(10)
+                process.Detach()
+                return 1
         if state != lldb.eStateStopped:
             log(f"process ended ({lldb.SBDebugger.StateAsCString(state)}, status {process.GetExitStatus()})")
             return 1
@@ -319,11 +365,29 @@ def main():
             if thread.GetStopReason() == lldb.eStopReasonBreakpoint and jit.on_mprotect(thread):
                 handled = True
                 continue
+            if thread.GetStopReason() == lldb.eStopReasonBreakpoint and thread.GetFrameAtIndex(0).GetPC() in jit.break_names:
+                f = thread.GetFrameAtIndex(0)
+                name = jit.break_names[f.GetPC()]
+                x = [f.FindRegister(f"x{i}").GetValueAsUnsigned() for i in range(4)]
+                if "handle_full" in name:
+                    # the code heap's bookkeeping (CodeCache::_heap -> CodeHeap)
+                    res = lldb.SBCommandReturnObject()
+                    ci.HandleCommand("image list -h libjvm.dylib", res)
+                    import re
+                    base = int(re.search(r"0x[0-9a-fA-F]+", res.GetOutput()).group(0), 16)
+                    err = lldb.SBError()
+                    heap = process.ReadPointerFromMemory(base + jit.heap_sym, err)
+                    log(f"CodeCache::_heap = {heap:#x}: {cmd(f'x/32gx {heap:#x}', check=False).strip()}")
+                if "allocate" not in name or x[0] > 0x100000:
+                    callers = " < ".join(hex(thread.GetFrameAtIndex(i).GetPC()) for i in range(1, min(8, thread.GetNumFrames())))
+                    log(f"{name}: x0..x3 = {', '.join(hex(v) for v in x)}  [{callers}]")
+                handled = True
+                continue
             if thread.GetStopReason() in (lldb.eStopReasonException, lldb.eStopReasonSignal, lldb.eStopReasonBreakpoint):
                 pc = thread.GetFrameAtIndex(0).GetPC()
                 repeats = repeats + 1 if pc == last_pc else 0
                 last_pc = pc
-                if repeats > 20:
+                if repeats > 20 and not args.no_detach:
                     raise SystemExit(f"stuck at {pc:#x}: {thread.GetStopDescription(200)}")
                 handled |= jit.handle(thread)
         if not handled:
