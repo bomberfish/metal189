@@ -25,6 +25,8 @@ static std::vector<id> g_deferredReleases;
 // Section vertex buffers live in heaps so a draw can reach any of them through its GPU
 // address (the baseline terrain pass binds them once instead of per section).
 static std::vector<id<MTLHeap>> g_sectionHeaps;
+static uint64_t g_sectionsGeneration = 0;
+uint64_t sectionsGeneration() { return g_sectionsGeneration; }
 constexpr size_t kSectionHeapSize = 64u << 20;
 
 static id<MTLBuffer> newSectionBuffer(const void* data, size_t bytes) {
@@ -405,6 +407,7 @@ const Section* sectionAt(int sx, int sy, int sz) {
 void sectionUpload(int sid, int layer, const void* data, size_t bytes, uint32_t vertexCount, int ox, int oy, int oz) {
     if (layer < 0 || layer > 3) return;
     if (layer < 3) rtSectionChanged(sid);
+    g_sectionsGeneration++;
     static uint64_t versions = 0;
     Section& s = g_sections[sid];
     if (sid >= 0) {
@@ -500,6 +503,7 @@ void sectionSolid(int sid, const uint32_t* bits, bool emits, bool tinted) {
 
 void sectionDelete(int sid) {
     rtSectionDeleted(sid);
+    g_sectionsGeneration++;
     auto it = g_sections.find(sid);
     if (it == g_sections.end()) return;
     sectionUnplace(sid, it->second);

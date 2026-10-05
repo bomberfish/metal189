@@ -39,6 +39,10 @@ struct Slot {
 id<MTLTexture> g_tex = nil, g_shape = nil, g_occ = nil, g_occSlot = nil;
 id<MTLTexture> g_props = nil, g_flood[2] = {nil, nil};   // coloured block light (allocated when used)
 int g_floodCur = 0;
+// flood steps still to run: light settles a block per step (15 levels), so after a change the
+// flood runs this many steps and then rests until something changes again
+int g_floodRemaining = 0;
+constexpr int kFloodSettleSteps = 40;
 bool g_lightFilled = false;   // every slot has its light properties
 id<MTLBuffer> g_scratch = nil, g_dummy = nil;
 id<MTLComputePipelineState> g_accum = nil, g_resolve = nil, g_occK = nil, g_tintK = nil, g_floodK = nil;
@@ -140,6 +144,7 @@ bool ensureLight(bool on) {
     if (g_props) return true;
     id<MTLDevice> dev = device();
     g_props = volume(dev, MTLPixelFormatRGBA8Uint, kN, @"voxel light properties");
+    g_floodRemaining = kFloodSettleSteps;
     g_flood[0] = volume(dev, MTLPixelFormatRGBA8Unorm, kN, @"coloured light 0");
     g_flood[1] = volume(dev, MTLPixelFormatRGBA8Unorm, kN, @"coloured light 1");
     if (!g_props || !g_flood[0] || !g_flood[1]) {
@@ -278,6 +283,7 @@ bool voxelsUpdate(id<MTLCommandBuffer> cb, double camX, double camY, double camZ
             sl.sx = jb.sx; sl.sy = jb.sy; sl.sz = jb.sz;
             sl.version = jb.s ? jb.s->version : 0;
         }
+        if (!jobs.empty()) g_floodRemaining = kFloodSettleSteps;   // new or changed blocks in the volume
     }
     int ox = cx * 16, oy = cy * 16, oz = cz * 16;   // the volume's min corner (blocks)
     out.wrap = simd_make_int4(mod(ox, kN), mod(oy, kN), mod(oz, kN), kN);
@@ -319,8 +325,9 @@ bool voxelsUpdate(id<MTLCommandBuffer> cb, double camX, double camY, double camZ
             int i = sx - cx, j = sy - cy, k = sz - cz;
             if (i >= 0 && j >= 0 && k >= 0 && i < kSlots && j < kSlots && k < kSlots) cleared.push_back(simd_make_int4(i * 16, j * 16, k * 16, 1));
         }
+        if (activeKeys != g_lightSlots || !cleared.empty()) g_floodRemaining = kFloodSettleSteps;
         g_lightSlots.swap(activeKeys);
-        if (!active.empty() || !cleared.empty()) {
+        if ((!active.empty() && g_floodRemaining > 0) || !cleared.empty()) {
             MTLComputePassDescriptor* cp = [MTLComputePassDescriptor computePassDescriptor];
             profCompute(cp, "coloured light");
             id<MTLComputeCommandEncoder> e = [cb computeCommandEncoderWithDescriptor:cp];
@@ -338,7 +345,7 @@ bool voxelsUpdate(id<MTLCommandBuffer> cb, double camX, double camY, double camZ
                     [e dispatchThreads:MTLSizeMake(16, 16, 16) threadsPerThreadgroup:MTLSizeMake(8, 8, 4)];
                 }
             }
-            for (int step = 0; step < kFloodStepsPerFrame && !active.empty(); step++) {
+            for (int step = 0; step < kFloodStepsPerFrame && !active.empty() && g_floodRemaining > 0; step++, g_floodRemaining--) {
                 [e setTexture:g_flood[g_floodCur] atIndex:1];
                 [e setTexture:g_flood[g_floodCur ^ 1] atIndex:2];
                 for (const simd_int4& o : active) {

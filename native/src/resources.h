@@ -62,6 +62,8 @@ const Section* sectionAt(int sx, int sy, int sz);   // by position (blocks / 16)
 void sectionUpload(int id, int layer, const void* data, size_t bytes, uint32_t vertexCount, int ox, int oy, int oz);
 void sectionDelete(int id);
 void sectionSolid(int id, const uint32_t* bits, bool emits, bool tinted);
+// Changes whenever any section's geometry does (uploads, deletions).
+uint64_t sectionsGeneration();
 // Makes every section vertex buffer resident for draws that reach them by GPU address.
 void sectionHeapsUse(id<MTLRenderCommandEncoder> enc);
 // The visible sections in vanilla order (RenderGlobal.renderInfos), set when it changes.

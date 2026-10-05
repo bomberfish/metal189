@@ -97,6 +97,15 @@ struct State {
     int glassRes = 0;
     int waterShadowRes = 0;
     id<MTLRenderPipelineState> reflTracePso = nil;
+    // terrain shadow cache (see the shadow pass)
+    id<MTLTexture> shadowTerrainMap = nil;
+    bool shadowCacheValid = false;
+    simd_float3 shadowSun = {0, 0, 0};
+    double shadowRc = 0, shadowUc = 0, shadowFc = 0;
+    float shadowCacheRadius = 0;
+    uint64_t shadowGen = 0;
+    double shadowAt = 0;
+    bool shadowWaving = false, shadowTerrainIn = false;
     id<MTLRenderPipelineState> lightPso[2], waterPso[2], tonemapPso, bloomDown, bloomUp, skyLutPso, taaPso, cloudsPso;
     // volumetric clouds
     id<MTLComputePipelineState> cloudNoiseKernel;
@@ -533,7 +542,10 @@ void ensureShadowMap(int res) {
     d.storageMode = MTLStorageModePrivate;
     d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
     S.shadowMap = [device() newTextureWithDescriptor:d];
+    S.shadowTerrainMap = [device() newTextureWithDescriptor:d];   // the terrain's part, kept between frames
+    S.shadowTerrainMap.label = @"shadow terrain";
     S.shadowRes = res;
+    S.shadowCacheValid = false;
 }
 
 id<MTLBuffer> quadIndices(uint32_t quads) {
@@ -610,6 +622,32 @@ simd_float4x4 shadowMatrix(const EnvCmd& env, simd_float3 sunWorld, float radius
     // light view: columns are the basis; translate so the snapped centre maps to 0
     simd_float4x4 view = {{
         {right.x, u.x, fwd.x, 0}, {right.y, u.y, fwd.y, 0}, {right.z, u.z, fwd.z, 0}, {-offR, -offU, 0, 1}}};
+    float depth = 256.0f;
+    simd_float4x4 ortho = {{
+        {1.0f / radius, 0, 0, 0}, {0, 1.0f / radius, 0, 0}, {0, 0, 0.5f / depth, 0}, {0, 0, 0.5f, 1}}};
+    return simd_mul(ortho, view);
+}
+
+// The light's basis for a sun direction (shadowMatrix's).
+void shadowBasis(simd_float3 sunWorld, simd_float3& right, simd_float3& u, simd_float3& fwd) {
+    fwd = -sunWorld;
+    simd_float3 up = fabsf(fwd.y) > 0.99f ? simd_make_float3(0, 0, 1) : simd_make_float3(0, 1, 0);
+    right = normalize3(simd_cross(up, fwd));
+    u = simd_cross(fwd, right);
+}
+
+// Orthographic light projection around a fixed light-space centre (absolute world space,
+// along the basis: rc, uc, fc), for camera-relative positions: the same world point maps to
+// the same texel whatever the camera does, so a rendered map stays valid as the camera moves.
+simd_float4x4 shadowMatrixAt(const EnvCmd& env, simd_float3 sunWorld, float radius, double rc, double uc, double fc) {
+    simd_float3 right, u, fwd;
+    shadowBasis(sunWorld, right, u, fwd);
+    double ax = env.camBlockX + (double)env.camFracX, ay = env.camBlockY + (double)env.camFracY, az = env.camBlockZ + (double)env.camFracZ;
+    float tr = (float)(ax * right.x + ay * right.y + az * right.z - rc);
+    float tu = (float)(ax * u.x + ay * u.y + az * u.z - uc);
+    float tf = (float)(ax * fwd.x + ay * fwd.y + az * fwd.z - fc);
+    simd_float4x4 view = {{
+        {right.x, u.x, fwd.x, 0}, {right.y, u.y, fwd.y, 0}, {right.z, u.z, fwd.z, 0}, {tr, tu, tf, 1}}};
     float depth = 256.0f;
     simd_float4x4 ortho = {{
         {1.0f / radius, 0, 0, 0}, {0, 1.0f / radius, 0, 0}, {0, 0, 0.5f / depth, 0}, {0, 0, 0.5f, 1}}};
@@ -818,22 +856,67 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
     static_assert(sizeof fr.tune == sizeof g_tuning, "tuning block size");
     memcpy(fr.tune, g_tuning, sizeof fr.tune);
     int shadowRes = g_shadowRes;
+    // The terrain's shadows are kept between frames (S.shadowTerrainMap) and drawn again only when
+    // what they depend on changes: the sun's direction (beyond a hundredth of a degree), the
+    // map's centre (it follows the camera in 8-block steps; the map reaches 8 blocks further),
+    // sections (at most 10 times a second) or waving foliage (30 times a second). Entities are
+    // drawn over a copy every frame.
+    bool shadowRefresh = false;
+    bool terrainInMap = !(features & ADV_RT_SHADOW) || (features & ADV_VOLUMETRIC);   // (RT shadows: the map holds entities)
+    float shadowMapRadius = shadowRadius + 8.0f;
     if (features & ADV_SHADOWS) {
         ensureShadowMap(shadowRes);
         simd_float3 lightDir = day > 0.001f ? sun : -sun;
-        fr.shadowViewProj = shadowMatrix(env, lightDir, shadowRadius, shadowRes);
+        double now = CACurrentMediaTime();
+        bool sunMoved = !S.shadowCacheValid || simd_dot(lightDir, S.shadowSun) < 0.99999998f;
+        simd_float3 sunUsed = sunMoved ? lightDir : S.shadowSun;
+        simd_float3 right, u, fwd;
+        shadowBasis(sunUsed, right, u, fwd);
+        double ax = env.camBlockX + (double)env.camFracX, ay = env.camBlockY + (double)env.camFracY, az = env.camBlockZ + (double)env.camFracZ;
+        double pr = ax * right.x + ay * right.y + az * right.z, pu = ax * u.x + ay * u.y + az * u.z, pf = ax * fwd.x + ay * fwd.y + az * fwd.z;
+        double texel = 2.0 * shadowMapRadius / shadowRes;
+        double step = std::max(texel, std::round(8.0 / texel) * texel);   // whole texels, so shadows do not shimmer
+        bool recentre = sunMoved || fabs(pr - S.shadowRc) > step || fabs(pu - S.shadowUc) > step || fabs(pf - S.shadowFc) > 8.0;
+        uint64_t gen = sectionsGeneration();
+        shadowRefresh = recentre || S.shadowCacheRadius != shadowMapRadius || S.shadowTerrainIn != terrainInMap ||
+                        (gen != S.shadowGen && now - S.shadowAt >= 0.1) || (g_waving && terrainInMap && now - S.shadowAt >= 1.0 / 30.0) ||
+                        S.shadowWaving != g_waving;
+        if (shadowRefresh) {
+            if (recentre) {
+                S.shadowRc = std::floor(pr / step) * step;
+                S.shadowUc = std::floor(pu / step) * step;
+                S.shadowFc = std::floor(pf / 8.0) * 8.0;
+            }
+            S.shadowSun = sunUsed;
+            S.shadowCacheRadius = shadowMapRadius;
+            S.shadowGen = gen;
+            S.shadowAt = now;
+            S.shadowWaving = g_waving;
+            S.shadowTerrainIn = terrainInMap;
+            S.shadowCacheValid = true;
+        }
+        fr.shadowViewProj = shadowMatrixAt(env, S.shadowSun, shadowMapRadius, S.shadowRc, S.shadowUc, S.shadowFc);
+    } else {
+        S.shadowCacheValid = false;
     }
 
     // ---- shadow pass ----
     if (features & ADV_SHADOWS) {
         MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
-        rp.depthAttachment.texture = S.shadowMap;
-        rp.depthAttachment.loadAction = MTLLoadActionClear;
+        rp.depthAttachment.texture = shadowRefresh ? S.shadowTerrainMap : S.shadowMap;
+        rp.depthAttachment.loadAction = shadowRefresh ? MTLLoadActionClear : MTLLoadActionLoad;
         rp.depthAttachment.clearDepth = 1.0;
         rp.depthAttachment.storeAction = MTLStoreActionStore;
+        if (!shadowRefresh) {
+            // the kept terrain shadows, for this frame's entities to be drawn over
+            id<MTLBlitCommandEncoder> bc = [cb blitCommandEncoder];
+            bc.label = @"shadow terrain copy";
+            [bc copyFromTexture:S.shadowTerrainMap toTexture:S.shadowMap];
+            [bc endEncoding];
+        }
         profRender(rp, "shadow");
         id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
-        e.label = @"shadow";
+        e.label = shadowRefresh ? @"shadow terrain" : @"shadow";
         [e setDepthStencilState:S.depthWrite];
         [e setCullMode:MTLCullModeNone];
         [e setDepthBias:1.0f slopeScale:1.5f clamp:0.01f];
@@ -855,10 +938,8 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             }
             return false;
         };
-        float cullReach = shadowRadius * 4.0f + 32.0f;   // bounds the box footprint even near the horizon
-        // (volumetric light still needs terrain in the map)
-        bool terrainInMap = !(features & ADV_RT_SHADOW) || (features & ADV_VOLUMETRIC);
-        for (int layer = 0; layer < (terrainInMap ? 3 : 0); layer++) {
+        float cullReach = shadowMapRadius * 4.0f + 32.0f;   // bounds the box footprint even near the horizon
+        for (int layer = 0; layer < (terrainInMap && shadowRefresh ? 3 : 0); layer++) {
             bool alpha = layer > 0;
             [e setRenderPipelineState:S.shadowTerrain[(alpha ? 1 : 0) | (g_waving ? 2 : 0)]];
             const uint32_t* sp = w.layerSampler[layer];
@@ -877,6 +958,25 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
                 [e drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:quads * 6 indexType:MTLIndexTypeUInt32
                              indexBuffer:quadIndices(quads) indexBufferOffset:0];
             }
+        }
+        if (shadowRefresh) {
+            // the terrain is kept; this frame's entities go over a copy
+            [e endEncoding];
+            id<MTLBlitCommandEncoder> bc = [cb blitCommandEncoder];
+            bc.label = @"shadow terrain copy";
+            [bc copyFromTexture:S.shadowTerrainMap toTexture:S.shadowMap];
+            [bc endEncoding];
+            MTLRenderPassDescriptor* ep = [MTLRenderPassDescriptor renderPassDescriptor];
+            ep.depthAttachment.texture = S.shadowMap;
+            ep.depthAttachment.loadAction = MTLLoadActionLoad;
+            ep.depthAttachment.storeAction = MTLStoreActionStore;
+            e = [cb renderCommandEncoderWithDescriptor:ep];
+            e.label = @"shadow";
+            [e setDepthStencilState:S.depthWrite];
+            [e setCullMode:MTLCullModeNone];
+            [e setDepthBias:1.0f slopeScale:1.5f clamp:0.01f];
+            [e setVertexBytes:&fr length:sizeof fr atIndex:1];
+            [e setVertexBuffer:g_materials offset:0 atIndex:5];
         }
         // captured opaque geometry (entities, block entities)
         for (const AdvGeometry& g : w.geometry) {
@@ -1025,24 +1125,58 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         bool pbr = (features & ADV_PBR) != 0;
         [e setFragmentTexture:pbr ? pbrN->tex : (atlas ? atlas->tex : nil) atIndex:1];
         [e setFragmentTexture:pbr ? pbrS->tex : (atlas ? atlas->tex : nil) atIndex:2];
+        // the eye in the space the section offsets are in
+        simd_float4 eyeH = simd_mul(simd_inverse(w.view), simd_make_float4(0, 0, 0, 1));
+        simd_float3 eyeOff = simd_make_float3(eyeH.x / eyeH.w, eyeH.y / eyeH.w, eyeH.z / eyeH.w);
+        uint32_t qiQuads = 0;
         for (int layer = 0; layer < 3; layer++) {
             bool alpha = layer > 0;
             [e setRenderPipelineState:S.gTerrain[(alpha ? 1 : 0) | (g_waving ? 2 : 0)]];
             const uint32_t* sp = w.layerSampler[layer];
             [e setFragmentSamplerState:samplerFor((int)sp[0], (int)sp[1], (int)sp[2], (int)sp[3], (int)sp[4],
                                                   *(const float*)&sp[5], *(const float*)&sp[6], *(const float*)&sp[7]) atIndex:0];
+            // back faces are culled: only the runs of face groups that can face the camera are
+            // drawn (sections store solid quads by facing, resources.h). Waving leaves tilt a
+            // little, so their layers keep a wider margin
+            const float eps = (alpha && g_waving) ? 0.25f : 1e-3f;
+            id<MTLBuffer> qi = nil;
             for (const AdvTerrainEntry& t : w.terrain[layer]) {
                 Section* s = section((int)t.section);
                 if (!s || !s->layers[layer]) continue;
+                uint32_t quads = s->vertices[layer] / 4;
+                if (!qi || quads > qiQuads) { qi = quadIndices(std::max(quads, qiQuads)); qiQuads = std::max(quads, qiQuads); }
                 float mv[16];
                 sectionMatrix(w.view, t.x, t.y, t.z, mv);
                 [e setVertexBytes:mv length:sizeof mv atIndex:3];
                 simd_float4 off = simd_make_float4(t.x, t.y, t.z, 0);
                 [e setVertexBytes:&off length:sizeof off atIndex:4];
                 [e setVertexBuffer:s->layers[layer] offset:0 atIndex:0];
-                uint32_t quads = s->vertices[layer] / 4;
-                [e drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:quads * 6 indexType:MTLIndexTypeUInt32
-                             indexBuffer:quadIndices(quads) indexBufferOffset:0];
+                const uint32_t* gs = s->groupStart[layer];
+                const float* pl = s->plane[layer];
+                float cx = eyeOff.x - t.x, cy = eyeOff.y - t.y, cz = eyeOff.z - t.z;
+                bool vis[FG_COUNT] = {
+                    cy < pl[FG_NY] + eps, cx < pl[FG_NX] + eps, cz < pl[FG_NZ] + eps, cy > pl[FG_PY] - eps,
+                    true, cz > pl[FG_PZ] - eps, cx > pl[FG_PX] - eps,
+                };
+                uint32_t runStart = 0, runEnd = 0;
+                bool open = false;
+                auto draw = [&](uint32_t a, uint32_t b) {
+                    if (b > a)
+                        [e drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:(b - a) * 6 indexType:MTLIndexTypeUInt32
+                                     indexBuffer:qi indexBufferOffset:(NSUInteger)a * 24];
+                };
+                for (int gi = 0; gi < FG_COUNT; gi++) {
+                    uint32_t a = gs[gi], b = gs[gi + 1];
+                    if (a == b) continue;
+                    if (vis[gi]) {
+                        if (!open) { runStart = a; open = true; }
+                        runEnd = b;
+                    } else if (open) {
+                        draw(runStart, runEnd);
+                        open = false;
+                    }
+                }
+                if (open) draw(runStart, runEnd);
             }
         }
         // captured opaque geometry (entities, block entities)
@@ -1131,6 +1265,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             bp.colorAttachments[0].storeAction = MTLStoreActionStore;
             profRender(bp, "ao blur", true);
             id<MTLRenderCommandEncoder> b = [cb renderCommandEncoderWithDescriptor:bp];
+            b.label = @"ao blur";
             [b setRenderPipelineState:S.aoBlurPso];
             [b setFragmentBytes:&fr length:sizeof fr atIndex:1];
             simd_float4 step = pass == 0 ? simd_make_float4(1, 0, 0, 0) : simd_make_float4(0, 1, 0, 0);
@@ -1216,6 +1351,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             bp.colorAttachments[0].storeAction = MTLStoreActionStore;
             profRender(bp, "gi blur", true);
             id<MTLRenderCommandEncoder> b = [cb renderCommandEncoderWithDescriptor:bp];
+            b.label = @"gi blur";
             [b setRenderPipelineState:S.giBlurPso];
             [b setFragmentBytes:&fr length:sizeof fr atIndex:1];
             simd_float4 step = pass == 0 ? simd_make_float4(1, 0, 0, 0) : simd_make_float4(0, 1, 0, 0);
@@ -1384,6 +1520,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         MTLBlitPassDescriptor* bp = [MTLBlitPassDescriptor blitPassDescriptor];
         profBlit(bp, "scene copy");
         id<MTLBlitCommandEncoder> b = [cb blitCommandEncoderWithDescriptor:bp];
+        b.label = @"scene copy";
         [b copyFromTexture:S.t.hdr toTexture:S.t.sceneColor];
         // the copy matches the world's depth format (depth + stencil when a mod enabled
         // Minecraft's framebuffer stencil), so it is never silently skipped
@@ -1621,6 +1758,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             rp.colorAttachments[0].storeAction = MTLStoreActionStore;
             profRender(rp, "bloom", true);
             id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+            e.label = @"bloom down";
             [e setRenderPipelineState:S.bloomDown];
             simd_float4 p = simd_make_float4(i == 0 ? 1.0f : 0.0f, 1.2f, 1.0f / src.width, 1.0f / src.height);
             [e setFragmentBytes:&p length:sizeof p atIndex:0];
@@ -1638,6 +1776,7 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             rp.colorAttachments[0].storeAction = MTLStoreActionStore;
             profRender(rp, "bloom", true);
             id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+            e.label = @"bloom up";
             [e setRenderPipelineState:S.bloomUp];
             simd_float4 p = simd_make_float4(0.75f, 0, 1.0f / s.width, 1.0f / s.height); // x: weight of the coarser level
             [e setFragmentBytes:&p length:sizeof p atIndex:0];
