@@ -532,6 +532,10 @@ bool windowCreate(int width, int height, NSString* title, int32_t flags) {
         info.visible = true;
         info.focused = true;
         info.mouseInside = true;
+        // the game fills the screen: the pointer is always inside its window. (Minecraft on a
+        // Mac re-grabs the mouse every frame while it thinks the pointer is outside, which
+        // drops all mouse movement, and Amethyst then sees the grab flap)
+        pushEvent({EV_MOUSE_INSIDE, 1, 0, 0, 0, 0, 0, 0, nowNanos()});
         log("ios: drawing into Amethyst's %dx%d surface", w, h);
         return true;
     }
@@ -551,6 +555,7 @@ bool windowCreate(int width, int height, NSString* title, int32_t flags) {
         info.visible = true;
         info.focused = UIApplication.sharedApplication.applicationState == UIApplicationStateActive;
         info.mouseInside = true;
+        pushEvent({EV_MOUSE_INSIDE, 1, 0, 0, 0, 0, 0, 0, nowNanos()});   // (as above)
         NSNotificationCenter* nc = NSNotificationCenter.defaultCenter;
         [nc addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:nil usingBlock:^(NSNotification*) {
             windowInfo().focused = true;
