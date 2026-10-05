@@ -1649,16 +1649,32 @@ fragment float4 blocklight_trace_fragment(FullscreenOut in [[stage_in]], constan
     uint base = ((uint(cell.z) * RT_LIGHT_CELLS + uint(cell.y)) * RT_LIGHT_CELLS + uint(cell.x)) * (RT_LIGHTS_PER_CELL + 1);
     uint k = min(grid[base], uint(RT_LIGHTS_PER_CELL));
     bool coloured = fr.tune[16].x > 0.5;   // coloured block light setting: lights keep their colour
-    float w[RT_LIGHTS_PER_CELL];
+    // the held light is one more candidate, at the hand (eye space: right, down, forward)
+    bool hand = fr.post.z > 0.5;
+    float3 handPos = fr.voxCam.xyz + (fr.invView * float4(0.25, -0.25, -0.3, 1.0)).xyz;
+    uint kk = k + (hand ? 1u : 0u);
+    float w[RT_LIGHTS_PER_CELL + 1];
+    float3 cs[RT_LIGHTS_PER_CELL + 1];   // what each would give, unshadowed
     float wsum = 0.0;
-    for (uint i = 0; i < k; i++) {
-        RtLight L = lights[grid[base + 1 + i]];
-        float3 dv = L.pos.xyz - vol;
+    for (uint i = 0; i < kk; i++) {
+        float3 pos, col;
+        float level;
+        if (i < k) {
+            RtLight L = lights[grid[base + 1 + i]];
+            pos = L.pos.xyz;
+            level = L.color.w;
+            col = coloured ? L.color.rgb / max(L.color.w / 15.0, 1e-3) : float3(1.0);
+        } else {
+            pos = handPos;
+            level = fr.post.z;
+            col = float3(1.0);
+        }
+        float3 dv = pos - vol;
         float d = length(dv);
-        float fall = saturate((L.color.w - d) / 15.0);
+        float fall = saturate((level - d) / 15.0);
         float geom = d > 0.05 ? saturate((dot(nWorld, dv / d) + 0.15) / 1.15) : 1.0;
-        float3 c = coloured ? L.color.rgb / max(L.color.w / 15.0, 1e-3) : float3(1.0);
-        w[i] = fall > 0.0 ? dot(c, float3(0.2126, 0.7152, 0.0722)) * pow(fall, fr.blockLight.a) * geom : 0.0;
+        cs[i] = fall > 0.0 ? col * pow(fall, fr.blockLight.a) * geom : float3(0.0);
+        w[i] = dot(cs[i], float3(0.2126, 0.7152, 0.0722));
         wsum += w[i];
     }
     if (wsum <= 0.0) return float4(0.0, 0.0, 0.0, 1.0);
@@ -1671,29 +1687,31 @@ fragment float4 blocklight_trace_fragment(FullscreenOut in [[stage_in]], constan
                            hash22(in.position.yx * 1.137 + float(fr.flags.z % 1024u) * float2(5.73, 2.11) + float(s) * float2(6.1, 0.7)));
         float pick = xi.x * wsum;
         uint j = 0;
-        for (; j + 1 < k; j++) {
+        for (; j + 1 < kk; j++) {
             pick -= w[j];
             if (pick < 0.0) break;
         }
         if (w[j] <= 0.0) continue;
-        RtLight L = lights[grid[base + 1 + j]];
-        // a random point of the light's block: soft shadows
-        float3 target = L.pos.xyz + (float3(xi.yzw) - 0.5) * 0.6 + toRt;
+        bool isHand = j >= k;
+        float3 lpos = isHand ? handPos : lights[grid[base + 1 + j]].pos.xyz;
+        // a random point of the light's block (of a small ball at the hand): soft shadows
+        float3 target = lpos + (float3(xi.yzw) - 0.5) * (isHand ? 0.3 : 0.6) + toRt;
         float3 dv = target - o;
         float dist = length(dv);
-        float tmax = dist - 0.9;   // stop short of the light's own block
+        float tmax = dist - (isHand ? 0.35 : 0.9);   // stop short of the light's own block (the hand)
         bool vis = true;
         if (tmax > 0.0) {
             float3 dir = dv / dist;
             vis = !rtOccluded(tlas, rtInst, atlas, pointS, o, dir, tmax);
-            if (vis && (fr.flags.x & ADV_RT_ENTITIES)) vis = !rtEntOccludedSolid(entAs, o, dir, tmax);
+            // (not the player's own body for the held light)
+            if (vis && !isHand && (fr.flags.x & ADV_RT_ENTITIES)) vis = !rtEntOccludedSolid(entAs, o, dir, tmax);
         }
         if (!vis) continue;
         // through stained glass and the like (not in the acceleration structures): their colour,
         // from the voxel volume's light properties along the way
         float3 T = float3(1.0);
         if (coloured) {
-            float3 a = vol, b = L.pos.xyz;
+            float3 a = vol, b = lpos;
             float len = distance(a, b);
             int n = int(ceil(len * 2.0));
             int3 last = int3(floor(a)), lc = int3(floor(b));
@@ -1707,12 +1725,7 @@ fragment float4 blocklight_trace_fragment(FullscreenOut in [[stage_in]], constan
                 if (pr.w == 2u) T *= float3(pr.xyz) * (1.0 / 255.0);
             }
         }
-        float3 dvc = L.pos.xyz - vol;
-        float d = length(dvc);
-        float fall = saturate((L.color.w - d) / 15.0);
-        float geom = d > 0.05 ? saturate((dot(nWorld, dvc / d) + 0.15) / 1.15) : 1.0;
-        float3 c = coloured ? L.color.rgb / max(L.color.w / 15.0, 1e-3) : float3(1.0);
-        sum += T * c * pow(fall, fr.blockLight.a) * geom * (wsum / w[j]);
+        sum += T * cs[j] * (wsum / w[j]);
     }
     sum /= float(samples);
     if (!all(isfinite(sum))) sum = float3(0.0);   // a degenerate normal must not poison the history
@@ -1721,7 +1734,7 @@ fragment float4 blocklight_trace_fragment(FullscreenOut in [[stage_in]], constan
 
 // Temporal accumulation of the ray-traced block light (full resolution), as the GI's: last
 // frame's history reprojected with the camera motion, disocclusions rejected by depth, up to
-// 24 frames. `valid`: the history can be used.
+// `valid` frames (0: no history; fewer while a moving light, the held one, is lit).
 fragment GiTemporalOut block_temporal_fragment(FullscreenOut in [[stage_in]], constant AdvFrame& fr [[buffer(1)]],
                                                constant float& valid [[buffer(0)]],
                                                texture2d<float> sample [[texture(0)]], texture2d<float> hist [[texture(1)]],
@@ -1747,7 +1760,7 @@ fragment GiTemporalOut block_temporal_fragment(FullscreenOut in [[stage_in]], co
     if (abs(pz.x - pc.w) > max(pc.w * 0.03, 0.05)) return o;   // disocclusion
     float4 h = hist.sample(lin, puv);
     if (!all(isfinite(h))) return o;
-    float n = min(pz.y + 1.0, 24.0);
+    float n = min(pz.y + 1.0, valid);
     o.gi = mix(h, cur, 1.0 / n);
     o.z = float2(z, n);
     return o;
@@ -2481,8 +2494,10 @@ fragment float4 sun_trace_fragment(FullscreenOut in [[stage_in]], constant AdvFr
     }
     float dcam = length(eye);
     if (fr.post.z > 0.5 && dcam > 1.0 && dcam < fr.post.z) {
+        // towards the eye (world positions are relative to the view entity's feet, not the eye)
         float3 o = world + fr.rtCam.xyz + nWorld * 0.02;
-        r.g = rtOccluded(tlas, rtInst, atlas, pointS, o, normalize(-world), dcam - 0.8) ? 0.0 : 1.0;
+        float3 toEye = normalize((fr.invView * float4(-eye, 0.0)).xyz);
+        r.g = rtOccluded(tlas, rtInst, atlas, pointS, o, toEye, dcam - 0.8) ? 0.0 : 1.0;
     }
     return r;
 }
@@ -2741,9 +2756,9 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     float daySky = (rtSky ? saturate(giS.a) : skyLight * skyLight) * fr.sunDirWorld.w;
     float4 rtb = (fr.flags.x & ADV_RT_BLOCK) ? blockRt.read(px) : float4(0.0);
     if (rtb.a > 0.5) {
-        // ray traced (blocklight_trace_fragment): every light with its own shadows; the held
-        // light adds to it
-        float3 bl = rtb.rgb + pow(handL, fr.blockLight.a);
+        // ray traced (blocklight_trace_fragment): every light with its own shadows, the held
+        // light included
+        float3 bl = rtb.rgb;
         color += albedo * fr.blockLight.rgb * bl * ao * (1.0 - 0.75 * daySky);
         blockL = max(dot(rtb.rgb, float3(0.2126, 0.7152, 0.0722)), handL);   // (debug view 8)
     } else {

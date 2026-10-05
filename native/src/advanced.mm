@@ -1527,7 +1527,8 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
             // accumulated over frames, then an edge-aware blur
             int cur = S.blockIndex, prev = S.blockIndex ^ 1;
             S.blockIndex ^= 1;
-            float valid = S.blockHistory && !cameraCut ? 1.0f : 0.0f;
+            // frames of history: fewer while the held light (it moves with the player) is lit
+            float valid = S.blockHistory && !cameraCut ? (fr.post.z > 0.5f ? 6.0f : 24.0f) : 0.0f;
             S.blockHistory = true;
             MTLRenderPassDescriptor* hp = [MTLRenderPassDescriptor renderPassDescriptor];
             hp.colorAttachments[0].texture = S.t.blockHist[cur];
