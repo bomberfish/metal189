@@ -68,7 +68,7 @@ Intel Macs are not supported.
 
 ## Using it
 
-* **Video Settings → Shaders...** opens the rendering settings.
+* **Video Settings → Rendering...** opens the rendering settings.
 * **K** toggles the advanced pipeline on or off. A second key, *Rendering Settings*
   (unbound by default), opens the settings screen; both can be rebound under
   Controls → metal189.

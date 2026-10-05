@@ -30,9 +30,9 @@ public final class Config {
     public static boolean ssao = true;
     /** LWJGL's macOS emulation of a right click by Ctrl+left click; off by default (Ctrl+click stays a left click). */
     public static boolean ctrlClickRightClick = false;
-    public static boolean smartLeaves = true;            // fancy leaves without the faces between leaf blocks
+    public static boolean smartLeaves = false;           // fancy leaves without the faces between leaf blocks
     public static int leavesDetailDistance = 8;
-    public static int maxRenderDistance = 64;            // chunks: the render distance slider's end (vanilla 32)          // chunks; fast leaves past it (0: everywhere as set)
+    public static int maxRenderDistance = 32;            // chunks: the render distance slider's end (vanilla 32)          // chunks; fast leaves past it (0: everywhere as set)
     public static int exposure = 100;        // percent
     public static boolean rtShadows = false;
     public static boolean rtReflections = false;
@@ -138,10 +138,15 @@ public final class Config {
             }
         }
         // older settings files saved what were then defaults: Ctrl+click = right click
-        // (before version 2) and shore foam at 100% (before version 3)
+        // (before version 2), shore foam at 100% (before version 3), smart leaves on and a
+        // 64-chunk render distance limit (before version 4)
         int version = version(p);
         if (version < 2) p.remove("ctrlClickRightClick");
         if (version < 3) p.remove("waterFoam");
+        if (version < 4) {
+            p.remove("smartLeaves");
+            p.remove("maxRenderDistance");
+        }
         // the RT Global Illumination switch became the Global Illumination mode
         String rtGi = p.getProperty("rtGlobalIllumination");
         if (rtGi != null && p.getProperty("globalIllumination") == null)
@@ -173,7 +178,7 @@ public final class Config {
         }
     }
 
-    private static final int CONFIG_VERSION = 3;
+    private static final int CONFIG_VERSION = 4;
 
     private static int version(Properties p) {
         try {

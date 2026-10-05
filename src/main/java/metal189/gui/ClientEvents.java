@@ -31,7 +31,7 @@ public final class ClientEvents {
     public void onInitGui(GuiScreenEvent.InitGuiEvent.Post e) {
         String label = I18n.format("metal189.gui.button");
         if (e.gui instanceof GuiVideoSettings) {
-            // bottom row becomes [Shaders...] [Done], where OptiFine users look for it
+            // bottom row becomes [Rendering...] [Done], where OptiFine users look for Shaders...
             for (GuiButton b : e.buttonList) {
                 if (b.id == DONE_ID) {
                     b.xPosition = e.gui.width / 2 + 5;
@@ -41,7 +41,7 @@ public final class ClientEvents {
             e.buttonList.add(new GuiButton(BUTTON_ID, e.gui.width / 2 - 155, e.gui.height - 27, 150, 20, label));
         } else if (e.gui instanceof net.minecraft.client.gui.GuiOptions) {
             // "Super Secret Settings" cycles GLSL post effects, which metal189 does not run;
-            // its slot in the main Options screen becomes Shaders...
+            // its slot in the main Options screen becomes Rendering...
             for (int i = 0; i < e.buttonList.size(); i++) {
                 GuiButton b = e.buttonList.get(i);
                 if (b.id == SUPER_SECRET_ID) {
