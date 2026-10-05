@@ -2306,6 +2306,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     float wrap = foliage ? 0.35 : 0.0; // foliage transmits some light
     float diffuse = saturate((ndl + wrap) / (1.0 + wrap));
     float rtShadow = 1.0;
+    float sunVis = 0.0;   // the sun's visibility here (for the light scattered in water above)
     if ((diffuse > 0.0 || (foliage && fr.tune[5].x > 0.0)) && fr.flags.y == 0) {
         float shadow = 1.0;
         // shadow lookups offset towards the light (a backlit leaf must not shadow itself)
@@ -2330,6 +2331,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
         } else if (fr.flags.x & ADV_SHADOWS) shadow = sampleShadow(fr, shadowMap, cmp, world, nShadow, abs(ndl));
         // no direct light deep inside caves; under water the light path above decides instead
         float skyGate = waterPath > 0.0 ? 1.0 : smoothstep(0.35, 0.9, skyLight);
+        sunVis = shadow;
         if (fr.flags.x & ADV_CLOUDS) {
             float3 Lw = fr.sunDirView.w > 0.0 ? fr.sunDirWorld.xyz : -fr.sunDirWorld.xyz;
             shadow *= cloudShadow(fr, cloudNoise, rep, world + fr.camera.xyz, Lw);
@@ -2380,8 +2382,11 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
             color += albedo * (1.0 - metal) * giTex.sample(lin, in.uv).rgb * ao * skyTint;   // traced sky light + bounce
         else
             color += albedo * (1.0 - metal) * skyAmbient(fr, skyLut, lin, nWorld) * skyVis;
+        // the glow of daylight scattered in the water above: only where daylight reaches (sky
+        // light, or the sun through the water: the water shadow map sees cave pools under rock too)
         if (waterPath > 0.0)
-            color += albedo * (1.0 - metal) * underwaterInscatter(fr, skyLut, lin) * exp(-WATER_ABSORB.xyz * waterPath * 0.5) * 0.6 * ao;
+            color += albedo * (1.0 - metal) * underwaterInscatter(fr, skyLut, lin) * exp(-WATER_ABSORB.xyz * waterPath * 0.5) * 0.6 * ao *
+                     max(smoothstep(0.05, 0.4, skyLight), sunVis);
         // reflections off: no mirror image, but metals keep an even sheen of the sky light
         bool reflOn = REFL_TUNE.x > 0.5 || (fr.flags.x & ADV_RT_REFL);
         float3 refl = reflOn ? envCol * skyVis : skyAmbient(fr, skyLut, lin, nWorld) * skyVis;
@@ -2875,7 +2880,7 @@ fragment float4 water_fragment(WaterOut in [[stage_in]], bool front [[front_faci
     if (!reflOn) fres = 0.0;   // reflections off
     // the sky (no sun disk: the glint below is the sun's reflection); under cover, a dim
     // copy of the water's own colour instead of a sky it cannot see
-    float skyVis = max(smoothstep(0.6, 0.95, in.lm.y), shadow * shadow * 0.3);
+    float skyVis = max(smoothstep(0.6, 0.95, in.lm.y), shadow * shadow * 0.3 * smoothstep(0.05, 0.4, in.lm.y));   // no sky in a cave
     float3 skyR = REFL_TUNE2.y > 0.5 ? skyRadiance(fr, skyLut, lin, R, cloudMap, false) : skyBase(fr, skyLut, lin, R);
     float3 refl = mix(inLight * waterCol * 0.5, skyR, skyVis);
     float hitT = 0.0;   // reflected geometry blocks the sun glint

@@ -93,6 +93,7 @@ public final class Search {
     private static final MethodHandle VIEW_FRUSTUM, RENDER_DISTANCE, SET_RENDER_INFOS, SET_DIRTY, VISIBLE_FACINGS, VIEW_VECTOR;
     private static final MethodHandle VF_CHUNKS, VF_X, VF_Y, VF_Z, NEW_INFO;
     private static final MethodHandle FR_HELPER, FR_X, FR_Y, FR_Z;
+    private static final MethodHandle CHUNKS_TO_UPDATE;
     private static final boolean READY;
 
     static {
@@ -115,6 +116,13 @@ public final class Search {
         FR_X = frx;
         FR_Y = fry;
         FR_Z = frz;
+        MethodHandle ctu = null;
+        try {
+            ctu = getter(RenderGlobal.class, "chunksToUpdate", "field_175009_l").asType(MethodType.methodType(Set.class, RenderGlobal.class));
+        } catch (Exception e) {
+            Native.LOG.warn("metal189: chunksToUpdate not found; shadows only come from sections seen", e);
+        }
+        CHUNKS_TO_UPDATE = ctu;
         try {
             Class<?> vfc = Class.forName("net.minecraft.client.renderer.ViewFrustum");
             vf = getter(RenderGlobal.class, "viewFrustum", "field_175008_n").asType(MethodType.methodType(Object.class, RenderGlobal.class));
@@ -204,6 +212,7 @@ public final class Search {
             SET_RENDER_INFOS.invokeExact(rg, (List) infos);
             long t1 = DEBUG ? System.nanoTime() : 0;
             Visible.publish(infos, foundInfos, foundChunks, foundKeys, foundIds, found);
+            if (metal189.world.Pipeline.advanced()) queueShadowSections(rg, now);
             if (DEBUG) {
                 long t2 = System.nanoTime();
                 dbgSearch += t1 - t0;
@@ -446,6 +455,37 @@ public final class Search {
         marked = markedNear = false;
         scheduledAt = now;
         return true;
+    }
+
+    private static long shadowQueuedAt;
+
+    /**
+     * Shaders: sections around the camera are queued for building even when not visible.
+     * Vanilla builds only what the camera sees, but the sun's shadow map and ray tracing need
+     * the rest too: logged in (or teleported) inside a cave, the rock overhead was never built,
+     * so it cast no shadow and daylight lit the cave. Queued after the visible ones, twice a second.
+     */
+    @SuppressWarnings("unchecked")
+    private static void queueShadowSections(RenderGlobal rg, long now) throws Throwable {
+        if (CHUNKS_TO_UPDATE == null || now - shadowQueuedAt < 500_000_000L) return;
+        shadowQueuedAt = now;
+        Object vf = (Object) VIEW_FRUSTUM.invokeExact(rg);
+        RenderChunk[] grid = (RenderChunk[]) VF_CHUNKS.invokeExact(vf);
+        int cx = (int) VF_X.invokeExact(vf), cy = (int) VF_Y.invokeExact(vf), cz = (int) VF_Z.invokeExact(vf);
+        int renderDistance = (int) RENDER_DISTANCE.invokeExact(rg);
+        int r = Math.min(renderDistance, metal189.config.Config.shadowDistance / 16 + 1);
+        Set<RenderChunk> pending = (Set<RenderChunk>) CHUNKS_TO_UPDATE.invokeExact(rg);
+        int bx = MathHelper.floor_double(lastX), bz = MathHelper.floor_double(lastZ);
+        for (int dz = -r; dz <= r; dz++) {
+            for (int dx = -r; dx <= r; dx++) {
+                for (int y = 0; y < 256; y += 16) {
+                    int s = slot(bx + dx * 16, y, bz + dz * 16, cx, cy, cz);
+                    if (s < 0) continue;
+                    RenderChunk rc = grid[s];
+                    if (rc != null && rc.isNeedsUpdate()) pending.add(rc);
+                }
+            }
+        }
     }
 
     /** ViewFrustum.getRenderChunk's index for a block position, or -1. */

@@ -11,5 +11,7 @@ LOG="${BENCH_LOG:-/tmp/m189-bench.log}"
 SCRIPT="${BENCH_SCRIPT:-base.txt}"
 [ -f "$SCRIPT" ] || SCRIPT="$ROOT/tools/bench/$SCRIPT"
 timeout 600 "$ROOT/tools/run-client.sh" -Dmetal189.test="$SCRIPT" "$@" -- --width "$W" --height "$H" > "$LOG" 2>&1
+# never leave a test client behind (a hung shutdown, a timeout): only ours, by its game directory
+pkill -f "net.minecraft.launchwrapper.Launch.*--gameDir ${RUN_DIR:-$ROOT/run}" 2>/dev/null
 cp "$ROOT/captures/metal189.properties.bench" "$ROOT/run/config/metal189.properties"
 grep -E "fps .* = |Exception|FATAL" "$LOG" | sed 's/.*metal189-test fps //'
