@@ -200,7 +200,7 @@ user's instance), in a background window that never grabs the pointer:
 Useful properties: `-Dmetal189.shaders=true|false`,
 `-Dmetal189.shaderFeatures=<bits>`, `-Dmetal189.gpuStats=true` (per-pass GPU
 timings), `-Dmetal189.advDebug=<view>` (1 no fog, 2 albedo, 3 normals, 4 lighting,
-5 shadow map, 6 RT shadows).
+5 shadow map, 6 RT shadows, 13 traced sky visibility, 14 RT block light).
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the engine is put together.
 

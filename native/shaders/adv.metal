@@ -2759,7 +2759,8 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     // debug views: 1 no fog, 2 albedo, 3 normals, 4 white albedo lighting, 5 shadow term, 6 RT shadow,
     // 7 sunlight's path through water (yellow shallow, red deep), 8 lightmap (red sky, green block),
     // 9 (above) the voxel volume of world-space reflections; 10 renders normally and logs the
-    // world-space reflection steps per ray; 12 the light let through stained glass
+    // world-space reflection steps per ray; 12 the light let through stained glass; 13 traced
+    // sky visibility (ray-traced sky light); 14 ray-traced block light
     uint dbg = fr.flags.w;
     if (dbg == 1) return float4(color, 1.0);
     if (dbg == 2) return float4(albedo, 1.0);
@@ -2770,6 +2771,8 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
     if (dbg == 7) return float4(waterPath > 0.0 ? float3(1.0, 1.0 - saturate(waterPath / 16.0), 0.2) : float3(0.0), 1.0);
     if (dbg == 8) return float4(skyLight, blockL, 0.0, 1.0);    // G-buffer lightmap: red sky, green block
     if (dbg == 12) return float4(glassTransmit(fr, glassDepth, glassColor, world + nWorld * 0.02), 1.0);   // light through glass
+    if (dbg == 13) return float4(float3(giS.a), 1.0);   // traced sky visibility (ray-traced sky light)
+    if (dbg == 14) return float4(rtb.rgb * 0.5, 1.0);   // ray-traced block light
 
     float dist = length(eye);
     if (fr.fog.w > 1.5) {
