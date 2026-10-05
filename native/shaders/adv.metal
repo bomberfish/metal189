@@ -2127,6 +2127,85 @@ fragment GuideOut fx_guides_fragment(FullscreenOut in [[stage_in]], constant Adv
     return o;
 }
 
+// Ray-traced reflections of opaque surfaces, in their own pass (a fragment shader with ray
+// tracing in it needs many more registers, which slowed all of the lighting): the same rays the
+// lighting would trace (light_fragment), as the mean radiance of the samples that hit (rgb) and
+// the share of samples that hit (a); the lighting fills the rest with the sky.
+fragment float4 refl_trace_fragment(FullscreenOut in [[stage_in]],
+                                    constant AdvFrame& fr [[buffer(1)]],
+                                    texture2d<float> gAlbedo [[texture(0)]],
+                                    texture2d<float> gNormal [[texture(1)]],
+                                    texture2d<float> gLight [[texture(2)]],
+                                    depth2d<float> depth [[texture(3)]],
+                                    texture2d<float> skyLut [[texture(5)]],
+                                    texture2d<float> gLinZ [[texture(6)]],
+                                    texture3d<float> cloudNoise [[texture(9)]],
+                                    texture2d<float> gSpec [[texture(10)]],
+                                    sampler lin [[sampler(1)]], sampler rep [[sampler(3)]],
+                                    instance_acceleration_structure tlas [[buffer(10)]],
+                                    device const RtInstance* rtInst [[buffer(11)]],
+                                    primitive_acceleration_structure entAs [[buffer(12)]],
+                                    device const RtEntVertex* entV [[buffer(13)]],
+                                    device const RtEntDraw* entD [[buffer(14)]],
+                                    device const RtEntTex* entT [[buffer(15)]],
+                                    texture2d<float> atlas [[texture(7)]],
+                                    sampler pointS [[sampler(2)]]) {
+    uint2 px = uint2(in.position.xy);
+    float d = depth.read(px);
+    if (d >= 1.0) return float4(0.0);
+    float2 ndc = float2(in.position.x * fr.screen.z * 2.0 - 1.0, in.position.y * fr.screen.w * 2.0 - 1.0) - fr.jitter.xy;
+    float4 pf = fr.invProj * float4(ndc, 1.0, 1.0);
+    float3 rd = pf.xyz / pf.w;
+    float3 eye = rd * (gLinZ.read(px).r / -rd.z);
+    float4 alb = gAlbedo.read(px);
+    float4 nrm = gNormal.read(px);
+    float4 lgt = gLight.read(px);
+    float3 n = normalize(nrm.xyz);
+    float3 nWorld = normalize((fr.invView * float4(n, 0)).xyz);
+    float3 world = (fr.invView * float4(eye, 1)).xyz;
+    float3 v = normalize(-eye);
+    uint material = uint(lgt.z * 255.0 + 0.5);
+    Surface sf = surfaceAt(fr, alb, gSpec.read(px), lgt.w, material, lgt.y, world, nWorld, cloudNoise, rep);
+    float rough = sf.rough;
+    float lim = REFL_TUNE.y;
+    float smoothW = 1.0 - smoothstep(lim * 0.3, max(lim, 1e-3), rough);
+    if (smoothW <= 0.0) return float4(0.0);
+    float3 R = reflect(-v, n);
+    bool lobe = fr.taa.w > 0.5 && rough > 0.05;
+    int samples = lobe ? clamp(int(REFL_TUNE.z + 0.5), 1, 4) : 1;
+    float3 sum = float3(0.0);
+    float hits = 0.0;
+    for (int si = 0; si < samples; si++) {
+        float3 Rr = R;
+        if (lobe) {
+            float2 xi = hash22(in.position.xy + float(fr.flags.z % 256u) * float2(17.13, 7.31) + float(si) * float2(3.71, 9.13));
+            float ag = rough * rough;
+            float phi = 6.2831853 * xi.x;
+            float ct = sqrt((1.0 - xi.y) / (1.0 + (ag * ag - 1.0) * xi.y)), st = sqrt(1.0 - ct * ct);
+            float3 up = abs(n.z) < 0.999 ? float3(0, 0, 1) : float3(1, 0, 0);
+            float3 tx = normalize(cross(up, n)), ty = cross(n, tx);
+            float3 hv = normalize(tx * (st * cos(phi)) + ty * (st * sin(phi)) + n * ct);
+            Rr = reflect(-v, hv);
+            if (dot(Rr, n) <= 0.0) Rr = R;
+        }
+        float3 Rrw = normalize((fr.invView * float4(Rr, 0)).xyz);
+        float3 o = world + fr.rtCam.xyz + nWorld * (0.01 + length(eye) * 0.0002);
+        RtHit rh = rtClosest(tlas, rtInst, atlas, pointS, o, Rrw, RT_TUNE.x);
+        RtHit eh;
+        eh.hit = false;
+        if (fr.flags.x & ADV_RT_ENTITIES) eh = rtEntClosest(entAs, entV, entD, entT, o, Rrw, rh.t);
+        if (eh.hit || rh.hit) {
+            float3 traced = eh.hit ? rtEntShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, entV, entD, entT, eh, o, Rrw, smoothW > 0.5)
+                                   : rtShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, rh, o, Rrw, smoothW > 0.5);
+            float hd = length(Rrw * (eh.hit ? eh.t : rh.t) + world);
+            float hf = saturate((hd - fr.fog.x) / max(fr.fog.y - fr.fog.x, 1.0));
+            sum += mix(traced, skyBase(fr, skyLut, lin, Rrw), hf * hf);
+            hits += 1.0;
+        }
+    }
+    return float4(sum / float(samples), hits / float(samples));
+}
+
 fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                                constant AdvFrame& fr [[buffer(1)]],
                                texture2d<float> gAlbedo [[texture(0)]],
@@ -2150,6 +2229,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                                device atomic_uint* voxStats [[buffer(21)]],
                                texture2d<float> glassDepth [[texture(21)]], texture2d<float> glassColor [[texture(22)]],
                                texture3d<float> blockLightVol [[texture(23)]],
+                               texture2d<float> reflTex [[texture(24)]],
                                sampler cmp [[sampler(0)]], sampler lin [[sampler(1)]],
                                sampler rep [[sampler(3)]], sampler wrep [[sampler(4)]],
                                instance_acceleration_structure tlas [[buffer(10), function_constant(ac_rt)]],
@@ -2303,7 +2383,7 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
         if (waterPath > 0.0)
             color += albedo * (1.0 - metal) * underwaterInscatter(fr, skyLut, lin) * exp(-WATER_ABSORB.xyz * waterPath * 0.5) * 0.6 * ao;
         // reflections off: no mirror image, but metals keep an even sheen of the sky light
-        bool reflOn = REFL_TUNE.x > 0.5 || (ac_rt && (fr.flags.x & ADV_RT_REFL));
+        bool reflOn = REFL_TUNE.x > 0.5 || (fr.flags.x & ADV_RT_REFL);
         float3 refl = reflOn ? envCol * skyVis : skyAmbient(fr, skyLut, lin, nWorld) * skyVis;
         // surfaces smooth enough (rough reflections setting) reflect their surroundings, blurred
         // by their roughness (RT closest hit, or screen space into last frame's resolve with
@@ -2330,19 +2410,13 @@ fragment float4 light_fragment(FullscreenOut in [[stage_in]],
                 }
                 float3 Rrw = normalize((fr.invView * float4(Rr, 0)).xyz);
                 float3 traced = refl;   // the sky, where nothing is hit
-                if (ac_rt && (fr.flags.x & ADV_RT_REFL)) {
-                    float3 o = world + fr.rtCam.xyz + nWorld * (0.01 + length(eye) * 0.0002);
-                    RtHit rh = rtClosest(tlas, rtInst, atlas, pointS, o, Rrw, RT_TUNE.x);
-                    RtHit eh;
-                    eh.hit = false;
-                    if (fr.flags.x & ADV_RT_ENTITIES) eh = rtEntClosest(entAs, entV, entD, entT, o, Rrw, rh.t);
-                    if (eh.hit || rh.hit) {
-                        traced = eh.hit ? rtEntShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, entV, entD, entT, eh, o, Rrw, smoothW > 0.5)
-                                        : rtShade(fr, tlas, rtInst, atlas, pointS, skyLut, lin, rh, o, Rrw, smoothW > 0.5);
-                        float hd = length(Rrw * (eh.hit ? eh.t : rh.t) + world);
-                        float hf = saturate((hd - fr.fog.x) / max(fr.fog.y - fr.fog.x, 1.0));
-                        traced = mix(traced, skyBase(fr, skyLut, lin, Rrw), hf * hf);
-                    }
+                if (fr.flags.x & ADV_RT_REFL) {
+                    // traced in refl_trace_fragment (its own pass: keeps this one light): the mean
+                    // of the samples that hit something, and the share that did
+                    float4 rt = reflTex.read(px);
+                    traced = rt.rgb + (1.0 - rt.a) * refl;
+                    sum += traced * float(samples);
+                    break;
                 } else if (REFL_TUNE.x > 0.5) {
                     float3 hit = float3(0.0);
                     if (fr.taa.w > 0.5)

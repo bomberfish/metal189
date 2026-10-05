@@ -1,0 +1,23 @@
+sleep 3
+resourcepack Nostalgia PBR 1.2.0.zip | §bAVPBR-1-6-5.zip
+sleep 4
+fancy true
+world ref1 1234567
+waitWorld
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /gamerule doMobLoot false
+cmd /weather clear 100000
+cmd /time set 6000
+cmd /kill @e[type=!Player]
+cmd /tp @p 64 78 -32 135 10
+sleep 20
+fps 6 forest
+cmd /tp @p 64 90 -32 45 20
+sleep 6
+fps 6 view2
+cmd /tp @p 0 100 0 0 0
+sleep 8
+fps 6 view3
+capture /Users/hariz/metal189/captures/shaders_bench.png
+quit

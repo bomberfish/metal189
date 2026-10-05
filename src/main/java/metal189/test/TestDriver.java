@@ -357,6 +357,15 @@ public final class TestDriver {
                     mc.theWorld.getBlockState(eye).getBlock().getUnlocalizedName(), mc.theWorld.getChunkFromBlockCoords(eye).isLoaded());
                 return true;
             }
+            case "configget": {
+                // configget FIELD : log a metal189.config.Config value
+                try {
+                    Native.LOG.info("metal189-test configget {} = {}", a[1], metal189.config.Config.class.getField(a[1]).get(null));
+                } catch (Exception ex) {
+                    Native.LOG.warn("metal189-test: configget {}: {}", a[1], ex.toString());
+                }
+                return true;
+            }
             case "fancy":
                 // fancy true|false : fancy graphics (leaves, clouds) and reload the renderers
                 mc.gameSettings.fancyGraphics = Boolean.parseBoolean(a[1]);

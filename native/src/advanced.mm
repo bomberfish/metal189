@@ -81,6 +81,7 @@ struct Targets {
     int w = 0, h = 0;      // render resolution
     id<MTLTexture> albedo, normal, light, linZ, spec, hdr, sceneColor, sceneDepth, taa[2], vol, ao[2];
     id<MTLTexture> giSample, giHist[2], giZ[2], giBlur[2];
+    id<MTLTexture> reflTrace;   // ray-traced reflections (refl_trace_fragment)
     id<MTLTexture> renderDepth, motion;   // upscaling: the scene's own depth, motion vectors
     id<MTLTexture> guide[5];              // denoised upscaling: diffuse, specular, normal, roughness, mask
     int ow = 0, oh = 0;    // output resolution (Minecraft's framebuffer)
@@ -95,6 +96,7 @@ struct State {
     id<MTLTexture> glassDepth, glassColor;   // tinted translucents in light space: nearest depth, light let through
     int glassRes = 0;
     int waterShadowRes = 0;
+    id<MTLRenderPipelineState> reflTracePso = nil;
     id<MTLRenderPipelineState> lightPso[2], waterPso[2], tonemapPso, bloomDown, bloomUp, skyLutPso, taaPso, cloudsPso;
     // volumetric clouds
     id<MTLComputePipelineState> cloudNoiseKernel;
@@ -219,6 +221,8 @@ bool initState() {
     if (rtAvailable()) {
         ld.fragmentFunction = fn(@"light_fragment", false, false, true);
         S.lightPso[1] = pso(ld);
+        ld.fragmentFunction = fn(@"refl_trace_fragment");
+        S.reflTracePso = pso(ld);
     }
 
     {
@@ -462,6 +466,7 @@ void ensureTargets(int w, int h) {
     S.t.ao[0] = rt(MTLPixelFormatR16Float, (w + 1) / 2, (h + 1) / 2, @"rtao0");
     S.t.ao[1] = rt(MTLPixelFormatR16Float, (w + 1) / 2, (h + 1) / 2, @"rtao1");
     S.t.giSample = rt(MTLPixelFormatRGBA16Float, (w + 1) / 2, (h + 1) / 2, @"giSample");
+    S.t.reflTrace = rt(MTLPixelFormatRGBA16Float, w, h, @"reflTrace");
     for (int i = 0; i < 2; i++) {
         S.t.giHist[i] = rt(MTLPixelFormatRGBA16Float, (w + 1) / 2, (h + 1) / 2, @"giHistory");
         S.t.giZ[i] = rt(MTLPixelFormatR32Float, (w + 1) / 2, (h + 1) / 2, @"giDepth");
@@ -1262,10 +1267,46 @@ void advancedRender(id<MTLCommandBuffer> cb, const AdvWorld& w, id<MTLTexture> c
         rp.colorAttachments[0].texture = S.t.hdr;
         rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
         rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        // ray-traced reflections first, in their own pass (see refl_trace_fragment)
+        bool rtRefl = (features & ADV_RT_REFL) && S.reflTracePso;
+        if (!rtRefl) features &= ~ADV_RT_REFL;
+        fr.flags.x = features;
+        if (rtRefl) {
+            MTLRenderPassDescriptor* tp = [MTLRenderPassDescriptor renderPassDescriptor];
+            tp.colorAttachments[0].texture = S.t.reflTrace;
+            tp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+            tp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            profRender(tp, "reflections", true);
+            id<MTLRenderCommandEncoder> te = [cb renderCommandEncoderWithDescriptor:tp];
+            te.label = @"reflections";
+            [te setRenderPipelineState:S.reflTracePso];
+            [te setFragmentBytes:&fr length:sizeof fr atIndex:1];
+            [te setFragmentTexture:S.t.albedo atIndex:0];
+            [te setFragmentTexture:S.t.normal atIndex:1];
+            [te setFragmentTexture:S.t.light atIndex:2];
+            [te setFragmentTexture:depth atIndex:3];
+            [te setFragmentTexture:S.skyLut atIndex:5];
+            [te setFragmentTexture:S.t.linZ atIndex:6];
+            [te setFragmentTexture:S.cloudNoise atIndex:9];
+            [te setFragmentTexture:S.t.spec atIndex:10];
+            [te setFragmentSamplerState:S.linearClamp atIndex:1];
+            [te setFragmentSamplerState:S.repeatLinear atIndex:3];
+            TexEntry* atlasR = texture(w.atlasTex);
+            [te setFragmentAccelerationStructure:rts.tlas atBufferIndex:10];
+            [te setFragmentBuffer:rts.instances offset:0 atIndex:11];
+            [te setFragmentTexture:atlasR && atlasR->tex ? atlasR->tex : S.t.albedo atIndex:7];
+            [te setFragmentSamplerState:S.pointClamp atIndex:2];
+            if (rts.resources)
+                [te useResources:rts.resources->data() count:rts.resources->size() usage:MTLResourceUsageRead stages:MTLRenderStageFragment];
+            bindEntities(te);
+            [te drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            [te endEncoding];
+        }
         profRender(rp, "lighting", true);
         id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
         e.label = @"lighting";
-        bool rtLight = (features & (ADV_RT_SHADOW | ADV_RT_REFL)) != 0;
+        bool rtLight = (features & ADV_RT_SHADOW) != 0;
+        [e setFragmentTexture:rtRefl ? S.t.reflTrace : S.t.light atIndex:24];
         [e setRenderPipelineState:S.lightPso[rtLight ? 1 : 0]];
         [e setFragmentBytes:&fr length:sizeof fr atIndex:1];
         [e setFragmentTexture:S.t.albedo atIndex:0];

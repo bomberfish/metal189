@@ -1,0 +1,17 @@
+sleep 3
+resourcepack Nostalgia PBR 1.2.0.zip | §bAVPBR-1-6-5.zip
+sleep 4
+fancy true
+world ref1 1234567
+waitWorld
+cmd /gamerule doDaylightCycle false
+cmd /gamerule doMobSpawning false
+cmd /gamerule doMobLoot false
+cmd /weather clear 100000
+cmd /time set 6000
+cmd /kill @e[type=!Player]
+cmd /tp @p 64 78 -32 135 10
+sleep 20
+nativeopt 8 1
+fps 40 forest_sampled
+quit
